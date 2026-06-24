@@ -34,6 +34,11 @@
 (defn- read-yaml [file]
   (js->clj (yaml/load (fs/readFileSync file "utf8")) :keywordize-keys true))
 
+;; The contract is read string-keyed (no keywordize) so embedded JSON Schemas and
+;; example bodies round-trip faithfully — arbitrary property names stay strings.
+(defn- read-yaml-raw [file]
+  (js->clj (yaml/load (fs/readFileSync file "utf8"))))
+
 ;; --- recording state (record -> freeze handoff) ---------------------------
 
 (defn write-recording! [name m]
@@ -62,6 +67,34 @@
 
 (defn write-mock! [name m]
   (write-yaml! (path/join (scenario-dir name) "mock.yaml") m))
+
+;; --- contract (canonical source) ------------------------------------------
+
+(defn- contract-file [name] (path/join (scenario-dir name) "contract.yaml"))
+(defn- imposter-file [name] (path/join (scenario-dir name) "imposter.json"))
+
+(defn write-contract! [name contract]
+  (let [dir (scenario-dir name)]
+    (ensure-dir! dir)
+    (fs/writeFileSync (contract-file name) (yaml/dump (clj->js contract)))))
+
+(defn read-contract [name]
+  (let [file (contract-file name)]
+    (when (fs/existsSync file) (read-yaml-raw file))))
+
+(defn has-contract? [name]
+  (fs/existsSync (contract-file name)))
+
+(defn contract-stale?
+  "True when the contract should be (re)compiled: a contract exists and the
+   imposter artifact is missing or older than it. No contract -> never stale
+   (legacy imposter-only scenarios are left untouched)."
+  [name]
+  (let [cf (contract-file name) imf (imposter-file name)]
+    (and (fs/existsSync cf)
+         (or (not (fs/existsSync imf))
+             (> (.. (fs/statSync cf) -mtimeMs)
+                (.. (fs/statSync imf) -mtimeMs))))))
 
 (defn read-mock [name]
   (let [file (path/join (scenario-dir name) "mock.yaml")]
