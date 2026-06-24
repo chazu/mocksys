@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# mocksys — agent-native Mountebank wrapper.
+# Resolves the project root so the cljs entry is found regardless of cwd,
+# but runs from the *caller's* cwd so .mocks/ lands in their project.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec npx --prefix "$ROOT" nbb "$ROOT/src/mocksys/core.cljs" "$@"

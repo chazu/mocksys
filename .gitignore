@@ -1,0 +1,12 @@
+# deps
+node_modules/
+
+# mountebank logs from local runs
+*.log
+mb.pid
+
+# scenario bundles (shareable artifacts, not source)
+*.mock.tgz
+
+# local mock store, if MOCKSYS_HOME is pointed at the project
+.mocks/
