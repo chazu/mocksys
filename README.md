@@ -7,7 +7,7 @@ real interactions, strips the secrets and the volatile noise, names the result, 
 replays it offline. Built so an **agent** can stand up a faithful mock of an external
 system in a few commands, then assert against it like a test oracle.
 
-It's a thin, opinionated wrapper over [Mountebank](https://www.mbtest.org/): Mountebank
+It's a thin, opinionated wrapper over Mountebank: Mountebank
 is the runtime, kept entirely behind the CLI. You work in agent vocabulary —
 *service, scenario, fixture, matcher, fault, assertion* — never in imposters and stubs.
 
