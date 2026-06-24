@@ -139,4 +139,4 @@ modules: `mb` (admin-API client + daemon lifecycle), `store` (disk layout), `scr
 
 ## License
 
-None yet — add a `LICENSE` before depending on this externally.
+[MIT](LICENSE) © 2026 Chaz Straney

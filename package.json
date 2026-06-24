@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "description": "Agent-native CLI wrapping Mountebank: record real APIs into reusable mock fixtures",
   "private": true,
+  "license": "MIT",
   "bin": {
     "mocksys": "bin/mocksys"
   },
