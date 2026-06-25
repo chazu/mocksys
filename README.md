@@ -44,31 +44,36 @@ brew install chazu/mocksys/mocksys
 
 A self-contained binary; the formula provisions Mountebank (it only needs `node`).
 
-### From source (dev — interpreted, no build step)
-
-Requires **Node 18+** (for global `fetch`). Mountebank comes in as a dependency.
+### npm
 
 ```sh
-git clone https://github.com/chazu/mocksys.git
-cd mocksys
-npm install                 # pulls nbb, mountebank, js-yaml, swagger-parser, openapi-sampler
-./bin/mocksys help
-ln -s "$PWD/bin/mocksys" /usr/local/bin/mocksys   # optional
+npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 ```
 
+Requires **Node 18+** (for global `fetch`). Mountebank installs as a dependency.
 `mocksys` starts and stops the Mountebank daemon for you; you never run `mb` directly.
 Point `MOCKSYS_MB` at an `mb` executable to override how it's launched (otherwise it
 uses `mb` on your `PATH`, falling back to `npx mb`).
 
-## Build a binary
+## Develop / build
 
-`mocksys` is ClojureScript on [nbb](https://github.com/babashka/nbb) for dev, and the
-same source compiles to a standalone binary via **shadow-cljs** (AOT to JS) +
-**`bun build --compile`**. Needs a JVM (shadow-cljs) and [bun](https://bun.sh).
+`mocksys` is ClojureScript compiled with [shadow-cljs](https://github.com/thheller/shadow-cljs).
+Hacking on it needs **Node 18+** and a **JVM** (for shadow-cljs); installing it does not.
 
 ```sh
-npm run binary           # -> dist/mocksys (native)
-npm run binary all       # -> dist/mocksys-bun-{darwin,linux}-{arm64,x64}
+git clone https://github.com/chazu/mocksys.git
+cd mocksys
+npm install
+npm run watch               # recompiles out/mocksys.js on save (keep running)
+./bin/mocksys help          # node shim over the compiled output
+```
+
+One-shot build: `npm run build`. A standalone binary (no Node/JVM at runtime, but it
+still drives Mountebank externally) is produced with [bun](https://bun.sh):
+
+```sh
+npm run binary             # -> dist/mocksys (native)
+npm run binary all         # -> dist/mocksys-bun-{darwin,linux}-{arm64,x64}
 ```
 
 Cut a release (build matrix + tarballs + checksums + patch the Homebrew formula):
@@ -202,9 +207,10 @@ Run `mocksys prime` to drop the whole workflow into an agent's context.
 
 ## How it's built
 
-ClojureScript on [nbb](https://github.com/babashka/nbb) (interpreted, Node runtime —
-same runtime as Mountebank, instant startup, no build step). Focused modules: `mb`
-(admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
+ClojureScript compiled with [shadow-cljs](https://github.com/thheller/shadow-cljs) to a
+Node script (`out/mocksys.js`), shipped as prebuilt JS over npm and as a
+`bun build --compile` binary via Homebrew — same Node runtime as Mountebank. Focused
+modules: `mb` (admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
 (redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
 (the canonical source format — compile/lift/validate/example selection), `openapi`
 (spec import, via `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle`
