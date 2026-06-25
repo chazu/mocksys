@@ -8,13 +8,17 @@
     "mocksys": "bin/mocksys"
   },
   "scripts": {
-    "mb": "mb"
+    "mb": "mb",
+    "build": "shadow-cljs release cli",
+    "binary": "scripts/build-binary.sh",
+    "release": "scripts/release.sh"
   },
   "devDependencies": {
     "@apidevtools/swagger-parser": "^12.1.0",
     "js-yaml": "^4.1.0",
     "mountebank": "^2.9.1",
     "nbb": "^1.3.196",
-    "openapi-sampler": "^1.7.4"
+    "openapi-sampler": "^1.7.4",
+    "shadow-cljs": "^3.4.11"
   }
 }

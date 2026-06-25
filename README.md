@@ -36,22 +36,48 @@ Recording real traffic gives you a *blob*. mocksys turns it into a **reusable ca
 
 ## Install
 
+### Homebrew (standalone binary)
+
+```sh
+brew install chazu/mocksys/mocksys
+```
+
+A self-contained binary; the formula provisions Mountebank (it only needs `node`).
+
+### From source (dev — interpreted, no build step)
+
 Requires **Node 18+** (for global `fetch`). Mountebank comes in as a dependency.
 
 ```sh
 git clone https://github.com/chazu/mocksys.git
 cd mocksys
-npm install                 # pulls nbb, mountebank, js-yaml
-```
-
-Then run via the shim, and optionally put it on your `PATH`:
-
-```sh
+npm install                 # pulls nbb, mountebank, js-yaml, swagger-parser, openapi-sampler
 ./bin/mocksys help
 ln -s "$PWD/bin/mocksys" /usr/local/bin/mocksys   # optional
 ```
 
 `mocksys` starts and stops the Mountebank daemon for you; you never run `mb` directly.
+Point `MOCKSYS_MB` at an `mb` executable to override how it's launched (otherwise it
+uses `mb` on your `PATH`, falling back to `npx mb`).
+
+## Build a binary
+
+`mocksys` is ClojureScript on [nbb](https://github.com/babashka/nbb) for dev, and the
+same source compiles to a standalone binary via **shadow-cljs** (AOT to JS) +
+**`bun build --compile`**. Needs a JVM (shadow-cljs) and [bun](https://bun.sh).
+
+```sh
+npm run binary           # -> dist/mocksys (native)
+npm run binary all       # -> dist/mocksys-bun-{darwin,linux}-{arm64,x64}
+```
+
+Cut a release (build matrix + tarballs + checksums + patch the Homebrew formula):
+
+```sh
+scripts/release.sh v0.1.0 --publish   # also creates the GitHub release via gh
+```
+
+The Homebrew tap lives in `packaging/homebrew/` — see its README for publishing.
 
 ## The core loop
 

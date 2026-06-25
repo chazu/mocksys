@@ -784,4 +784,15 @@
           (p/resolved (do (println "unknown command:" cmd) (usage))))
         (p/catch (fn [err] (die (.-message err)))))))
 
-(apply -main *command-line-args*)
+(defn- cli-args
+  "User args from process.argv. Both `node script.js a b` and a bun-compiled
+   binary `mocksys a b` expose argv as [runtime script-or-vpath ...args] — bun keeps
+   a virtual script path (/$bunfs/root/mocksys) at argv[1] — so drop the first two."
+  []
+  (let [argv (vec (.-argv js/process))]
+    (if (>= (count argv) 2) (subvec argv 2) [])))
+
+(defn ^:export main
+  "Entry point for shadow-cljs and the compiled binary (nbb uses mocksys.cli)."
+  [& _]
+  (apply -main (cli-args)))

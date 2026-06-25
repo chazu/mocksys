@@ -36,12 +36,30 @@
       (p/then (constantly true))
       (p/catch (constantly false))))
 
+(defn- on-path?
+  "Whether `cmd` resolves on PATH (POSIX `command -v`)."
+  [cmd]
+  (zero? (.-status (cp/spawnSync "sh" #js ["-c" (str "command -v " cmd)]
+                                 #js {:stdio "ignore"}))))
+
+(defn mb-launcher
+  "How to start mountebank, as [cmd extra-args]:
+     $MOCKSYS_MB (a path/command) if set  ->  use it directly
+     else `mb` on PATH (e.g. a Homebrew install)
+     else `npx mb` (node_modules / on-demand fetch — the dev/npm path)."
+  []
+  (let [env (.-MOCKSYS_MB js/process.env)]
+    (cond
+      (and env (not= env "")) [env []]
+      (on-path? "mb")         ["mb" []]
+      :else                   ["npx" ["mb"]])))
+
 (defn- spawn-daemon! []
-  ;; `mb start` double-forks into a backgrounded daemon and returns; the npx
-  ;; child we spawn just triggers it, so we detach + unref and poll for readiness.
-  (let [child (.spawn cp "npx"
-                      #js ["mb" "start" "--port" (str admin-port)]
-                      #js {:detached true :stdio "ignore"})]
+  ;; `mb start` double-forks into a backgrounded daemon and returns; the child we
+  ;; spawn just triggers it, so we detach + unref and poll for readiness.
+  (let [[cmd extra] (mb-launcher)
+        args  (concat extra ["start" "--port" (str admin-port)])
+        child (.spawn cp cmd (clj->js args) #js {:detached true :stdio "ignore"})]
     (.unref child)))
 
 (defn- wait-up [tries]

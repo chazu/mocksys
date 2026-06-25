@@ -4,4 +4,4 @@
 # but runs from the *caller's* cwd so .mocks/ lands in their project.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec npx --prefix "$ROOT" nbb "$ROOT/src/mocksys/core.cljs" "$@"
+exec npx --prefix "$ROOT" nbb "$ROOT/src/mocksys/cli.cljs" "$@"
