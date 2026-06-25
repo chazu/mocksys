@@ -37,7 +37,7 @@ class Mocksys < Formula
 
     # Provision Mountebank (+ its deps) alongside, so mocksys never has to fetch it.
     # (std_npm_args is for a formula's own package.json; here we vendor a separate pkg.)
-    system "npm", "install", "--prefix", libexec, "mountebank@2.9.1" # rubocop:disable FormulaAudit/StdNpmArgs
+    system "npm", "install", "--prefix", libexec, "mountebank@2.9.1"
 
     # Wrapper points mocksys at the bundled mb and keeps the user's cwd (so .mocks/
     # and $MOCKSYS_HOME resolve in their project, not here).
