@@ -1,7 +1,7 @@
 class Mocksys < Formula
   desc "Agent-native CLI that turns real API traffic into reusable, scrubbed mock fixtures"
   homepage "https://github.com/chazu/mocksys"
-  version "0.0.1"
+  version "0.1.0"
   license "MIT"
 
   # mocksys is a self-contained binary, but it drives Mountebank as an external
@@ -11,23 +11,23 @@ class Mocksys < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/chazu/mocksys/releases/download/v0.0.1/mocksys-darwin-arm64.tar.gz"
-      sha256 "REPLACE_WITH_DARWIN_ARM64_SHA256"
+      url "https://github.com/chazu/mocksys/releases/download/v0.1.0/mocksys-darwin-arm64.tar.gz"
+      sha256 "29a58c7cc460f6a26b424ecd9c1ad4a895484e9f090debd8753ab7969732fcd8"
     end
     on_intel do
-      url "https://github.com/chazu/mocksys/releases/download/v0.0.1/mocksys-darwin-x64.tar.gz"
-      sha256 "REPLACE_WITH_DARWIN_X64_SHA256"
+      url "https://github.com/chazu/mocksys/releases/download/v0.1.0/mocksys-darwin-x64.tar.gz"
+      sha256 "2de6bd6729fa0bb0e965883b98905e87195fff9f9d8c9a90ecdfd48b68c41aa7"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/chazu/mocksys/releases/download/v0.0.1/mocksys-linux-arm64.tar.gz"
-      sha256 "REPLACE_WITH_LINUX_ARM64_SHA256"
+      url "https://github.com/chazu/mocksys/releases/download/v0.1.0/mocksys-linux-arm64.tar.gz"
+      sha256 "e3899399a95d5163984488cb30ecd3447c015120ab32fc89dd1aeec7f2fba4f3"
     end
     on_intel do
-      url "https://github.com/chazu/mocksys/releases/download/v0.0.1/mocksys-linux-x64.tar.gz"
-      sha256 "REPLACE_WITH_LINUX_X64_SHA256"
+      url "https://github.com/chazu/mocksys/releases/download/v0.1.0/mocksys-linux-x64.tar.gz"
+      sha256 "ba8f5306f4ff757bb277fa4a1d2173b27ec86f7a4b0701044afb575b20dc69a2"
     end
   end
 
