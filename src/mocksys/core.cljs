@@ -785,14 +785,16 @@
         (p/catch (fn [err] (die (.-message err)))))))
 
 (defn- cli-args
-  "User args from process.argv. Both `node script.js a b` and a bun-compiled
-   binary `mocksys a b` expose argv as [runtime script-or-vpath ...args] — bun keeps
-   a virtual script path (/$bunfs/root/mocksys) at argv[1] — so drop the first two."
+  "User args from process.argv. The node bin shim (`node bin/mocksys a b`) and a
+   bun-compiled binary (`mocksys a b`) both expose argv as [runtime script-or-vpath
+   ...args] — bun keeps a virtual script path (/$bunfs/root/mocksys) at argv[1] — so
+   drop the first two."
   []
   (let [argv (vec (.-argv js/process))]
     (if (>= (count argv) 2) (subvec argv 2) [])))
 
 (defn ^:export main
-  "Entry point for shadow-cljs and the compiled binary (nbb uses mocksys.cli)."
+  "Entry point: shadow-cljs sets this as :main, so it runs on load of out/mocksys.js
+   (both the node bin shim and the bun binary go through here)."
   [& _]
   (apply -main (cli-args)))

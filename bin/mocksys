@@ -1,7 +1,14 @@
-#!/usr/bin/env bash
-# mocksys — agent-native Mountebank wrapper.
-# Resolves the project root so the cljs entry is found regardless of cwd,
-# but runs from the *caller's* cwd so .mocks/ lands in their project.
-set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec npx --prefix "$ROOT" nbb "$ROOT/src/mocksys/cli.cljs" "$@"
+#!/usr/bin/env node
+"use strict";
+// mocksys CLI shim — runs the shadow-cljs-compiled entry (out/mocksys.js).
+// Resolves relative to this file's real path, so it works when symlinked onto PATH
+// or installed via npm. process.cwd() is the caller's dir, so .mocks/ and
+// $MOCKSYS_HOME land in their project. Build first: `npm run build` (or `npm run watch`).
+const path = require("node:path");
+const fs = require("node:fs");
+const entry = path.join(__dirname, "..", "out", "mocksys.js");
+if (!fs.existsSync(entry)) {
+  console.error("mocksys: not built yet — run `npm run build` (or `npm run watch` for dev).");
+  process.exit(1);
+}
+require(entry);

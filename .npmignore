@@ -1,0 +1,13 @@
+# Present so npm does NOT fall back to .gitignore (which excludes out/, our shipped
+# build artifact). The `files` whitelist in package.json governs what's included;
+# this just trims dev/build cruft and keeps out/ in the tarball.
+.shadow-cljs/
+.cpcache/
+dist/
+scripts/
+packaging/
+PLAN.md
+*.mock.tgz
+*.log
+mb.pid
+.mocks/
