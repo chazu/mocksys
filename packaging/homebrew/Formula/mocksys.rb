@@ -1,5 +1,5 @@
 class Mocksys < Formula
-  desc "Agent-native CLI that turns real API traffic into reusable, scrubbed mock fixtures"
+  desc "Agent-native CLI that turns real API traffic into reusable mock fixtures"
   homepage "https://github.com/chazu/mocksys"
   version "0.1.0"
   license "MIT"
@@ -36,7 +36,8 @@ class Mocksys < Formula
     libexec.install "mocksys"
 
     # Provision Mountebank (+ its deps) alongside, so mocksys never has to fetch it.
-    system "npm", "install", "--prefix", libexec, "mountebank@2.9.1"
+    # (std_npm_args is for a formula's own package.json; here we vendor a separate pkg.)
+    system "npm", "install", "--prefix", libexec, "mountebank@2.9.1" # rubocop:disable FormulaAudit/StdNpmArgs
 
     # Wrapper points mocksys at the bundled mb and keeps the user's cwd (so .mocks/
     # and $MOCKSYS_HOME resolve in their project, not here).
