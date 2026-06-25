@@ -1,0 +1,9 @@
+;; shadow-cljs build for the standalone binary path.
+;; Dev still uses nbb (bin/mocksys -> src/mocksys/cli.cljs); this AOT-compiles the
+;; same source to a single Node script that `bun build --compile` turns into a binary.
+{:source-paths ["src"]
+ :dependencies [[funcool/promesa "11.0.678"]]
+ :builds
+ {:cli {:target     :node-script
+        :main       mocksys.core/main
+        :output-to  "out/mocksys.js"}}}

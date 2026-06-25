@@ -20,6 +20,8 @@
             [mocksys.scrub :as scrub]
             [mocksys.analyze :as analyze]
             [mocksys.service :as service]
+            [mocksys.contract :as contract]
+            [mocksys.openapi :as openapi]
             [mocksys.bundle :as bundle]
             [mocksys.git :as git]))
 
@@ -43,6 +45,48 @@
 (defn- die [msg]
   (binding [*print-fn* *print-err-fn*] (println "error:" msg))
   (js/process.exit 1))
+
+;; --- contract lifecycle ---------------------------------------------------
+;; The contract is canonical; the imposter is a build artifact. `compile!` lowers
+;; one to the other; `ensure-contract!` lifts a legacy/recorded imposter into a
+;; contract on demand; `ensure-compiled!` rebuilds a stale artifact transparently.
+
+(defn compile!
+  "Lower a scenario's contract to imposter.json and refresh mock.yaml. Returns the
+   imposter. Carries the prior artifact's port so a running mock keeps its slot."
+  [scenario]
+  (let [contract* (store/read-contract scenario)
+        port      (when (store/exists? scenario)
+                    (try (get (store/read-imposter scenario) "port") (catch :default _ nil)))
+        imposter  (contract/lower contract* port)
+        prof      (service/effective scenario)]
+    (store/write-imposter! scenario imposter)
+    (store/write-mock! scenario (merge (or (store/read-mock scenario) {})
+                                       {:scenario scenario
+                                        :service  (:service prof)
+                                        :port     port
+                                        :env      (:env prof)
+                                        :origin   (get contract* "origin")
+                                        :stubs    (count (get imposter "stubs"))}))
+    imposter))
+
+(defn ensure-contract!
+  "The scenario's contract, lifting one from a recorded/legacy imposter if none
+   exists yet. nil when there's nothing to work from."
+  [scenario]
+  (or (store/read-contract scenario)
+      (when (store/exists? scenario)
+        (let [prof (service/effective scenario)
+              c    (contract/lift (store/read-imposter scenario) scenario (:service prof))]
+          (store/write-contract! scenario c)
+          c))))
+
+(defn ensure-compiled!
+  "Recompile imposter.json when the contract is newer (or the artifact is missing).
+   No-op for legacy imposter-only scenarios (no contract -> never stale)."
+  [scenario]
+  (when (store/contract-stale? scenario)
+    (compile! scenario)))
 
 ;; --- commands -------------------------------------------------------------
 
@@ -82,9 +126,13 @@
               {:keys [imposter stub-count redacted stripped]}
               (scrub/scrub-imposter raw (:redact prof) (:volatile prof))]
         (store/write-imposter! scenario imposter)
+        ;; Recorded scenarios are contract-canonical too: lift the scrubbed imposter
+        ;; into a contract so `examples`/`use`/`fault` work on it like any other.
+        (store/write-contract! scenario (contract/lift imposter scenario (:service prof)))
         (store/write-mock! scenario {:scenario scenario
                                      :service  (:service prof)
                                      :port     port
+                                     :origin   "recorded"
                                      :stubs    stub-count
                                      :env      (:env prof)
                                      :redacted (vec (sort redacted))
@@ -120,6 +168,7 @@
 (defn cmd-run [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "run needs a scenario: run <name>"))
+    (ensure-compiled! scenario)
     (let [prof (service/effective scenario)]
       (p/let [port (ensure-running! scenario (:port opts))]
         (println (str "▶ running '" scenario "' at http://localhost:" port))
@@ -132,6 +181,7 @@
   [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "env needs a scenario: env <name>"))
+    (ensure-compiled! scenario)
     (let [prof (service/effective scenario)]
       (p/let [port (ensure-running! scenario (:port opts))]
         (doseq [v (env-vars-for scenario opts prof)]
@@ -144,6 +194,7 @@
 (defn cmd-inspect [{:keys [pos]}]
   (let [scenario (first pos)]
     (when-not scenario (die "inspect needs a scenario: inspect <name>"))
+    (ensure-compiled! scenario)
     (let [imposter (store/read-imposter scenario)
           prof     (service/effective scenario)
           stubs    (analyze/summarize imposter (:volatile prof))
@@ -171,6 +222,7 @@
 (defn cmd-doctor [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "doctor needs a scenario: doctor <name>"))
+    (ensure-compiled! scenario)
     (let [imposter (store/read-imposter scenario)
           prof     (service/effective scenario)
           stubs    (analyze/summarize imposter (:volatile prof))
@@ -293,19 +345,119 @@
                 (println (str "■ stopped '" scenario "' (port " (:port imp) ")")))
           (println (str "'" scenario "' is not running")))))))
 
-;; --- v0.3 authoring -------------------------------------------------------
+;; --- contract authoring (import / compile / new / validate / examples / use) ---
 
-(defn- save-imposter!
-  "Persist an imposter and refresh its mock.yaml metadata (stub count, etc.)."
-  [scenario imposter]
-  (store/write-imposter! scenario imposter)
-  (let [prof (service/effective scenario)
-        prev (or (store/read-mock scenario) {})]
-    (store/write-mock! scenario (merge prev {:scenario scenario
-                                             :service  (:service prof)
-                                             :port     (get imposter "port")
-                                             :env      (:env prof)
-                                             :stubs    (count (get imposter "stubs"))}))))
+(defn cmd-import
+  "Seed scenarios from an OpenAPI/Swagger spec — one per operation, schema + named
+   examples, plus a synthesized service profile:
+     import openapi <spec> [--service NAME] [--target URL]"
+  [{:keys [pos opts]}]
+  (let [kind (first pos)
+        spec (second pos)]
+    (when-not (= kind "openapi")
+      (die "import supports: import openapi <spec> [--service NAME] [--target URL]"))
+    (when-not spec (die "import openapi needs a spec file: import openapi <spec.yaml|json|url>"))
+    (p/let [{:keys [service template scenarios]}
+            (openapi/parse-spec spec {:service (when (string? (:service opts)) (:service opts))
+                                      :target  (when (string? (:target opts)) (:target opts))})]
+      (when (empty? scenarios) (die (str "no operations found in " spec)))
+      (store/write-service! service template)
+      (doseq [{:keys [scenario contract]} scenarios]
+        (store/write-contract! scenario contract)
+        (compile! scenario))
+      (println (str "⇣ imported " (count scenarios) " operation(s) into service '" service "'"))
+      (when (:default_target template) (println (str "  target: " (:default_target template))))
+      (when (seq (:redact_headers template))
+        (println (str "  redacting: " (str/join ", " (:redact_headers template)))))
+      (doseq [{:keys [scenario]} scenarios] (println (str "  · " scenario)))
+      (println)
+      (println (str "  run one:       mocksys run " (:scenario (first scenarios))))
+      (println (str "  pick examples: mocksys examples " (:scenario (first scenarios)))))))
+
+(defn cmd-compile
+  "Rebuild imposter.json from contract.yaml (normally automatic on `run`):
+     compile <scenario>"
+  [{:keys [pos]}]
+  (let [scenario (first pos)]
+    (when-not scenario (die "compile needs a scenario: compile <name>"))
+    (if (ensure-contract! scenario)
+      (let [imposter (compile! scenario)]
+        (println (str "⚙ compiled '" scenario "' — " (count (get imposter "stubs")) " stub(s)")))
+      (die (str "no contract for '" scenario "' — `new`, `add`, `import`, or `record`+`freeze` it first")))))
+
+(defn cmd-new
+  "Scaffold a blank contract to hand-author after reading API docs/source:
+     new <service/name> [--service S]"
+  [{:keys [pos opts]}]
+  (let [scenario (first pos)]
+    (when-not scenario (die "new needs a scenario: new <service/name>"))
+    (when (store/has-contract? scenario)
+      (die (str "'" scenario "' already has a contract — edit it or `compile` it")))
+    (let [svc (or (when (string? (:service opts)) (:service opts)) (service/service-of scenario))]
+      (store/write-contract! scenario (contract/scaffold scenario svc))
+      (compile! scenario)
+      (println (str "✚ scaffolded '" scenario "'"))
+      (println (str "  edit:    " store/root "/" scenario "/contract.yaml"))
+      (println (str "  then:    mocksys validate " scenario "  &&  mocksys run " scenario)))))
+
+(defn cmd-validate
+  "Structurally check a contract and flag examples that diverge from their schema:
+     validate <scenario>   (exit 1 on errors)"
+  [{:keys [pos]}]
+  (let [scenario (first pos)]
+    (when-not scenario (die "validate needs a scenario: validate <name>"))
+    (let [c (or (ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
+          {:keys [errors warnings]} (contract/validate c)]
+      (println (str "# validate: " scenario))
+      (doseq [w warnings] (println (str "  ⚠ " w)))
+      (doseq [e errors]   (println (str "  ✗ " e)))
+      (when (and (empty? errors) (empty? warnings))
+        (println (str "  ✓ valid — " (count (get c "operations")) " operation(s)")))
+      (when (seq errors)
+        (binding [*print-fn* *print-err-fn*] (println (str (count errors) " error(s)")))
+        (js/process.exit 1)))))
+
+(defn cmd-examples
+  "List a contract's operations, responses and which examples are in play:
+     examples <scenario> [--op ID]"
+  [{:keys [pos opts]}]
+  (let [scenario (first pos)]
+    (when-not scenario (die "examples needs a scenario: examples <name> [--op ID]"))
+    (let [c  (or (ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
+          op (when (string? (:op opts)) (:op opts))
+          rows (contract/examples-overview c op)]
+      (println (str "# examples: " scenario))
+      (doseq [{:keys [id method path responses]} rows]
+        (println (str "  " id "  (" method " " path ")"))
+        (doseq [{:keys [status schema? examples]} responses]
+          (println (str "    " status (when schema? "  [schema]")))
+          (doseq [{:keys [name select]} examples]
+            (println (str "      " (if select "[x]" "[ ]") " " name)))))
+      (println)
+      (println (str "  toggle:  mocksys use " scenario " --op ID --example NAME [--only|--off]")))))
+
+(defn cmd-use
+  "Choose which example(s) are in play for an operation (selected examples become
+   the mock's responses; `--only` swaps, e.g. happy -> error):
+     use <scenario> --op ID --example NAME [--off] [--only]"
+  [{:keys [pos opts]}]
+  (let [scenario (first pos)
+        op       (:op opts)
+        ex       (:example opts)]
+    (when-not scenario (die "use needs a scenario: use <name> --op ID --example NAME"))
+    (when-not (string? op)  (die "use needs --op ID  (see `examples <name>`)"))
+    (when-not (string? ex)  (die "use needs --example NAME  (see `examples <name>`)"))
+    (let [c (or (ensure-contract! scenario) (die (str "no contract for '" scenario "'")))]
+      (when (empty? (contract/example-locations c op ex))
+        (die (str "no example '" ex "' on operation '" op "' — see `examples " scenario "`")))
+      (let [on?  (not (:off opts))
+            c'   (contract/set-selection c op ex on? (boolean (:only opts)))]
+        (store/write-contract! scenario c')
+        (compile! scenario)
+        (println (str (if on? "✓ selected" "✓ deselected") " " ex " on " op
+                      (when (:only opts) " (only)") " in '" scenario "'"))))))
+
+;; --- authoring: add / fault / parameterize (all edit the contract) --------
 
 (defn- body-value
   "Resolve a response body from --body FILE (parsed as JSON when possible) or
@@ -318,17 +470,8 @@
     (:text opts) [(:text opts) false]
     :else        [nil nil]))
 
-(defn- build-stub [method path status body json?]
-  {"predicates" [{"deepEquals" {"method" (str/upper-case method)}}
-                 {"deepEquals" {"path" path}}]
-   "responses"  [{"is" (cond-> {"statusCode" status}
-                         (some? body) (assoc "headers" {"Content-Type" (if json?
-                                                                         "application/json"
-                                                                         "text/plain")}
-                                             "body" body))}]})
-
 (defn cmd-add
-  "Hand-author an endpoint without recording:
+  "Hand-author an endpoint (appends an operation to the contract, then compiles):
      add <scenario> --request 'METHOD /path' [--status N] [--body FILE | --text STR]"
   [{:keys [pos opts]}]
   (let [scenario (first pos)
@@ -338,96 +481,68 @@
     (let [[method path] (str/split (str/trim request) #"\s+" 2)
           status        (js/parseInt (or (:status opts) 200))
           [body json?]  (body-value opts)
-          stub          (build-stub method path status body json?)]
-      (p/let [imposter (if (store/exists? scenario)
-                         (store/read-imposter scenario)
-                         (p/let [port (mb/free-port)]
-                           {"protocol" "http" "port" port "stubs" []}))]
-        (save-imposter! scenario (update imposter "stubs" (fnil conj []) stub))
+          existing      (ensure-contract! scenario)
+          svc           (service/service-of scenario)
+          c             (contract/add-operation existing scenario svc method path status body json?)]
+      (store/write-contract! scenario c)
+      (let [imposter (compile! scenario)]
         (println (str "✚ added " (str/upper-case method) " " path " -> " status
-                      " to '" scenario "'  (" (inc (count (get imposter "stubs"))) " stub(s))"))))))
-
-(defn- apply-fault [resp opts]
-  (cond
-    (:drop-connection opts) {"fault" "CONNECTION_RESET_BY_PEER"}
-    (:malformed-json opts)  {"fault" "RANDOM_DATA_THEN_CLOSE"}
-    :else
-    (let [is   (cond-> (get resp "is" {})
-                 (:status opts) (assoc "statusCode" (js/parseInt (:status opts))))
-          wait (cond (:timeout opts)  120000
-                     (:latency opts)  (js/parseInt (:latency opts)))]
-      (cond-> (assoc resp "is" is)
-        wait (assoc "behaviors" [{"wait" wait}])))))
+                      " to '" scenario "'  (" (count (get imposter "stubs")) " operation(s))"))))))
 
 (defn cmd-fault
-  "Degrade a scenario's responses in place:
-     fault <scenario> [--status N] [--latency MS] [--timeout] [--drop-connection] [--malformed-json]
-   Mutates the fixture — copy/pack first if you want to keep the golden one."
+  "Layer a transport fault onto a scenario, stored on the contract so it survives
+   recompiles. --clear removes it:
+     fault <scenario> [--status N] [--latency MS] [--timeout] [--drop-connection] [--malformed-json] [--clear]"
   [{:keys [pos opts]}]
   (let [scenario (first pos)
         knobs    (select-keys opts [:status :latency :timeout :drop-connection :malformed-json])]
-    (when-not scenario (die "fault needs a scenario: fault <name> --status N | --latency MS | ..."))
-    (when (empty? knobs) (die "fault needs at least one of --status --latency --timeout --drop-connection --malformed-json"))
-    (let [imposter (store/read-imposter scenario)
-          faulted  (update imposter "stubs"
-                           (fn [stubs]
-                             (mapv #(update % "responses"
-                                            (fn [rs] (mapv (fn [r] (apply-fault r opts)) rs)))
-                                   stubs)))]
-      (save-imposter! scenario faulted)
-      (println (str "⚡ faulted '" scenario "' — "
-                    (str/join ", " (map name (keys knobs))) " applied to all stubs")))))
-
-(defn- template->regex-str
-  "`/repos/{owner}/{repo}/issues` -> ^/repos/[^/]+/[^/]+/issues$"
-  [t]
-  (let [sentinel " "]
-    (str "^" (-> t
-                 (str/replace #"\{[^}]+\}" sentinel)
-                 (str/replace #"[.+?^${}()|\[\]\\]" "\\\\$&")
-                 (str/replace sentinel "[^/]+"))
-         "$")))
-
-(defn- pred-path [stub]
-  (some (fn [pred] (some #(get % "path") (vals pred))) (get stub "predicates")))
+    (when-not scenario (die "fault needs a scenario: fault <name> --status N | --latency MS | --clear"))
+    (when (and (empty? knobs) (not (:clear opts)))
+      (die "fault needs one of --status --latency --timeout --drop-connection --malformed-json (or --clear)"))
+    (let [c     (or (ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
+          fault (if (:clear opts)
+                  {}
+                  (merge (get c "fault") (into {} (map (fn [[k v]] [(name k) v]) knobs))))
+          c'    (assoc c "fault" fault)]
+      (store/write-contract! scenario c')
+      (compile! scenario)
+      (if (:clear opts)
+        (println (str "cleared fault on '" scenario "'"))
+        (println (str "faulted '" scenario "' - " (str/join ", " (map name (keys knobs))) " (all operations)"))))))
 
 (defn cmd-parameterize
-  "Loosen exact path matches to a template so a fixture serves any owner/repo/id:
+  "Loosen an operation's exact path to a {param} template so it serves any id; the
+   contract compiles templated paths to regex predicates automatically:
      parameterize <scenario> --path '/repos/{owner}/{repo}/issues'"
   [{:keys [pos opts]}]
   (let [scenario (first pos)
         tmpl     (:path opts)]
     (when-not scenario (die "parameterize needs a scenario: parameterize <name> --path '/a/{x}/b'"))
     (when-not (string? tmpl) (die "parameterize needs --path '/template/{with}/{vars}'"))
-    (let [re-str   (template->regex-str tmpl)
-          re       (re-pattern re-str)
-          imposter (store/read-imposter scenario)
-          changed  (atom 0)
-          updated  (update imposter "stubs"
-                           (fn [stubs]
-                             (mapv (fn [stub]
-                                     (let [path (pred-path stub)]
-                                       (if (and path (re-matches re path))
-                                         (do (swap! changed inc)
-                                             (update stub "predicates"
-                                                     (fn [preds]
-                                                       (mapv (fn [pred]
-                                                               (if (some #(contains? % "path") (vals pred))
-                                                                 {"matches" {"path" re-str}}
-                                                                 pred))
-                                                             preds))))
-                                         stub)))
-                                   stubs)))]
+    (let [c       (or (ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
+          re      (re-pattern (contract/path->regex tmpl))
+          changed (atom 0)
+          c'      (update c "operations"
+                          (fn [ops]
+                            (mapv (fn [op]
+                                    (let [path (get-in op ["request" "path"])]
+                                      (if (and path (not= path tmpl) (re-matches re path))
+                                        (do (swap! changed inc)
+                                            (assoc-in op ["request" "path"] tmpl))
+                                        op)))
+                                  ops)))]
       (if (zero? @changed)
-        (println (str "no stubs matched " tmpl " — nothing parameterized"))
-        (do (save-imposter! scenario updated)
-            (println (str "❮❯ parameterized " @changed " stub(s) in '" scenario "' to " tmpl)))))))
+        (println (str "no operations matched " tmpl " - nothing parameterized"))
+        (do (store/write-contract! scenario c')
+            (compile! scenario)
+            (println (str "parameterized " @changed " operation(s) in '" scenario "' to " tmpl)))))))
 
 ;; --- v0.3 bundles ---------------------------------------------------------
 
 (defn cmd-pack [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "pack needs a scenario: pack <name> [--out FILE] | --stdout > file"))
+    (ensure-compiled! scenario)
     ;; Default to a file (predictable for agents, who always run non-TTY); stream
     ;; the raw archive to stdout only when --stdout is explicitly requested.
     (if (:stdout opts)
@@ -475,6 +590,56 @@
   (git/pull!)
   (println (str "✔ pulled from remote  (" (count (store/list-scenarios)) " scenario(s) now in store)")))
 
+(defn cmd-rm
+  "Remove a scenario or a whole service from the store (stops it if live; commits
+   the removal in a git store):  rm <scenario|service>"
+  [{:keys [pos]}]
+  (let [id (first pos)]
+    (when-not id (die "rm needs a scenario or service: rm <name>  (e.g. github/create-issue or github)"))
+    (p/let [live (mb/list-imposters)]
+      (doseq [imp (filter #(let [n (str (:name %))]
+                             (or (= n id) (str/starts-with? n (str id "/")))) live)]
+        (mb/delete-imposter! (:port imp)))
+      (let [res (git/remove! id)]
+        (println (str "🗑 removed '" id "' from the store"
+                      (when (= res :committed) " (committed)")))))))
+
+(defn- status-word [state]
+  (case state "??" "untracked" "A" "added" "M" "modified" "D" "deleted" "R" "renamed" state))
+
+(defn cmd-status
+  "Show uncommitted changes in the store (which scenarios are new/edited/removed)."
+  [_]
+  (let [files (git/changed-files)]
+    (cond
+      (nil? files)   (println "store is not a git repo yet — `mocksys publish` will init it")
+      (empty? files) (println (str "store is clean — nothing to publish  (" store/root ")"))
+      :else
+      (do (println (str (count files) " uncommitted change(s) in " store/root ":"))
+          (doseq [{:keys [state path]} files]
+            (println (str "  " (status-word state) ": " path)))
+          (println)
+          (println "  record them:  mocksys publish [<name>]")))))
+
+(defn cmd-log
+  "Recent store history:  log [--n N]"
+  [{:keys [opts]}]
+  (let [n (if (string? (:n opts)) (js/parseInt (:n opts)) 20)]
+    (if-let [l (git/log n)]
+      (do (println (str "# last " n " change(s) — " store/root))
+          (println l))
+      (println "store has no history yet — `mocksys publish` will init it"))))
+
+(defn cmd-restore
+  "Discard uncommitted local changes (revert edits, drop new files):
+     restore <name>   (or restore --all for the whole store)"
+  [{:keys [pos opts]}]
+  (let [id (first pos)]
+    (when-not (or id (:all opts))
+      (die "restore needs a scenario/service (or --all): restore <name> | restore --all"))
+    (git/restore! id)
+    (println (str "↩ restored " (or id "the whole store") " to the last committed state"))))
+
 ;; --- prime: orient an agent ----------------------------------------------
 
 (defn cmd-prime [_]
@@ -500,9 +665,21 @@
      "  # point your code at $GITHUB_API_URL, run it, then assert what it called:"
      "  mocksys assert github/create-issue --saw 'POST /repos/*/issues'   # exit 1 on miss"
      ""
-     "## Author without recording (failure modes, edge cases)"
+     "## Author from a spec / docs / source (no recording)"
+     "The canonical source is contract.yaml; imposter.json is a build artifact that"
+     "`run` recompiles automatically. Three ways to get a contract:"
+     "  mocksys import openapi ./openapi.yaml --service stripe   # one scenario per operation"
+     "  mocksys new acme/get-widget                              # scaffold, then edit contract.yaml"
+     "  mocksys add acme/get-widget --request 'GET /widgets/1' --status 200 --body w.json"
+     "Each operation keeps its schema plus *named examples* you select to serve:"
+     "  mocksys examples stripe/create-charge                    # list examples, [x]=in play"
+     "  mocksys use stripe/create-charge --op createCharge --example card_declined --only"
+     "  mocksys validate stripe/create-charge                    # schema/structure check"
+     "  mocksys compile stripe/create-charge                     # (usually automatic on run)"
+     ""
+     "## Failure modes & edge cases"
      "  mocksys add github/rate-limited --request 'GET /rate_limit' --status 403 --body rl.json"
-     "  mocksys fault github/create-issue --status 500        # or --latency 2000 --timeout"
+     "  mocksys fault github/create-issue --latency 2000     # or --timeout --drop-connection --clear"
      "  mocksys parameterize github/create-issue --path '/repos/{owner}/{repo}/issues'"
      ""
      "## Inspect / manage"
@@ -516,7 +693,10 @@
      "All scenarios live in one shared library at ~/.mocksys (a git repo; override"
      "with MOCKSYS_HOME). It's the same library from every project."
      "  mocksys home                          # store path + git status"
+     "  mocksys status / log                  # uncommitted changes / recent history"
      "  mocksys publish github/create-issue   # git-commit a frozen scenario"
+     "  mocksys rm github/create-issue        # delete a scenario (or a whole service)"
+     "  mocksys restore github/create-issue   # discard uncommitted local edits"
      "  mocksys remote git@host:org/mocks.git # one-time: set the share remote"
      "  mocksys push   /  mocksys pull        # sync with teammates"
      "  mocksys pack <name>                   # or a standalone .mock.tgz (no git needed)"
@@ -537,15 +717,26 @@
   (println "  mocksys doctor <name> [--fix]")
   (println "  mocksys requests <name> [--clear]")
   (println "  mocksys assert <name> --saw 'METHOD /path'")
+  (println)
+  (println "  mocksys import openapi <spec> [--service NAME] [--target URL]   spec -> one scenario per operation")
+  (println "  mocksys new <service/name> [--service S]        scaffold a contract to hand-author")
+  (println "  mocksys compile <name>                          rebuild imposter.json from contract.yaml")
+  (println "  mocksys validate <name>                         check the contract (exit 1 on errors)")
+  (println "  mocksys examples <name> [--op ID]               list examples + which are in play")
+  (println "  mocksys use <name> --op ID --example NAME [--only|--off]   select example(s) to serve")
   (println "  mocksys add <name> --request 'METHOD /path' [--status N] [--body FILE | --text STR]")
-  (println "  mocksys fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection]")
+  (println "  mocksys fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--clear]")
   (println "  mocksys parameterize <name> --path '/a/{var}/b'")
   (println "  mocksys pack <name> [--out FILE] | --stdout")
   (println "  mocksys unpack <file.mock.tgz>")
   (println "  mocksys ls")
   (println "  mocksys stop <name> | --all")
+  (println "  mocksys rm <scenario|service>                   delete from the store (stops it if live)")
   (println)
   (println "  mocksys home                                    show the store path + git status")
+  (println "  mocksys status                                  list uncommitted changes in the store")
+  (println "  mocksys log [--n N]                             recent store history")
+  (println "  mocksys restore <name> | --all                 discard uncommitted local changes")
   (println "  mocksys publish [<name>|<service>]              git-commit frozen scenarios")
   (println "  mocksys remote <git-url>                        set the share remote")
   (println "  mocksys push | pull                             sync the store with the remote")
@@ -566,14 +757,24 @@
           "doctor"   (p/resolved (cmd-doctor parsed))
           "requests" (cmd-requests parsed)
           "assert"   (cmd-assert parsed)
-          "add"           (cmd-add parsed)
+          "import"        (cmd-import parsed)
+          "compile"       (p/resolved (cmd-compile parsed))
+          "new"           (p/resolved (cmd-new parsed))
+          "validate"      (p/resolved (cmd-validate parsed))
+          "examples"      (p/resolved (cmd-examples parsed))
+          "use"           (p/resolved (cmd-use parsed))
+          "add"           (p/resolved (cmd-add parsed))
           "fault"         (p/resolved (cmd-fault parsed))
           "parameterize"  (p/resolved (cmd-parameterize parsed))
           "pack"          (p/resolved (cmd-pack parsed))
           "unpack"        (p/resolved (cmd-unpack parsed))
           "ls"            (cmd-ls parsed)
           "stop"          (cmd-stop parsed)
+          ("rm" "delete") (cmd-rm parsed)
           "home"          (p/resolved (cmd-home parsed))
+          "status"        (p/resolved (cmd-status parsed))
+          "log"           (p/resolved (cmd-log parsed))
+          "restore"       (p/resolved (cmd-restore parsed))
           "publish"       (p/resolved (cmd-publish parsed))
           "remote"        (p/resolved (cmd-remote parsed))
           "push"          (p/resolved (cmd-push parsed))
@@ -583,4 +784,15 @@
           (p/resolved (do (println "unknown command:" cmd) (usage))))
         (p/catch (fn [err] (die (.-message err)))))))
 
-(apply -main *command-line-args*)
+(defn- cli-args
+  "User args from process.argv. Both `node script.js a b` and a bun-compiled
+   binary `mocksys a b` expose argv as [runtime script-or-vpath ...args] — bun keeps
+   a virtual script path (/$bunfs/root/mocksys) at argv[1] — so drop the first two."
+  []
+  (let [argv (vec (.-argv js/process))]
+    (if (>= (count argv) 2) (subvec argv 2) [])))
+
+(defn ^:export main
+  "Entry point for shadow-cljs and the compiled binary (nbb uses mocksys.cli)."
+  [& _]
+  (apply -main (cli-args)))

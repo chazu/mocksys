@@ -36,22 +36,48 @@ Recording real traffic gives you a *blob*. mocksys turns it into a **reusable ca
 
 ## Install
 
+### Homebrew (standalone binary)
+
+```sh
+brew install chazu/mocksys/mocksys
+```
+
+A self-contained binary; the formula provisions Mountebank (it only needs `node`).
+
+### From source (dev — interpreted, no build step)
+
 Requires **Node 18+** (for global `fetch`). Mountebank comes in as a dependency.
 
 ```sh
 git clone https://github.com/chazu/mocksys.git
 cd mocksys
-npm install                 # pulls nbb, mountebank, js-yaml
-```
-
-Then run via the shim, and optionally put it on your `PATH`:
-
-```sh
+npm install                 # pulls nbb, mountebank, js-yaml, swagger-parser, openapi-sampler
 ./bin/mocksys help
 ln -s "$PWD/bin/mocksys" /usr/local/bin/mocksys   # optional
 ```
 
 `mocksys` starts and stops the Mountebank daemon for you; you never run `mb` directly.
+Point `MOCKSYS_MB` at an `mb` executable to override how it's launched (otherwise it
+uses `mb` on your `PATH`, falling back to `npx mb`).
+
+## Build a binary
+
+`mocksys` is ClojureScript on [nbb](https://github.com/babashka/nbb) for dev, and the
+same source compiles to a standalone binary via **shadow-cljs** (AOT to JS) +
+**`bun build --compile`**. Needs a JVM (shadow-cljs) and [bun](https://bun.sh).
+
+```sh
+npm run binary           # -> dist/mocksys (native)
+npm run binary all       # -> dist/mocksys-bun-{darwin,linux}-{arm64,x64}
+```
+
+Cut a release (build matrix + tarballs + checksums + patch the Homebrew formula):
+
+```sh
+scripts/release.sh v0.1.0 --publish   # also creates the GitHub release via gh
+```
+
+The Homebrew tap lives in `packaging/homebrew/` — see its README for publishing.
 
 ## The core loop
 
@@ -77,15 +103,47 @@ mocksys assert github/create-issue --saw 'POST /repos/*/issues'   # exit 1 on mi
 mocksys requests github/create-issue         # everything the mock received
 ```
 
-## Author without recording
+## Author from a spec, docs, or source — no recording
 
-For failure modes and edge cases you can't easily capture:
+Recording is one way in. The other is a **contract**: a human/agent-editable
+`contract.yaml` that mocksys *compiles* to the Mountebank imposter. The contract is
+the source of truth; `imposter.json` is a build artifact that `run` recompiles
+automatically when the contract changes.
+
+**From an OpenAPI/Swagger spec** — one scenario per operation, the formal schemas
+kept primary, every spec example imported *by name* (plus a schema-sampled
+`generated` example to fill gaps), and a service profile synthesized from the spec's
+servers + security schemes:
 
 ```sh
-mocksys add github/rate-limited --request 'GET /rate_limit' --status 403 --body rl.json
-mocksys fault github/create-issue --status 500          # or --latency 2000 / --timeout / --drop-connection
-mocksys parameterize github/create-issue --path '/repos/{owner}/{repo}/issues'
+mocksys import openapi ./stripe.yaml --service stripe
+mocksys examples stripe/createCharge          # see the named examples; [x] = in play
+mocksys use stripe/createCharge --op createCharge --example card_declined --only
+mocksys run stripe/createCharge
 ```
+
+**By hand, after reading API docs or source** — scaffold a contract and edit it, or
+append endpoints with `add`:
+
+```sh
+mocksys new acme/get-widget                   # writes a contract.yaml to edit
+mocksys add acme/list-widgets --request 'GET /widgets' --status 200 --body w.json
+mocksys validate acme/list-widgets            # structural + example-vs-schema check
+```
+
+Selecting examples is how you author variants: each `select: true` example becomes a
+response the mock serves (Mountebank round-robins multiple), so swapping the happy
+path for an error is just `use ... --example <error> --only`. Transport faults layer
+on top and are stored on the contract, so they survive recompiles:
+
+```sh
+mocksys fault github/create-issue --latency 2000   # or --status 500 / --timeout / --drop-connection / --clear
+mocksys parameterize github/create-issue --path '/repos/{owner}/{repo}/issues'   # exact path -> {param} template
+```
+
+Recorded scenarios are contract-canonical too: `freeze` lifts a contract from the
+scrubbed recording, and any legacy imposter-only scenario gets one the first time a
+contract-aware command touches it.
 
 ## Shared store + sharing
 
@@ -94,7 +152,11 @@ All scenarios live in one git-backed library at `~/.mocksys` (override with
 
 ```sh
 mocksys home                                 # store path + git status
+mocksys status                               # which scenarios are new/edited/removed
+mocksys log --n 10                           # recent store history
 mocksys publish github/create-issue          # git-commit a frozen scenario (inits the repo on first use)
+mocksys rm github/create-issue               # delete a scenario (or a whole service); commits the removal
+mocksys restore github/create-issue          # discard uncommitted local edits
 mocksys remote git@github.com:org/mocks.git  # one-time: set the share remote
 mocksys push     /     mocksys pull          # sync with teammates
 ```
@@ -119,11 +181,20 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `doctor <name> [--fix]` | lint matchers/volatility; `--fix` cleans in place |
 | `requests <name> [--clear]` | what the running mock received |
 | `assert <name> --saw 'METHOD /path'` | verify a call happened (exit 1 on miss) |
+| `import openapi <spec> [--service NAME] [--target URL]` | spec → one scenario per operation |
+| `new <service/name> [--service S]` | scaffold a blank contract to hand-author |
+| `compile <name>` | rebuild `imposter.json` from `contract.yaml` (usually automatic) |
+| `validate <name>` | structural + example-vs-schema check (exit 1 on errors) |
+| `examples <name> [--op ID]` | list examples and which are in play |
+| `use <name> --op ID --example NAME [--only \| --off]` | select example(s) to serve |
 | `add <name> --request 'METHOD /path' [--status N] [--body FILE \| --text STR]` | author an endpoint |
-| `fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection]` | inject failures |
+| `fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--clear]` | inject failures |
 | `parameterize <name> --path '/a/{var}/b'` | loosen exact paths to templates |
 | `pack <name> [--out FILE] \| --stdout` / `unpack <file>` | portable bundles |
 | `ls` / `stop <name> \| --all` | catalog of scenarios / tear down |
+| `rm <scenario\|service>` (alias `delete`) | delete from the store (stops it if live; commits the removal) |
+| `status` / `log [--n N]` | uncommitted changes / recent store history |
+| `restore <name> \| --all` | discard uncommitted local changes |
 | `home` / `publish` / `remote` / `push` / `pull` | the git-backed store |
 | `prime` | one-screen orientation for an agent |
 
@@ -132,9 +203,11 @@ Run `mocksys prime` to drop the whole workflow into an agent's context.
 ## How it's built
 
 ClojureScript on [nbb](https://github.com/babashka/nbb) (interpreted, Node runtime —
-same runtime as Mountebank, instant startup, no build step). ~1.2k lines across focused
-modules: `mb` (admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
-(redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `bundle`
+same runtime as Mountebank, instant startup, no build step). Focused modules: `mb`
+(admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
+(redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
+(the canonical source format — compile/lift/validate/example selection), `openapi`
+(spec import, via `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle`
 (pack/unpack), `git` (the shared store), `core` (CLI).
 
 ## License

@@ -91,3 +91,49 @@
   (when-not (remote-url) (throw (js/Error. "no remote set — `mocksys remote <url>` first")))
   (when-not (ok? (git ["pull" "--ff-only" "origin" (current-branch)] {:stdio "inherit"}))
     (throw (js/Error. "git pull failed (see output above)"))))
+
+;; --- managing store contents ----------------------------------------------
+
+(defn log
+  "Recent store history as oneline text (nil when the store isn't a repo yet)."
+  [n]
+  (when (repo?)
+    (let [r (git ["log" (str "-" n) "--pretty=format:%h %ad %s" "--date=short"])]
+      (when (ok? r) (out r)))))
+
+(defn changed-files
+  "Uncommitted changes as [{:state \"M|A|D|??\" :path store-relative}] (nil when the
+   store isn't a repo)."
+  []
+  (when (repo?)
+    ;; Parse raw stdout (not `out`, which trims the leading status-space off line 1).
+    (->> (str/split-lines (or (.-stdout (git ["status" "--porcelain"])) ""))
+         (remove str/blank?)
+         (keep (fn [line]
+                 (when-let [[_ st p] (re-matches #"^(.{2})\s(.*)$" line)]
+                   {:state (str/trim st) :path p}))))))
+
+(defn remove!
+  "Delete a scenario/service path from the store. Commits the removal in a git
+   store; just deletes files in a plain (non-git) store. Returns :committed or
+   :deleted. Throws if the path isn't there."
+  [id]
+  (let [dir (path/join store/root id)]
+    (when-not (fs/existsSync dir)
+      (throw (js/Error. (str "no such scenario/service '" id "' in the store"))))
+    (fs/rmSync dir #js {:recursive true :force true})
+    (if (repo?)
+      (do (git ["add" "-A" "--" id])
+          (git (concat (identity-args) ["commit" "-q" "-m" (str "mocksys: remove " id)]))
+          :committed)
+      :deleted)))
+
+(defn restore!
+  "Discard uncommitted changes under `id` (whole store when nil): revert tracked
+   edits and drop untracked files. Returns true."
+  [id]
+  (ensure-repo!)
+  (let [target (or id ".")]
+    (git ["checkout" "--" target])   ; revert tracked modifications (no-op if untracked)
+    (git ["clean" "-fdq" "--" target]) ; drop untracked/new files
+    true))

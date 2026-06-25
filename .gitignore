@@ -1,6 +1,12 @@
 # deps
 node_modules/
 
+# build artifacts (shadow-cljs output + bun binaries)
+out/
+dist/
+.shadow-cljs/
+.cpcache/
+
 # mountebank logs from local runs
 *.log
 mb.pid
