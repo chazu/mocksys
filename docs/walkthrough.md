@@ -172,9 +172,10 @@ curl -s "$B/oauth2/v1/userinfo" -H "Authorization: Bearer $ACCESS"
 #   {"message":"Bad credentials"}            <- the token has expired
 ```
 
-We passed `--rate-limit 100`, so each client gets 100 requests per 60-second window. Past
-the budget you get a `429` with the real `X-Rate-Limit-*` headers — and advancing the clock
-past the window resets it (the window is keyed on the virtual clock, which is why it's
+We passed `--rate-limit 100`, so each client gets 100 requests per 60-second window. Every
+response carries the real `X-Rate-Limit-*` headers — `Remaining` ticks down as you spend the
+budget — and past it you get a `429` with `Remaining: 0`. Advancing the clock past the
+window resets it (the window is keyed on the virtual clock, which is why it's
 deterministic):
 
 ```sh

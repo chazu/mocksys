@@ -187,9 +187,10 @@ effect:
   # ... then the operation's real verb (get/list/respond/...) ...
 ```
 
-When the budget is exceeded the `miss` response is returned with
-`X-Rate-Limit-Limit`/`-Remaining`/`-Reset` headers added. A `limit` is *not* terminal — on
-pass-through the operation continues to its real response.
+Every response carries `X-Rate-Limit-Limit`/`-Remaining`/`-Reset` (the `Remaining` count
+decrements as the budget is spent); when the budget is exceeded the `miss` response is
+returned with `Remaining: 0`. A `limit` is *not* terminal — on pass-through the operation
+continues to its real response, which inherits the budget headers.
 
 ## The virtual clock
 

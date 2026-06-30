@@ -108,7 +108,7 @@
                   (contains? spec "json")    (str "JSON.stringify(deepInterp(" (js (get spec "json")) ",V))")
                   (contains? spec "text")    (str "interp(" (js (get spec "text")) ",V)")
                   :else "''")]
-    (str "{statusCode:" status ",headers:deepInterp(" (js headers) ",V),body:" body "}")))
+    (str "{statusCode:" status ",headers:withRl(deepInterp(" (js headers) ",V)),body:" body "}")))
 
 ;; --- collection verb emission (each is terminal: forms + returns a response) ---
 
@@ -200,7 +200,11 @@
          "if(_c>" max* "){var _m=" miss ";_m.headers=_m.headers||{};"
          "_m.headers['X-Rate-Limit-Limit']=String(" max* ");"
          "_m.headers['X-Rate-Limit-Remaining']='0';"
-         "_m.headers['X-Rate-Limit-Reset']=String(_win+" window ");return _m;}}")))
+         "_m.headers['X-Rate-Limit-Reset']=String(_win+" window ");return _m;}"
+         ;; on pass-through, stash the budget headers so the real response carries them too
+         "V.__rl={'X-Rate-Limit-Limit':String(" max* "),"
+         "'X-Rate-Limit-Remaining':String(Math.max(0," max* "-_c)),"
+         "'X-Rate-Limit-Reset':String(_win+" window ")};}")))
 
 ;; --- virtual clock --------------------------------------------------------
 
@@ -354,8 +358,11 @@
    "if(!state.__c[name]){var m={},i,r,s=seed||[];for(i=0;i<s.length;i++){r=s[i];m[String(r[idField])]=r;}"
    "state.__c[name]=m;state.__cf[name]=idField;}}"
    "function coll(state,name){return new Coll(state.__c[name]||{},state.__cf[name]||'id');}"
-   "function collResp(status,obj,headers){var h=headers||{};h['Content-Type']=h['Content-Type']||'application/json';"
-   "return {statusCode:status,headers:h,body:obj==null?'':JSON.stringify(obj)};}"))
+   "function collResp(status,obj,headers){var h=withRl(headers||{});h['Content-Type']=h['Content-Type']||'application/json';"
+   "return {statusCode:status,headers:h,body:obj==null?'':JSON.stringify(obj)};}"
+   ;; merge any stashed rate-limit budget headers (set by a passing `limit`) into a
+   ;; response, so every response — not just the 429 — advertises the remaining budget.
+   "function withRl(h){if(V&&V.__rl){for(var k in V.__rl){if(h[k]===undefined)h[k]=V.__rl[k];}}return h;}"))
 
 (defn gen
   "The Mountebank inject function (as a JS source string) for one stateful op.

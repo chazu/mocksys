@@ -76,5 +76,8 @@ unchanged (no clock endpoint, not rate-limited).
   updated; committed runnable `examples/` (`users.yaml`, `login-throttle.yaml`,
   `okta-corpus.json`).
 
-Deferred refinement: `X-Rate-Limit-*` headers are emitted on the `429` only, not on every
-successful response (an honest fidelity gap, noted for a later pass).
+Follow-up (done): `X-Rate-Limit-*` headers are now emitted on **every** response — the
+`Remaining` count decrements as the budget is spent, then `0` on the `429`. A passing
+`limit` stashes the budget into `V.__rl`; a `withRl` prelude helper merges it into whatever
+response the operation returns (collection verbs and `respond`). A twin with no `limit`
+carries no such headers (the helper is a no-op when `V.__rl` is unset).
