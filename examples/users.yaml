@@ -1,0 +1,72 @@
+# A hand-authored resource collection — the building block behind `kit okta`.
+# Stand it up:
+#   MOCKSYS_HOME=./.mocks mkdir -p .mocks/demo/users && cp examples/users.yaml .mocks/demo/users/contract.yaml
+#   MOCKSYS_HOME=./.mocks mocksys run demo/users --port 9100
+# Then drive it (see docs/walkthrough.md):
+#   curl localhost:9100/api/v1/users
+#   curl 'localhost:9100/api/v1/users?filter=status eq "ACTIVE"'
+#   curl -X POST localhost:9100/api/v1/users -d '{"profile":{"login":"new@x.com"}}'
+service: demo
+scenario: demo/users
+origin: authored
+summary: a users collection with CRUD, SCIM-ish filtering, and cursor pagination
+seed:
+  users:
+    - { id: "00u1", status: ACTIVE, profile: { login: "alice@x.com", email: "alice@x.com", firstName: "Alice", lastName: "Ng" } }
+    - { id: "00u2", status: ACTIVE, profile: { login: "bob@x.com",   email: "bob@x.com",   firstName: "Bob",   lastName: "Lee" } }
+    - { id: "00u3", status: STAGED, profile: { login: "carol@x.com", email: "carol@x.com", firstName: "Carol", lastName: "Diaz" } }
+state:
+  collections:
+    users: { idField: id, seed: users }
+operations:
+  - id: create-user
+    summary: POST /api/v1/users — create (id minted server-side, request body merged in)
+    request: { method: POST, path: "/api/v1/users" }
+    effect:
+      bind:   { incoming: { bodyJson: true } }
+      mint:   { uid: { prefix: "00u" } }
+      create:
+        collection: users
+        merge: [incoming]
+        body:  { id: "{uid}", status: "STAGED" }
+        status: 201
+
+  - id: list-users
+    summary: GET /api/v1/users — list, SCIM-ish filter, cursor pagination
+    request: { method: GET, path: "/api/v1/users" }
+    effect:
+      bind: { q: { query: filter }, after: { query: after }, lim: { query: limit } }
+      list:
+        collection: users
+        filter: "{q}"
+        after:  "{after}"
+        limit:  "{lim}"
+        link:   '</api/v1/users?after={next}>; rel="next"'
+
+  - id: get-user
+    summary: GET /api/v1/users/{id} — read one
+    request: { method: GET, path: "/api/v1/users/{id}" }
+    effect:
+      bind: { id: { pathRegex: "/users/([^/]+)$" } }
+      get:
+        collection: users
+        key: "{id}"
+        miss: { status: 404, json: { errorCode: "E0000007", errorSummary: "Not found: Resource not found" } }
+
+  - id: update-user
+    summary: POST /api/v1/users/{id} — merge-patch
+    request: { method: POST, path: "/api/v1/users/{id}" }
+    effect:
+      bind: { id: { pathRegex: "/users/([^/]+)$" }, incoming: { bodyJson: true } }
+      update:
+        collection: users
+        key: "{id}"
+        mergeVar: incoming
+        miss: { status: 404, json: { errorCode: "E0000007" } }
+
+  - id: delete-user
+    summary: DELETE /api/v1/users/{id} — delete
+    request: { method: DELETE, path: "/api/v1/users/{id}" }
+    effect:
+      bind: { id: { pathRegex: "/users/([^/]+)$" } }
+      remove: { collection: users, key: "{id}", miss: { status: 404 } }

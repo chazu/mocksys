@@ -47,46 +47,55 @@
      POST   {base}/{id}       merge-patch
      DELETE {base}/{id}       delete
    `opts`: :coll :base :id-field :seed-name :id-prefix :create-defaults :not-found."
-  [{:keys [coll base id-field seed-name id-prefix create-defaults not-found]}]
+  [{:keys [coll base id-field seed-name id-prefix create-defaults not-found rate-limit]}]
   (let [id-field (or id-field "id")
         id-regex (str base "/([^/]+)$")
         item     (str base "/{id}")
-        nf       (or not-found {"status" 404 "json" (okta-error "E0000007" "Not found: Resource not found")})]
+        nf       (or not-found {"status" 404 "json" (okta-error "E0000007" "Not found: Resource not found")})
+        ;; rate-limit gene: when enabled, every op binds a client key (the bearer
+        ;; token, else "anon") and guards with a clock-windowed `limit`.
+        rl-bind  (when rate-limit {"__cli" {"header" "authorization" "bearer" true}})
+        rl       (when rate-limit
+                   {"bucket" "rl" "key" "{__cli}"
+                    "max"    (:max rate-limit) "window" (or (:window rate-limit) 60)})
+        eff      (fn [m] (cond-> m
+                           rl-bind (update "bind" merge rl-bind)
+                           rl      (assoc "limit" rl)))]
     {:collections {coll {"idField" id-field "seed" seed-name}}
      :operations
      [{"id"      (str "create-" coll)
        "summary" (str "create a " coll " entry")
        "request" {"method" "POST" "path" base}
-       "effect"  {"bind"   {"incoming" {"bodyJson" true}}
-                  "mint"   {"newid" {"prefix" (or id-prefix "")}}
-                  "create" {"collection" coll
-                            "merge"      ["incoming"]
-                            "body"       (merge {id-field "{newid}"} create-defaults)
-                            "status"     201}}}
+       "effect"  (eff {"bind"   {"incoming" {"bodyJson" true}}
+                       "mint"   {"newid" {"prefix" (or id-prefix "")}}
+                       "create" {"collection" coll
+                                 "merge"      ["incoming"]
+                                 "body"       (merge {id-field "{newid}"} create-defaults)
+                                 "status"     201}})}
       {"id"      (str "list-" coll)
        "summary" (str "list / filter / paginate " coll)
        "request" {"method" "GET" "path" base}
-       "effect"  {"bind" {"q" {"query" "filter"} "after" {"query" "after"} "lim" {"query" "limit"}}
-                  "list" {"collection" coll
-                          "filter"     "{q}"
-                          "after"      "{after}"
-                          "limit"      "{lim}"
-                          "link"       (str "<" base "?after={next}>; rel=\"next\"")}}}
+       "effect"  (eff {"bind" {"q" {"query" "filter"} "after" {"query" "after"} "lim" {"query" "limit"}}
+                       "list" {"collection" coll
+                               "filter"     "{q}"
+                               "after"      "{after}"
+                               "limit"      "{lim}"
+                               "link"       (str "<" base "?after={next}>; rel=\"next\"")}})}
       {"id"      (str "get-" coll)
        "summary" (str "get a " coll " entry by id")
        "request" {"method" "GET" "path" item}
-       "effect"  {"bind" {"id" {"pathRegex" id-regex}}
-                  "get"  {"collection" coll "key" "{id}" "miss" nf}}}
+       "effect"  (eff {"bind" {"id" {"pathRegex" id-regex}}
+                       "get"  {"collection" coll "key" "{id}" "miss" nf}})}
       {"id"      (str "update-" coll)
        "summary" (str "merge-patch a " coll " entry")
        "request" {"method" "POST" "path" item}
-       "effect"  {"bind"   {"id" {"pathRegex" id-regex} "incoming" {"bodyJson" true}}
-                  "update" {"collection" coll "key" "{id}" "mergeVar" "incoming" "miss" nf}}}
+       "effect"  (eff {"bind"   {"id" {"pathRegex" id-regex} "incoming" {"bodyJson" true}}
+                       "update" {"collection" coll "key" "{id}" "mergeVar" "incoming" "miss" nf}})}
       {"id"      (str "delete-" coll)
        "summary" (str "delete a " coll " entry")
        "request" {"method" "DELETE" "path" item}
-       "effect"  {"bind"   {"id" {"pathRegex" id-regex}}
-                  "remove" {"collection" coll "key" "{id}" "miss" nf}}}]}))
+       "effect"  (eff {"bind"   {"id" {"pathRegex" id-regex}}
+                       "remove" {"collection" coll "key" "{id}" "miss" nf}})}]}))
 
 ;; --- gene: OIDC authorize / token / userinfo handshake --------------------
 ;; Single-use authorization codes minted at `authorize`, exchanged for a bearer
@@ -114,8 +123,9 @@
 
 (defn oidc-handshake
   "OIDC genes over `authz`/`token`/`userinfo` paths, resolving tokens to the
-   `seed-name` user array (by `login`). Returns authorize(+picker), token, userinfo."
-  [{:keys [authz token userinfo seed-name users]}]
+   `seed-name` user array (by `login`). Returns authorize(+picker), token, userinfo.
+   With `:token-ttl` (seconds), issued tokens expire on the virtual clock."
+  [{:keys [authz token userinfo seed-name users token-ttl]}]
   {:operations
    [{"id"      "authorize"
      "summary" "authorize (?login given) -> redirect with a single-use code"
@@ -138,9 +148,11 @@
                 "consume" {"bucket" "codes" "key" "{code}" "as" "login"
                            "miss"  {"status" 400 "json" {"error" "bad_verification_code"}}}
                 "mint"    {"token" {"prefix" "mockoauth_"}}
-                "store"   {"bucket" "tokens" "key" "{token}" "value" "{login}"}
+                "store"   (cond-> {"bucket" "tokens" "key" "{token}" "value" "{login}"}
+                            token-ttl (assoc "ttl" token-ttl))
                 "respond" {"status" 200
-                           "json"  {"access_token" "{token}" "token_type" "bearer" "scope" "{scope}"}}}}
+                           "json"  (cond-> {"access_token" "{token}" "token_type" "bearer" "scope" "{scope}"}
+                                     token-ttl (assoc "expires_in" token-ttl))}}}
     {"id"      "userinfo"
      "summary" "bearer access_token -> the bound user"
      "request" {"method" "GET" "path" userinfo}
@@ -224,23 +236,29 @@
 (defn okta
   "A digital twin of Okta: users + groups CRUD (SCIM-ish filter + pagination), the
    Okta error envelope on misses, and an OIDC authorize/token/userinfo flow — all on
-   one stateful imposter. Composed entirely from genes."
-  [scenario users]
+   one stateful imposter. Composed entirely from genes.
+     :rate-limit {:max N :window S}  rate-limit the CRUD ops (429 + X-Rate-Limit-*)
+     :token-ttl  S                   OIDC tokens expire after S seconds (virtual clock)"
+  [scenario users {:keys [rate-limit token-ttl]}]
   (let [users  (or (seq users) okta-users)
-        groups okta-groups]
-    (compose
-     {"service"  (or (first (str/split scenario #"/")) "okta")
-      "scenario" scenario
-      "origin"   "kit"
-      "summary"  "Okta (mock) — users & groups CRUD + OIDC; SCIM-ish filter, pagination, error envelope"
-      "seed"     {"users" users "groups" groups "oidc_users" (okta-oidc-users users)}}
-     (crud-collection {:coll "users" :base "/api/v1/users" :seed-name "users"
-                       :id-prefix "00u" :create-defaults {"status" "STAGED"}})
-     (crud-collection {:coll "groups" :base "/api/v1/groups" :seed-name "groups"
-                       :id-prefix "00g" :create-defaults {"type" "OKTA_GROUP"}})
-     (oidc-handshake {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token"
-                      :userinfo "/oauth2/v1/userinfo" :seed-name "oidc_users"
-                      :users (okta-oidc-users users)}))))
+        groups okta-groups
+        clock? (or rate-limit token-ttl)]
+    (cond->
+     (compose
+      {"service"  (or (first (str/split scenario #"/")) "okta")
+       "scenario" scenario
+       "origin"   "kit"
+       "summary"  "Okta (mock) — users & groups CRUD + OIDC; SCIM-ish filter, pagination, error envelope"
+       "seed"     {"users" users "groups" groups "oidc_users" (okta-oidc-users users)}}
+      (crud-collection {:coll "users" :base "/api/v1/users" :seed-name "users"
+                        :id-prefix "00u" :create-defaults {"status" "STAGED"} :rate-limit rate-limit})
+      (crud-collection {:coll "groups" :base "/api/v1/groups" :seed-name "groups"
+                        :id-prefix "00g" :create-defaults {"type" "OKTA_GROUP"} :rate-limit rate-limit})
+      (oidc-handshake {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token"
+                       :userinfo "/oauth2/v1/userinfo" :seed-name "oidc_users"
+                       :users (okta-oidc-users users) :token-ttl token-ttl}))
+      ;; enabling the clock makes `mocksys clock` available and ttl/limit windows move
+      clock? (assoc-in ["state" "clock"] {"start" 1700000000}))))
 
 ;; --- registry -------------------------------------------------------------
 
@@ -249,12 +267,14 @@
   {"oauth2" {:doc "OAuth2 provider (picker, single-use codes, userinfo)"
              :build (fn [scenario {:keys [provider users]}]
                       (oauth2 scenario (or provider "github") users))}
-   "okta"   {:doc "Okta twin: users & groups CRUD + OIDC, SCIM filter & pagination"
-             :build (fn [scenario {:keys [users]}]
-                      (okta scenario users))}})
+   "okta"   {:doc "Okta twin: users & groups CRUD + OIDC, SCIM filter & pagination [--rate-limit N] [--token-ttl S]"
+             :build (fn [scenario {:keys [users rate-limit token-ttl]}]
+                      (okta scenario users {:rate-limit rate-limit :token-ttl token-ttl}))}})
 
 (def genes
   "The reusable behavioral genes a kit composes — shown by `mocksys genes`."
   [{:name "crud-collection" :doc "REST resource: create/list/get/update/delete, SCIM-ish filter + cursor pagination"}
    {:name "oidc-handshake"  :doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"}
-   {:name "error-envelope"  :doc "Provider-shaped error bodies for misses (e.g. Okta errorCode/errorSummary)"}])
+   {:name "error-envelope"  :doc "Provider-shaped error bodies for misses (e.g. Okta errorCode/errorSummary)"}
+   {:name "rate-limit"      :doc "Per-client request budget over a virtual-clock window → 429 + X-Rate-Limit-* headers"}
+   {:name "virtual-clock"   :doc "Deterministic, advanceable time (store.ttl expiry, now bind); driven by `mocksys clock`"}])

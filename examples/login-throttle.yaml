@@ -1,0 +1,58 @@
+# Hand-authored: a rate-limited login that issues an expiring session token.
+# Demonstrates the three time-aware primitives without a kit:
+#   - limit      : 5 attempts / 60s per username -> 429
+#   - store.ttl  : the session token expires after 30 minutes
+#   - state.clock: a deterministic virtual clock you advance with `mocksys clock`
+#
+# Stand it up:
+#   MOCKSYS_HOME=./.mocks mkdir -p .mocks/demo/login-throttle
+#   cp examples/login-throttle.yaml .mocks/demo/login-throttle/contract.yaml
+#   MOCKSYS_HOME=./.mocks mocksys run demo/login-throttle --port 9120
+# Drive it:
+#   T=$(curl -s -X POST localhost:9120/login -d 'username=alice' | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+#   curl localhost:9120/me -H "Authorization: Bearer $T"          # 200, the account
+#   MOCKSYS_HOME=./.mocks mocksys clock demo/login-throttle advance 1h
+#   curl -i localhost:9120/me -H "Authorization: Bearer $T"       # 401, session expired
+service: demo
+scenario: demo/login-throttle
+origin: authored
+summary: rate-limited login issuing an expiring session token (clock-driven)
+seed:
+  accounts:
+    - { username: alice, name: "Alice Ng" }
+    - { username: bob,   name: "Bob Lee" }
+state:
+  clock: { start: "2024-01-01T00:00:00Z" }
+operations:
+  - id: login
+    summary: POST /login — 5 attempts/min per username; returns a 30-min session token
+    request: { method: POST, path: "/login" }
+    effect:
+      bind:
+        username: { body: username }
+      limit:
+        bucket: rl
+        key: "{username}"
+        max: 5
+        window: 60
+        miss: { status: 429, json: { error: "too_many_attempts" } }
+      resolve:
+        seed: accounts
+        by: username
+        eq: "{username}"
+        as: acct
+        miss: { status: 401, json: { error: "invalid_credentials" } }
+      mint:    { sess: { prefix: "sess_" } }
+      store:   { bucket: sessions, key: "{sess}", value: "{username}", ttl: 1800 }
+      respond: { status: 200, json: { token: "{sess}", expires_in: 1800 } }
+
+  - id: whoami
+    summary: GET /me — the logged-in account (401 once the session token expires)
+    request: { method: GET, path: "/me" }
+    effect:
+      bind:   { sess: { header: authorization, bearer: true } }
+      lookup: { bucket: sessions, key: "{sess}", as: username,
+                miss: { status: 401, json: { error: "session_expired" } } }
+      resolve: { seed: accounts, by: username, eq: "{username}", as: acct,
+                 miss: { status: 401, json: { error: "invalid_credentials" } } }
+      respond: { status: 200, jsonVar: acct }

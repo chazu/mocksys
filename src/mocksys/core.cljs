@@ -514,6 +514,56 @@
                        (println (str "  ✗ " fails "/" total " diverged")))
                      (js/process.exit 1))))))))))
 
+(defn- parse-duration
+  "`1h`/`30m`/`45s`/`2d`/`3600` -> seconds (bare number = seconds). nil if unparseable."
+  [s]
+  (when-let [[_ n unit] (re-matches #"(?i)(\d+)\s*([smhd]?)" (str/trim (str s)))]
+    (* (js/parseInt n)
+       (case (str/lower-case unit) "m" 60 "h" 3600 "d" 86400 1))))
+
+(defn- ts->epoch
+  "An epoch number or an ISO timestamp -> epoch seconds. nil if unparseable."
+  [s]
+  (cond
+    (re-matches #"\d+" (str s)) (js/parseInt s)
+    :else (let [e (js/Math.floor (/ (.getTime (js/Date. s)) 1000))]
+            (when-not (js/isNaN e) e))))
+
+(defn cmd-clock
+  "Read or move a twin's *virtual* clock — deterministic, frozen until you advance it
+   (so token/session expiry and rate-limit windows are reproducible):
+     clock <name>                 show the current virtual time
+     clock <name> advance <dur>   advance by 1h / 30m / 45s / 2d / <seconds>
+     clock <name> set <ts>        set to an epoch or ISO timestamp
+   The twin must already be running — the clock lives in its live state, and this
+   never reposts it (which would reset state)."
+  [{:keys [pos]}]
+  (let [scenario (first pos)
+        verb     (second pos)
+        arg      (nth pos 2 nil)]
+    (when-not scenario (die "clock needs a scenario: clock <name> [advance <dur> | set <ts>]"))
+    (let [body (case verb
+                 nil       {}
+                 "now"     {}
+                 "advance" {"advance" (or (parse-duration arg)
+                                          (die (str "bad duration '" arg "' — try 1h, 30m, 45s, 2d, or seconds")))}
+                 "set"     {"set" (or (ts->epoch arg)
+                                      (die (str "bad timestamp '" arg "' — use an epoch or ISO string")))}
+                 (die (str "unknown clock verb '" verb "' — use: advance <dur> | set <ts> | (nothing)")))]
+      (p/let [live (mb/list-imposters)
+              imp  (running-imposter scenario live)
+              res  (js/fetch (str "http://localhost:" (:port imp) "/_mocksys/clock")
+                             #js {:method "POST"
+                                  :headers #js {"Content-Type" "application/json"}
+                                  :body (js/JSON.stringify (clj->js body))})
+              text (.text res)
+              out  (try (js->clj (js/JSON.parse text)) (catch :default _ nil))]
+        (if (and (map? out) (get out "now"))
+          (println (str "🕐 " scenario " — virtual time " (get out "iso")
+                        "  (epoch " (get out "now") ")"))
+          (die (str "'" scenario "' has no virtual clock — enable it with `state.clock`, "
+                    "a `store.ttl`, a `limit`, or a `now` bind (see docs/effects.md)")))))))
+
 (defn cmd-ls [_]
   (let [scenarios (store/list-scenarios)]
     (p/let [live (mb/list-imposters)]
@@ -663,7 +713,12 @@
                           (catch :default _ (die (str "could not parse --users as JSON: " (:users opts))))))
           scenario (or (when (string? (:scenario opts)) (:scenario opts))
                        (default-scenario-for kind provider))
-          built    (cond-> (builder scenario {:provider provider :users users})
+          rate-limit (when (string? (:rate-limit opts))
+                       {:max    (js/parseInt (:rate-limit opts))
+                        :window (when (string? (:rate-window opts)) (js/parseInt (:rate-window opts)))})
+          token-ttl  (when (string? (:token-ttl opts)) (js/parseInt (:token-ttl opts)))
+          built    (cond-> (builder scenario {:provider provider :users users
+                                              :rate-limit rate-limit :token-ttl token-ttl})
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))]
       (store/write-contract! scenario built)
       (compile! scenario)
@@ -1020,9 +1075,10 @@
      "      --when-query 'login' --header 'Location=https://app/cb?code=abc'   # ?login present"
      "  mocksys add gh/auth --request 'GET /authorize' --status 200 --text '<picker/>'  # fallback"
      ""
-     "## Stateful flows & failure modes"
+     "## Stateful flows, time & failure modes"
      "  mocksys kit oauth2 --provider github           # code→token→userinfo handshake (stateful)"
-     "  mocksys add github/rate-limited --request 'GET /rate_limit' --status 403 --body rl.json"
+     "  mocksys kit okta --rate-limit 100 --token-ttl 3600   # 429s + tokens that expire on the clock"
+     "  mocksys clock okta/okta advance 1h            # move the deterministic virtual clock (expiry, windows)"
      "  mocksys fault github/create-issue --latency 2000   # or --timeout --drop-connection --clear"
      "  mocksys parameterize github/create-issue --path '/repos/{owner}/{repo}/issues'"
      ""
@@ -1058,10 +1114,11 @@
   (println "mocksys — author reusable mock fixtures for external systems")
   (println)
   (println "  TWINS (full behavioral clones in one command — see `mocksys genes`)")
-  (println "  mocksys kit okta [--users F.json] [--scenario NAME] [--port N]   Okta twin: users/groups CRUD + OIDC")
+  (println "  mocksys kit okta [--users F.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--scenario NAME] [--port N]")
   (println "  mocksys kit oauth2 [--provider github|codeberg] [--users F.json] [--port N]   OAuth2 provider twin")
   (println "  mocksys genes                                   list the behavioral genes kits compose")
   (println "  mocksys conform <name> --corpus FILE [--against URL] [--ignore k1,k2]   replay+diff (exit 1 on drift)")
+  (println "  mocksys clock <name> [advance <1h|30m|45s> | set <ts>]   read/move a twin's deterministic virtual clock")
   (println)
   (println "  AUTHOR (hand-author or import — no live access needed)")
   (println "  mocksys new <service/name> [--service S]        scaffold a contract to hand-author")
@@ -1133,6 +1190,7 @@
           "kit"           (p/resolved (cmd-kit parsed))
           "genes"         (p/resolved (cmd-genes parsed))
           "conform"       (cmd-conform parsed)
+          "clock"         (cmd-clock parsed)
           "compile"       (p/resolved (cmd-compile parsed))
           "new"           (p/resolved (cmd-new parsed))
           "validate"      (p/resolved (cmd-validate parsed))

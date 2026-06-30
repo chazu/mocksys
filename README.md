@@ -249,6 +249,7 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `kit <okta\|oauth2> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
 | `genes` | list the behavioral genes (and kits) available |
 | `conform <name> --corpus FILE [--against URL] [--ignore k1,k2]` | replay+diff vs reality (exit 1 on drift) |
+| `clock <name> [advance <1h\|30m> \| set <ts>]` | read/move a twin's deterministic virtual clock |
 | `import openapi <spec> [--service NAME] [--target URL]` | spec → one scenario per operation |
 | `new <service/name> [--service S]` | scaffold a blank contract to hand-author |
 | `compile <name>` | rebuild `imposter.json` from `contract.yaml` (usually automatic) |
@@ -272,11 +273,14 @@ Run `mocksys prime` to drop the whole workflow into an agent's context.
 
 This README is the quick start. The full reference manual lives in [`docs/`](docs/index.md):
 
+- [docs/walkthrough.md](docs/walkthrough.md) — **start here:** a friendly end-to-end tour that builds an Okta twin and explains every part.
 - [docs/architecture.md](docs/architecture.md) — modules, the contract→imposter→Mountebank pipeline, the store, the runtime.
 - [docs/contracts.md](docs/contracts.md) — the `contract.yaml` format: matching, responses, examples, templating, faults, validation.
 - [docs/effects.md](docs/effects.md) — the stateful `effect` language: state buckets and resource collections, every verb, the SCIM filter grammar, pagination.
 - [docs/twins.md](docs/twins.md) — building digital twins: kits, genes, the `okta` anatomy, and the `conform` fidelity loop.
 - [docs/cli.md](docs/cli.md) — the complete command reference.
+
+Runnable example contracts are in [`examples/`](examples/) (the ones the walkthrough uses).
 
 ## How it's built
 

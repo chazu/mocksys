@@ -1,0 +1,11 @@
+[
+  { "method": "GET",  "path": "/api/v1/users",                            "expect": 200 },
+  { "method": "GET",  "path": "/api/v1/users/00u1",                       "expect": 200 },
+  { "method": "GET",  "path": "/api/v1/users/does-not-exist",             "expect": 404 },
+  { "method": "GET",  "path": "/api/v1/users?filter=status%20eq%20%22ACTIVE%22", "expect": 200 },
+  { "method": "GET",  "path": "/api/v1/groups",                           "expect": 200 },
+  { "method": "POST", "path": "/api/v1/users",
+    "headers": { "Content-Type": "application/json" },
+    "body": { "profile": { "login": "dana@example.com", "email": "dana@example.com" } },
+    "expect": 201 }
+]

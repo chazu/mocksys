@@ -22,7 +22,7 @@ mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use 
 
 | Kit | Options | Produces |
 |---|---|---|
-| `okta` | `--users FILE.json` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), Okta error envelope, OIDC authorize/token/userinfo — all on one stateful imposter. |
+| `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), Okta error envelope, OIDC authorize/token/userinfo — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` makes OIDC tokens expire on the virtual clock. |
 | `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
 
 The default scenario id is `oauth/<provider>` for `oauth2` and `okta/okta` for `okta`;
@@ -48,8 +48,10 @@ mocksys genes        # list the genes (and kits) available
 | Gene | Behavior |
 |---|---|
 | `crud-collection` | A REST resource: create / list / get / update / delete, SCIM-ish filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). |
-| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. |
+| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Optional token TTL. |
 | `error-envelope` | Provider-shaped error bodies for misses (e.g. Okta `errorCode`/`errorSummary`). |
+| `rate-limit` | A per-client request budget over a [virtual-clock](effects.md#the-virtual-clock) window → `429` + `X-Rate-Limit-*` headers. |
+| `virtual-clock` | Deterministic, advanceable time (TTL expiry, rate-limit windows, `now` binds); driven by `mocksys clock`. |
 
 Genes live in the `kits` module. Each is a function returning `{:operations :collections
 :seed}`; a kit merges fragments with `compose`. To extend mocksys with a new twin, write a
@@ -138,13 +140,26 @@ server-generated timestamps and ids. Volatile headers come from the scenario's
 Each `conform` run reposts the imposter, so the twin starts from a fresh, reseeded,
 deterministic state.
 
-## Determinism and what's deferred
+## Determinism: the virtual clock + rate limits
 
-A twin is deterministic: fixed seed, fresh state per run, no real network. That makes
-high-volume and dangerous-scenario testing reproducible without rate limits or charges.
+A twin is deterministic: fixed seed, fresh state per run, no real network. Time is
+deterministic too, via the **virtual clock** — a "now" that only moves when you advance it.
+So token expiry, session lifetimes, and rate-limit windows are reproducible:
 
-Two enhancements are deliberately deferred (they build on the same [effect
-layer](effects.md)):
+```sh
+mocksys kit okta --rate-limit 100 --token-ttl 3600   # 429s + tokens that expire on the clock
+mocksys run okta/okta
+# ... obtain a token, confirm it works ...
+mocksys clock okta/okta advance 2h                   # the token is now expired (401)
+```
 
-- a **virtual clock** for time-based behavior (token/session expiry, lockouts);
-- a **rate-limit gene** (a `state` counter → `429` + `X-Rate-Limit-*` headers).
+- `--token-ttl S` makes OIDC tokens expire after `S` virtual seconds (`store.ttl` under the
+  hood). A `lookup` of an expired token misses → `401`.
+- `--rate-limit N [--rate-window S]` gives each client `N` requests per `S`-second window
+  (default 60); past the budget, `429` + `X-Rate-Limit-*`. Advancing the clock past the
+  window resets the budget.
+
+Both compose — the rate-limit window is keyed on the virtual clock — and both are exposed
+as genes (`rate-limit`, `virtual-clock`) for your own twins. See
+[effects.md](effects.md#the-virtual-clock) for the primitives and `mocksys clock` for
+driving time.

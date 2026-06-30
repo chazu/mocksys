@@ -78,6 +78,7 @@ bind:
 | `bodyJson: true` | the entire request body parsed as a JSON object (`{}` if absent/unparseable). For `create`/`update` merges. |
 | `header: <k>` | header `k`, case-insensitive. Add `bearer: true` to strip a `Bearer `/`token ` prefix. |
 | `pathRegex: <re>` | the first capture group of `re` matched against the request path. The path-segment idiom is `"/users/([^/]+)$"`. |
+| `now: true` | the current [virtual time](#the-virtual-clock) as epoch seconds. `now: { add: N }` offsets it; `now: { iso: true }` formats it as an ISO string. |
 | `const: <v>` | a literal value. |
 
 ## State buckets and `mint`
@@ -96,12 +97,17 @@ mint: { token: { prefix: "mockoauth_" } }   # -> token = "mockoauth_<24 hex>"
 
 ```yaml
 store: { bucket: codes, key: "{code}", value: "{login}" }   # or  valueVar: <var>  to store a var verbatim
+store: { bucket: tokens, key: "{token}", value: "{login}", ttl: 3600 }   # expires after 3600 virtual seconds
 ```
+
+With `ttl` (seconds), the entry carries an expiry on the [virtual clock](#the-virtual-clock);
+once the clock passes it, `consume`/`lookup` treat the entry as a miss (an expiring code or
+token).
 
 ### `consume` / `lookup` — read a bucket entry
 
-Both read `bucket[key]` into `as`. `consume` also **deletes** it (single-use). A miss
-returns the `miss` response and stops.
+Both read `bucket[key]` into `as`. `consume` also **deletes** it (single-use). A miss — or
+an entry that has **expired** (TTL) — returns the `miss` response and stops.
 
 ```yaml
 consume: { bucket: codes,  key: "{code}", as: login, miss: { status: 400, json: { error: "bad_verification_code" } } }
@@ -161,6 +167,53 @@ operations:
       resolve: { seed: users, by: login, eq: "{login}", as: user, miss: { status: 401, json: { message: "Bad credentials" } } }
       respond: { status: 200, jsonVar: user }
 ```
+
+## `limit` — rate limiting
+
+A `limit` runs early (right after `bind`) and short-circuits with `429` +
+`X-Rate-Limit-*` headers when a per-key request budget for the current window is exceeded.
+The window is keyed on the [virtual clock](#the-virtual-clock), so the counter resets when
+the clock crosses a window boundary — deterministic, no wall-clock dependence.
+
+```yaml
+effect:
+  bind:  { client: { header: authorization, bearer: true } }   # what to limit on
+  limit:
+    bucket: rl
+    key:    "{client}"                 # per-client budget (use a constant for a global one)
+    max:    100                        # requests per window
+    window: 60                         # window seconds (virtual clock)
+    miss:   { status: 429, json: { errorCode: "E0000047", errorSummary: "rate limit exceeded" } }
+  # ... then the operation's real verb (get/list/respond/...) ...
+```
+
+When the budget is exceeded the `miss` response is returned with
+`X-Rate-Limit-Limit`/`-Remaining`/`-Reset` headers added. A `limit` is *not* terminal — on
+pass-through the operation continues to its real response.
+
+## The virtual clock
+
+A twin can carry a **virtual clock**: a "now" that is *frozen* until you advance it, so any
+time-based behavior (TTL expiry, rate-limit windows, `iat`/`exp` claims) is perfectly
+deterministic. Enable it explicitly, or it turns on automatically whenever an op uses
+`store.ttl`, `limit`, or a `now` bind.
+
+```yaml
+state:
+  clock: { start: "2024-01-01T00:00:00Z" }   # epoch number or ISO string; default a fixed epoch
+```
+
+Read or move it on the **running** twin (this never reposts/resets it):
+
+```sh
+mocksys clock <twin>                 # show the current virtual time
+mocksys clock <twin> advance 1h      # 1h / 30m / 45s / 2d / <seconds>
+mocksys clock <twin> set 2024-06-01T00:00:00Z   # an epoch or ISO timestamp
+```
+
+Under the hood mocksys adds a built-in control endpoint at `POST /_mocksys/clock` to any
+clock-using twin; the `clock` command drives it. Effects read the clock via the `now` bind
+and via `store.ttl`/`limit`.
 
 ## Collections (CRUD resources)
 

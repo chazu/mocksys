@@ -140,11 +140,11 @@ Verified golden (exit 0), diff-vs-identical (0 diffs), diff-vs-divergent (exit 1
 collections, `conform`, and `genes`; `inspect` shows friendly `/users/{id}` paths for a
 twin instead of compiled regex.
 
-### Deliberately deferred (beyond the Okta done-condition)
-- Determinism primitives (a virtual clock for token/session expiry; a stateful
-  rate-limit gene emitting `X-Rate-Limit-*`/429). The DTU "deterministic/stress" goals
-  are partially met by `conform`'s fresh-seed-per-run determinism; clock/rate-limit are
-  the natural next genes, built on the same inject layer.
+### Follow-on (shipped — see `PLAN-CLOCK.md`)
+- Determinism primitives: a **virtual clock** (token/session expiry, `store.ttl`, `now`
+  bind, `mocksys clock`) and a **rate-limit gene** (`429` + `X-Rate-Limit-*` over a
+  clock-windowed budget), both wired into `kit okta` via `--token-ttl`/`--rate-limit` and
+  exposed as genes. Plus a human-friendly `docs/walkthrough.md` and runnable `examples/`.
 - OIDC userinfo resolves a separate `oidc_users` seed, not the live SCIM `users`
   collection (a twin can log in as seeded accounts but not as SCIM-created ones yet).
   A `resolve-from-collection` variant would unify them.

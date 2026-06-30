@@ -10,13 +10,19 @@ This is the reference manual. For installation and a 60-second tour, see the
 
 ## Map
 
+**New here? Start with the [walkthrough](walkthrough.md)** — a friendly, end-to-end tour
+that builds a digital twin of Okta and explains every part as it goes.
+
 | Doc | What it covers |
 |---|---|
+| [walkthrough.md](walkthrough.md) | **Start here.** A narrated tour: stand up an Okta twin (CRUD, filtering, OIDC, rate limits, expiring tokens) and understand each piece. |
 | [architecture.md](architecture.md) | The system: modules, the contract→imposter→Mountebank pipeline, the on-disk store, the runtime, stateless vs stateful. |
 | [contracts.md](contracts.md) | The `contract.yaml` format: operations, request matching, responses, named examples, response templating, transport faults, validation. |
-| [effects.md](effects.md) | The declarative **stateful** layer — the `effect` language. State buckets and resource **collections**, every verb, the SCIM filter grammar, pagination, and the generated-injection model. |
+| [effects.md](effects.md) | The declarative **stateful** layer — the `effect` language. State buckets and resource **collections**, every verb, the SCIM filter grammar, pagination, the **virtual clock** + TTL, **rate limiting**, and the generated-injection model. |
 | [twins.md](twins.md) | Building **digital twins**: kits, composable **genes**, the `okta` twin anatomy, and the `conform` fidelity loop. |
 | [cli.md](cli.md) | Full command reference, grouped, with every flag. |
+
+Runnable contracts that back the walkthrough live in [`examples/`](../examples/).
 
 ## The shape of the system in one paragraph
 

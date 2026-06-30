@@ -87,6 +87,12 @@
                                      (if (get spec "bearer")
                                        (str v "=bearer(hv(" h "));")
                                        (str v "=hv(" h ");")))
+      (contains? spec "now")       (let [n (get spec "now")
+                                         add (if (map? n) (or (get n "add") 0) 0)
+                                         t   (str "(now(state)+" add ")")]
+                                     (if (and (map? n) (get n "iso"))
+                                       (str v "=new Date(" t "*1000).toISOString();")
+                                       (str v "=" t ";")))
       :else (str v "='';"))))
 
 (defn- resp-js
@@ -173,6 +179,77 @@
     "remove" (remove-js (get effect "remove"))
     "list"   (list-js   (get effect "list"))))
 
+;; --- rate limiting --------------------------------------------------------
+
+(defn- limit-js
+  "A per-key counter over a clock-windowed bucket. Short-circuits with 429 (+
+   X-Rate-Limit-* headers) when the budget for the current window is exceeded; the
+   window key embeds floor(now/window) so it resets when the virtual clock advances."
+  [l]
+  (let [bname  (js (get l "bucket"))
+        key*   (str "interp(" (js (get l "key")) ",V)")
+        max*   (or (get l "max") 60)
+        window (or (get l "window") 60)
+        miss   (resp-js (or (get l "miss")
+                            {"status" 429
+                             "json" {"errorCode" "E0000047"
+                                     "errorSummary" "API call exceeded rate limit due to too many requests."}}))]
+    (str "{state[" bname "]=state[" bname "]||{};"
+         "var _win=Math.floor(now(state)/" window ")*" window ",_lk=" key* "+\"|\"+_win;"
+         "var _c=(state[" bname "][_lk]||0)+1;state[" bname "][_lk]=_c;"
+         "if(_c>" max* "){var _m=" miss ";_m.headers=_m.headers||{};"
+         "_m.headers['X-Rate-Limit-Limit']=String(" max* ");"
+         "_m.headers['X-Rate-Limit-Remaining']='0';"
+         "_m.headers['X-Rate-Limit-Reset']=String(_win+" window ");return _m;}}")))
+
+;; --- virtual clock --------------------------------------------------------
+
+(def default-clock-start
+  "A fixed default epoch (2023-11-14T22:13:20Z) so a clock is deterministic out of
+   the box, independent of wall time."
+  1700000000)
+
+(defn- op-uses-clock? [op]
+  (let [e (get op "effect")]
+    (boolean
+     (or (get-in e ["store" "ttl"])
+         (get e "limit")
+         (some (fn [[_ spec]] (and (map? spec) (contains? spec "now"))) (get e "bind"))))))
+
+(defn contract-uses-clock?
+  "True if the contract enables a virtual clock — explicitly (`state.clock`) or
+   implicitly (any op uses `store.ttl`, `limit`, or a `now` bind)."
+  [contract]
+  (boolean (or (get-in contract ["state" "clock"])
+               (some op-uses-clock? (get contract "operations")))))
+
+(defn clock-start
+  "The virtual clock's starting epoch (seconds): `state.clock.start` as an epoch
+   number or an ISO string, else the fixed default."
+  [contract]
+  (let [s (get-in contract ["state" "clock" "start"])]
+    (cond
+      (number? s) s
+      (string? s) (let [e (js/Math.floor (/ (.getTime (js/Date. s)) 1000))]
+                    (if (js/isNaN e) default-clock-start e))
+      :else default-clock-start)))
+
+(defn clock-control-stub
+  "A built-in stub at /_mocksys/clock that reads or moves the virtual clock. POST
+   {advance:N} adds N seconds; POST {set:T} sets the epoch; any request returns the
+   current virtual time. Added to a compiled imposter when the contract uses a clock."
+  [start]
+  {"predicates" [{"deepEquals" {"path" "/_mocksys/clock"}}]
+   "responses"
+   [{"inject"
+     (str "function (request, state, logger) {"
+          "state.__now=state.__now||" start ";"
+          "var b={};try{b=JSON.parse(request.body||'{}')||{};}catch(e){}"
+          "if(typeof b.set==='number')state.__now=b.set;"
+          "else if(typeof b.advance==='number')state.__now=state.__now+b.advance;"
+          "return {statusCode:200,headers:{'Content-Type':'application/json'},"
+          "body:JSON.stringify({now:state.__now,iso:new Date(state.__now*1000).toISOString()})};}")}]})
+
 ;; --- handshake (flat-bucket) verb emission --------------------------------
 
 (defn- effect-body-js
@@ -186,16 +263,17 @@
      (concat
       ;; bind: pull request values into vars
       (for [[n spec] (get effect "bind")] (bind-js n spec))
-      ;; consume / lookup (read a bucket; consume also deletes; miss -> early return)
+      ;; limit: rate-limit guard (after bind, before any work; 429 short-circuit)
+      (when-let [l (get effect "limit")] [(limit-js l)])
+      ;; consume / lookup (read a bucket; consume also deletes; expired/missing -> early return)
       (for [[op del?] [["consume" true] ["lookup" false]]
             :let [l (get effect op)]
             :when l]
-        (let [bucket (str "state[" (js (get l "bucket")) "]")
-              key*   (str "interp(" (js (get l "key")) ",V)")
-              miss   (resp-js (or (get l "miss") {"status" 404}))]
-          (str "{var _k=" key* ",_h=" bucket "[_k];"
+        (let [bname (js (get l "bucket"))
+              key*  (str "interp(" (js (get l "key")) ",V)")
+              miss  (resp-js (or (get l "miss") {"status" 404}))]
+          (str "{var _h=readBucket(state," bname "," key* "," (if del? "true" "false") ");"
                "if(_h===undefined){return " miss ";}"
-               (when del? (str "delete " bucket "[_k];"))
                "V[" (js (get l "as")) "]=_h;}")))
       ;; resolve (find a seed-array item by field == a var; miss -> early return)
       (when-let [r (get effect "resolve")]
@@ -213,14 +291,18 @@
         ;; terminal collection action (CRUD/list) — forms + returns its own response
         [(collection-terminal-js coll-verb effect)]
         (concat
-         ;; store: write a flat state-bucket entry (using freshly bound/minted vars)
+         ;; store: write a flat state-bucket entry (using freshly bound/minted vars).
+         ;; With `ttl`, the entry carries an expiry so consume/lookup miss once the
+         ;; virtual clock passes it (an expiring code/token).
          (when-let [s (get effect "store")]
            (let [bucket (str "state[" (js (get s "bucket")) "]")
                  key*   (str "interp(" (js (get s "key")) ",V)")
                  val*   (if (contains? s "valueVar")
                           (str "V[" (js (get s "valueVar")) "]")
                           (str "interp(" (js (or (get s "value") "")) ",V)"))]
-             [(str bucket "[" key* "]=" val* ";")]))
+             (if-let [ttl (get s "ttl")]
+               [(str bucket "[" key* "]={__ttl:true,v:" val* ",exp:now(state)+" ttl "};")]
+               [(str bucket "[" key* "]=" val* ";")])))
          ;; respond
          [(str "return " (resp-js (or (get effect "respond") {"status" 200})) ";")]))))))
 
@@ -240,6 +322,11 @@
    "function deepInterp(x,v){if(typeof x==='string')return interp(x,v);"
    "if(Array.isArray(x))return x.map(function(e){return deepInterp(e,v);});"
    "if(x&&typeof x==='object'){var o={};for(var k in x){o[k]=deepInterp(x[k],v);}return o;}return x;}"
+   ;; --- virtual clock + ttl-aware bucket reads ---
+   "function now(s){return s.__now||0;}"
+   "function readBucket(s,bucket,key,del){var b=s[bucket]||{},h=b[key];if(h===undefined)return undefined;"
+   "if(h&&typeof h==='object'&&h.__ttl){if(now(s)>h.exp){delete b[key];return undefined;}if(del)delete b[key];return h.v;}"
+   "if(del)delete b[key];return h;}"
    "function merge1(a,b){var o={},k;for(k in a)o[k]=a[k];for(k in b){"
    "if(b[k]&&typeof b[k]==='object'&&!Array.isArray(b[k])&&a[k]&&typeof a[k]==='object'){"
    "var s={},j;for(j in a[k])s[j]=a[k][j];for(j in b[k])s[j]=b[k][j];o[k]=s;}else{o[k]=b[k];}}return o;}"
@@ -275,8 +362,9 @@
    `seed` (handshake seed arrays) and `collections` ({name {idField seed}}) are
    embedded as literals so the function is self-contained. Every declared collection
    is seeded once into shared `state` (idempotent), so all ops see the same data."
-  ([op seed] (gen op seed nil))
-  ([op seed collections]
+  ([op seed] (gen op seed nil nil))
+  ([op seed collections] (gen op seed collections nil))
+  ([op seed collections clock-start]
    (let [effect    (get op "effect")
          buck-init (->> (buckets-of effect)
                         (map (fn [b] (str "state[" (js b) "]=state[" (js b) "]||{};")))
@@ -286,12 +374,14 @@
                                (str "initColl(state," (js name) ","
                                     (js (or (get spec "idField") "id")) ","
                                     (js (or (get spec "seed") [])) ");")))
-                        str/join)]
+                        str/join)
+         clock-init (when clock-start (str "state.__now=state.__now||" clock-start ";"))]
      (str "function (request, state, logger) {"
           prelude
           "var seed=" (js (or seed {})) ";"
           "var V={};"
           buck-init
           coll-init
+          clock-init
           (effect-body-js effect)
           "}"))))
