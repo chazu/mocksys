@@ -36,14 +36,17 @@
    volatile (defaults to the base set; a service profile may widen it)."
   ([stub] (stub-summary stub base-volatile-headers))
   ([stub vol-set]
-   (let [resp-is (get-in stub ["responses" 0 "is"])
+   (let [resp0   (get-in stub ["responses" 0])
+         inject? (contains? resp0 "inject")
+         resp-is (get resp0 "is")
          headers (get resp-is "headers")
          vol     (->> (keys headers)
                       (filter #(contains? vol-set (str/lower-case %)))
                       vec)]
      {:method           (find-field stub "method")
       :path             (find-field stub "path")
-      :status           (get resp-is "statusCode")
+      :status           (if inject? "stateful" (get resp-is "statusCode"))
+      :stateful         inject?
       :headers          headers
       :match-fields     (pred-fields stub)
       :volatile-headers vol})))

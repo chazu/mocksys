@@ -80,7 +80,38 @@
 
 (defn read-contract [name]
   (let [file (contract-file name)]
-    (when (fs/existsSync file) (read-yaml-raw file))))
+    (when (fs/existsSync file)
+      (try (read-yaml-raw file)
+           (catch :default e
+             (throw (js/Error. (str "contract.yaml for '" name "' is not valid YAML — "
+                                    (.-message e)
+                                    "  (tip: quote paths with {param}, e.g. path: \"/users/{id}\")"))))))))
+
+(defn watch-contract!
+  "Invoke `on-change` (debounced by the caller) whenever the scenario's
+   contract.yaml changes on disk. Returns the fs watcher."
+  [name on-change]
+  (fs/watch (contract-file name) (fn [_event _filename] (on-change))))
+
+;; A *draft* contract (contract.draft.yaml): recording can land here for review
+;; before `promote` makes it the canonical contract — recording as an input, not
+;; the source of truth.
+(defn- draft-file [name] (path/join (scenario-dir name) "contract.draft.yaml"))
+
+(defn write-draft! [name contract]
+  (ensure-dir! (scenario-dir name))
+  (fs/writeFileSync (draft-file name) (yaml/dump (clj->js contract))))
+
+(defn has-draft? [name] (fs/existsSync (draft-file name)))
+
+(defn promote-draft!
+  "Make a scenario's draft its canonical contract.yaml. Returns true on success,
+   false if there was no draft."
+  [name]
+  (let [d (draft-file name)]
+    (when (fs/existsSync d)
+      (fs/renameSync d (contract-file name))
+      true)))
 
 (defn has-contract? [name]
   (fs/existsSync (contract-file name)))
@@ -106,6 +137,28 @@
 (defn slurp [file]
   (when-not (fs/existsSync file) (throw (js/Error. (str "no such file: " file))))
   (fs/readFileSync file "utf8"))
+
+;; --- stacks (named sets of scenarios brought up together) -----------------
+
+(def stacks-dir (path/join root "stacks"))
+(defn- stack-file [name] (path/join stacks-dir (str name ".yaml")))
+
+(defn write-stack! [name m]
+  (ensure-dir! stacks-dir)
+  (write-yaml! (stack-file name) m))
+
+(defn read-stack [name]
+  (let [f (stack-file name)]
+    (when (fs/existsSync f) (read-yaml f))))
+
+(defn list-stacks []
+  (if-not (fs/existsSync stacks-dir)
+    []
+    (->> (fs/readdirSync stacks-dir)
+         (map str)
+         (filter #(str/ends-with? % ".yaml"))
+         (map #(str/replace % #"\.yaml$" ""))
+         sort)))
 
 ;; --- service templates ----------------------------------------------------
 

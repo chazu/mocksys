@@ -21,6 +21,9 @@
             [mocksys.analyze :as analyze]
             [mocksys.service :as service]
             [mocksys.contract :as contract]
+            [mocksys.inject :as inject]
+            [mocksys.conform :as conform]
+            [mocksys.kits :as kits]
             [mocksys.openapi :as openapi]
             [mocksys.bundle :as bundle]
             [mocksys.git :as git]))
@@ -45,6 +48,26 @@
 (defn- die [msg]
   (binding [*print-fn* *print-err-fn*] (println "error:" msg))
   (js/process.exit 1))
+
+(defn- parse-kv
+  "`K=V,K2=V2` -> {\"K\" \"V\" \"K2\" \"V2\"}. Splits each pair on the first `=`
+   only, so values may contain `=`. Bare `K` (no `=`) maps to \"\"."
+  [s]
+  (when (string? s)
+    (into {} (for [pair (str/split s #",") :when (seq (str/trim pair))]
+               (let [i (str/index-of pair "=")]
+                 (if i [(str/trim (subs pair 0 i)) (subs pair (inc i))]
+                     [(str/trim pair) ""]))))))
+
+(defn- parse-conditions
+  "`k=v,present-key` -> {\"k\" {\"equals\" \"v\"} \"present-key\" {\"present\" true}}.
+   A bare key becomes a presence predicate; `k=v` an equality predicate."
+  [s]
+  (when (string? s)
+    (into {} (for [pair (str/split s #",") :when (seq (str/trim pair))]
+               (let [i (str/index-of pair "=")]
+                 (if i [(str/trim (subs pair 0 i)) {"equals" (subs pair (inc i))}]
+                     [(str/trim pair) {"present" true}]))))))
 
 ;; --- contract lifecycle ---------------------------------------------------
 ;; The contract is canonical; the imposter is a build artifact. `compile!` lowers
@@ -95,9 +118,14 @@
     (when-not name (die (str "init needs a service: init <" (str/join "|" (sort (keys service/templates))) ">")))
     (let [tmpl (service/write-template! name)]
       (println (str "✚ initialized service '" name "'  ->  .mocks/services/" name ".yaml"))
+      (println "  (a recording profile: redact/volatile headers + default target)")
       (when-let [t (:default_target tmpl)] (println (str "  default target: " t)))
-      (println (str "  record a scenario with:  mocksys record " name "/<scenario>"
-                    (when (:default_target tmpl) "  (target optional)"))))))
+      (println "  author a scenario:")
+      (println (str "    mocksys new " name "/<scenario>            # scaffold a contract to edit"))
+      (println (str "    mocksys add " name "/<scenario> --request 'GET /path' --status 200 --text ok"))
+      (println "  or seed one from live traffic (needs real access):")
+      (println (str "    mocksys record " name "/<scenario>"
+                    (when (:default_target tmpl) "         # target optional"))))))
 
 (defn cmd-record [{:keys [pos opts]}]
   (let [scenario (or (:scenario opts) (first pos))
@@ -115,9 +143,15 @@
       (println "  send your traffic at the proxy URL above, then:")
       (println (str "    mocksys freeze " scenario)))))
 
-(defn cmd-freeze [{:keys [pos]}]
-  (let [scenario (first pos)]
-    (when-not scenario (die "freeze needs a scenario: freeze <name>"))
+(defn cmd-freeze
+  "Scrub a recording and lift it into a contract. By default the contract becomes
+   canonical immediately; with --draft it lands as contract.draft.yaml for review,
+   to be `promote`d (or discarded) — recording as an input, not the source of truth:
+     freeze <name> [--draft]"
+  [{:keys [pos opts]}]
+  (let [scenario (first pos)
+        draft?   (:draft opts)]
+    (when-not scenario (die "freeze needs a scenario: freeze <name> [--draft]"))
     (let [{:keys [port]} (or (store/read-recording scenario)
                              (die (str "no active recording for '" scenario "'")))
           prof (service/effective scenario)]
@@ -128,7 +162,8 @@
         (store/write-imposter! scenario imposter)
         ;; Recorded scenarios are contract-canonical too: lift the scrubbed imposter
         ;; into a contract so `examples`/`use`/`fault` work on it like any other.
-        (store/write-contract! scenario (contract/lift imposter scenario (:service prof)))
+        (let [c (contract/lift imposter scenario (:service prof))]
+          (if draft? (store/write-draft! scenario c) (store/write-contract! scenario c)))
         (store/write-mock! scenario {:scenario scenario
                                      :service  (:service prof)
                                      :port     port
@@ -138,32 +173,82 @@
                                      :redacted (vec (sort redacted))
                                      :stripped (vec (sort stripped))})
         (mb/delete-imposter! port)
-        (println (str "■ froze '" scenario "' — " stub-count " stub(s)"))
+        (println (str "■ froze '" scenario "' — " stub-count " stub(s)"
+                      (when draft? " (draft)")))
         (when (seq redacted) (println (str "  redacted secrets:  " (str/join ", " (sort redacted)))))
         (when (seq stripped) (println (str "  stripped volatile: " (str/join ", " (sort stripped)))))
-        (println (str "  run it with:  mocksys run " scenario))))))
+        (if draft?
+          (do (println (str "  review:   mocksys inspect " scenario "   /   mocksys doctor " scenario))
+              (println (str "  promote:  mocksys promote " scenario "   (makes the draft canonical)")))
+          (println (str "  run it with:  mocksys run " scenario)))))))
+
+(defn cmd-promote
+  "Make a scenario's reviewed draft its canonical contract:  promote <name>"
+  [{:keys [pos]}]
+  (let [scenario (first pos)]
+    (when-not scenario (die "promote needs a scenario: promote <name>"))
+    (if (store/promote-draft! scenario)
+      (let [imposter (compile! scenario)]
+        (println (str "✔ promoted '" scenario "' — draft is now contract.yaml ("
+                      (count (get imposter "stubs")) " stub(s))")))
+      (die (str "no draft for '" scenario "' — `freeze " scenario " --draft` first")))))
 
 (defn ensure-running!
-  "Make `scenario` live and return its port. Reuses the running port unless
-   --port forces a move; auto-allocates a free port otherwise. Always (re)posts
-   with recordRequests=true so `requests`/`assert` have data."
+  "Make `scenario` live and return its port. Resolution order: explicit --port >
+   the already-running port > a port *pinned* on the contract > a fresh free port.
+   An explicit --port is persisted onto the contract so it stays pinned. Always
+   (re)posts with recordRequests=true so `requests`/`assert` have data."
   [scenario port-opt]
-  (p/let [_        (mb/ensure-up!)
-          live     (mb/list-imposters)
-          existing (first (filter #(= (:name %) scenario) live))
-          imposter (store/read-imposter scenario)
-          port     (cond
-                     port-opt (js/parseInt port-opt)
-                     existing (:port existing)
-                     :else    (mb/free-port))]
-    (mb/delete-imposter! port)
-    (mb/post-imposter! (assoc imposter "port" port "name" scenario "recordRequests" true))
-    port))
+  (let [imposter  (store/read-imposter scenario)
+        contract  (store/read-contract scenario)
+        pinned    (get contract "port")
+        stateful? (inject/imposter-stateful? imposter)]
+    (when (and stateful? (let [v (.-MOCKSYS_NO_INJECTION js/process.env)] (and v (not= v ""))))
+      (die (str "'" scenario "' is a stateful mock (needs Mountebank injection), but "
+                "MOCKSYS_NO_INJECTION is set. Unset it to run stateful scenarios.")))
+    (p/let [_        (mb/ensure-up! stateful?)
+            live     (mb/list-imposters)
+            existing (first (filter #(= (:name %) scenario) live))
+            port     (cond
+                       port-opt (js/parseInt port-opt)
+                       existing (:port existing)
+                       pinned   pinned
+                       :else    (mb/free-port))]
+      (mb/delete-imposter! port)
+      (let [imp (assoc imposter "port" port "name" scenario "recordRequests" true)]
+        (p/let [_ (if stateful?
+                    (mb/post-imposter-injecting! imp)
+                    (mb/post-imposter! imp))]
+          ;; persist an explicit --port as a pin (only when it actually changed, so
+          ;; we don't churn contract.yaml's mtime and force needless recompiles)
+          (when (and port-opt contract (not= port pinned))
+            (store/write-contract! scenario (assoc contract "port" port)))
+          port)))))
 
 (defn- env-vars-for [scenario opts prof]
   (cond (:env opts)        [(:env opts)]
         (seq (:env prof))  (:env prof)
         :else              ["BASE_URL"]))
+
+(defn- watch-scenario!
+  "Recompile + reload `scenario` whenever its contract.yaml changes (debounced).
+   Keeps the process alive — the Tilt-style save-and-reload dev loop."
+  [scenario]
+  (let [timer (atom nil)]
+    (println (str "  ⊙ watching contract.yaml — edits recompile + reload (Ctrl-C to stop)"))
+    (store/watch-contract!
+     scenario
+     (fn []
+       (when @timer (js/clearTimeout @timer))
+       (reset! timer
+               (js/setTimeout
+                (fn []
+                  (-> (p/do (compile! scenario)
+                            (ensure-running! scenario nil))
+                      (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ http://localhost:" port))))
+                      (p/catch (fn [e] (binding [*print-fn* *print-err-fn*]
+                                         (println (str "  ✗ reload failed: " (.-message e))))))))
+                150))))))
 
 (defn cmd-run [{:keys [pos opts]}]
   (let [scenario (first pos)]
@@ -173,20 +258,64 @@
       (p/let [port (ensure-running! scenario (:port opts))]
         (println (str "▶ running '" scenario "' at http://localhost:" port))
         (doseq [v (env-vars-for scenario opts prof)]
-          (println (str "  export " v "=http://localhost:" port)))))))
+          (println (str "  export " v "=http://localhost:" port)))
+        (when (:watch opts) (watch-scenario! scenario))))))
+
+(defn- scenario-port-pin!
+  "The scenario's pinned port, allocating+persisting a free one if it has none.
+   Used by emitters that must name a stable port without starting the mock."
+  [scenario]
+  (p/let [c      (store/read-contract scenario)
+          pinned (get c "port")
+          port   (or pinned (mb/free-port))]
+    (when (and (not pinned) c)
+      (store/write-contract! scenario (assoc c "port" port)))
+    port))
+
+(defn- tilt-snippet
+  "A Tilt `local_resource` that serves the scenario on a pinned port — drop into a
+   Tiltfile to run the mock as part of a dev stack (cf. snooker's mockoauth)."
+  [scenario port vars]
+  (let [res (str/replace scenario "/" "-")
+        url (str "http://localhost:" port)]
+    (str "# mocksys mock for " scenario " — add to your Tiltfile\n"
+         "local_resource(\n"
+         "    '" res "',\n"
+         "    serve_cmd='mocksys run " scenario " --port " port "',\n"
+         "    links=[link('" url "', '" scenario "')],\n"
+         "    labels=['mocks'],\n"
+         ")\n"
+         "# point your app at: " (str/join ", " (map #(str % "=" url) vars)) "\n")))
 
 (defn cmd-env
-  "Eval-safe: emits only `export` lines so `eval \"$(mocksys env NAME)\"` wires a
-   shell up to the mock, starting it if needed."
+  "Wire a consumer up to the mock (starting it if needed). Default output is
+   eval-safe `export` lines: `eval \"$(mocksys env NAME)\"`.
+     --json   emit JSON {scenario, port, url, <env vars>}
+     --tilt   emit a Tiltfile local_resource (pins a stable port; does not start)"
   [{:keys [pos opts]}]
   (let [scenario (first pos)]
-    (when-not scenario (die "env needs a scenario: env <name>"))
+    (when-not scenario (die "env needs a scenario: env <name> [--json|--tilt]"))
     (ensure-compiled! scenario)
-    (let [prof (service/effective scenario)]
-      (p/let [port (ensure-running! scenario (:port opts))]
-        (doseq [v (env-vars-for scenario opts prof)]
-          (println (str "export " v "=http://localhost:" port)))
-        (println (str "export MOCKSYS_SCENARIO=" scenario))))))
+    (let [prof (service/effective scenario)
+          vars (env-vars-for scenario opts prof)]
+      (cond
+        (:tilt opts)
+        (p/let [port (scenario-port-pin! scenario)]
+          (print (tilt-snippet scenario port vars)))
+
+        (:json opts)
+        (p/let [port (ensure-running! scenario (:port opts))]
+          (let [url (str "http://localhost:" port)]
+            (println (js/JSON.stringify
+                      (clj->js (into {"scenario" scenario "port" port "url" url}
+                                     (map (fn [v] [v url]) vars)))
+                      nil 2))))
+
+        :else
+        (p/let [port (ensure-running! scenario (:port opts))]
+          (doseq [v vars]
+            (println (str "export " v "=http://localhost:" port)))
+          (println (str "export MOCKSYS_SCENARIO=" scenario)))))))
 
 (defn- call-line [{:keys [method path status]} i]
   (str "  " (inc i) ". " method " " path " -> " status))
@@ -197,7 +326,16 @@
     (ensure-compiled! scenario)
     (let [imposter (store/read-imposter scenario)
           prof     (service/effective scenario)
-          stubs    (analyze/summarize imposter (:volatile prof))
+          ;; Prefer the contract's friendly method/path (e.g. /users/{id}) over the
+          ;; imposter's compiled regex — stubs map 1:1 to operations in order.
+          ops      (get (or (store/read-contract scenario) {}) "operations" [])
+          stubs    (->> (analyze/summarize imposter (:volatile prof))
+                        (map-indexed
+                         (fn [i s]
+                           (if-let [op (nth ops i nil)]
+                             (assoc s :method (get-in op ["request" "method"])
+                                      :path   (get-in op ["request" "path"]))
+                             s))))
           redacted (->> stubs
                         (mapcat (fn [s] (keep (fn [[k v]] (when (= "REDACTED" v) k)) (:headers s))))
                         distinct sort)
@@ -225,10 +363,15 @@
     (ensure-compiled! scenario)
     (let [imposter (store/read-imposter scenario)
           prof     (service/effective scenario)
+          ;; Overfit flagging targets *recorded* traffic (a proxy capturing a full
+          ;; body/header match). Authored/imported/kit predicates are intentional
+          ;; (request-conditional branching), so don't second-guess them.
+          origin   (get (or (store/read-contract scenario) {}) "origin")
+          recorded? (or (nil? origin) (= origin "recorded"))
           stubs    (analyze/summarize imposter (:volatile prof))
           warnings (for [{:keys [method path] :as s} stubs
                          w (concat
-                            (when-let [over (seq (analyze/overfit s))]
+                            (when-let [over (and recorded? (seq (analyze/overfit s)))]
                               [(str method " " path ": over-specific matcher on "
                                     (str/join ", " over) " — consider matching method+path only")])
                             (when-let [vol (seq (:volatile-headers s))]
@@ -309,12 +452,78 @@
                 (println (str "✗ did NOT see " saw "  (" (count reqs) " request(s) recorded)")))
               (js/process.exit 1)))))))
 
+(defn cmd-conform
+  "Replay a request corpus at the twin and diff it against reality — the fidelity
+   loop that drives a twin toward zero observable delta:
+     conform <scenario> --corpus calls.json [--against URL] [--ignore k1,k2] [--headers]
+   With --against URL, each response is diffed twin-vs-live (status + body, normalized
+   by the service's volatile fields; --headers also compares non-volatile headers).
+   Without it, it's a golden check: each status must equal the request's `expect`
+   (or, absent one, be < 500). Omit --corpus to replay what the twin already received.
+   Exits 1 on any divergence — drops straight into CI."
+  [{:keys [pos opts]}]
+  (let [scenario (first pos)]
+    (when-not scenario (die "conform needs a scenario: conform <name> --corpus FILE [--against URL]"))
+    (ensure-compiled! scenario)
+    (let [prof     (service/effective scenario)
+          against  (when (string? (:against opts)) (:against opts))
+          ignore   (when (string? (:ignore opts)) (vec (remove str/blank? (str/split (:ignore opts) #","))))
+          diff-opts {:ignore ignore :vol-set (:volatile prof) :compare-headers? (boolean (:headers opts))}]
+      (p/let [;; Load the corpus BEFORE (re)starting the twin: ensure-running! reposts
+              ;; the imposter (clearing its recorded requests), so the no-corpus
+              ;; "replay what the twin already saw" mode must read them first.
+              live     (mb/list-imposters)
+              existing (first (filter #(= (:name %) scenario) live))
+              corpus   (if (string? (:corpus opts))
+                         (conform/parse-corpus (store/slurp (:corpus opts)))
+                         (if existing
+                           (p/let [full (mb/get-imposter (:port existing))]
+                             (conform/recorded->corpus (get full "requests")))
+                           []))
+              port      (ensure-running! scenario (:port opts))
+              twin-base (str "http://localhost:" port)]
+        (when (empty? corpus)
+          (die (str "empty corpus — pass --corpus FILE, or `run` the twin, drive some "
+                    "traffic at it, then `conform " scenario "` to replay it")))
+        (println (str "# conform: " scenario "  (" (count corpus) " request(s) — "
+                      (if against (str "diff vs " against) "golden mode") ")"))
+        (-> (p/loop [reqs corpus i 0 fails 0]
+              (if (empty? reqs)
+                {:fails fails :total (count corpus)}
+                (let [req (first reqs)
+                      label (str (get req "method" "GET") " " (get req "path"))]
+                  (p/let [tw (conform/fire twin-base req)
+                          lv (when against (conform/fire against req))]
+                    (let [[ok? note]
+                          (if against
+                            (if-let [rs (conform/diff-one tw lv diff-opts)]
+                              [false (str "DIFF: " (str/join "; " rs))]
+                              [true (str "match (" (:status tw) ")")])
+                            (let [exp (get req "expect")]
+                              (if exp
+                                [(= (:status tw) exp) (str (:status tw) " (expect " exp ")")]
+                                [(< (:status tw) 500) (str (:status tw))])))]
+                      (println (str "  " (if ok? "✓" "✗") " " label "  →  " note))
+                      (p/recur (rest reqs) (inc i) (if ok? fails (inc fails))))))))
+            (p/then
+             (fn [{:keys [fails total]}]
+               (println)
+               (if (zero? fails)
+                 (println (str "  ✓ conformant — " total " request(s), 0 diffs"))
+                 (do (binding [*print-fn* *print-err-fn*]
+                       (println (str "  ✗ " fails "/" total " diverged")))
+                     (js/process.exit 1))))))))))
+
 (defn cmd-ls [_]
   (let [scenarios (store/list-scenarios)]
     (p/let [live (mb/list-imposters)]
       (let [by-name (into {} (map (juxt :name identity)) live)]
         (if (empty? scenarios)
-          (println "no scenarios yet — record one with `mocksys record <service/name> --target URL`")
+          (println (str "no scenarios yet — author one:\n"
+                        "  mocksys new <service/name>                 scaffold a contract\n"
+                        "  mocksys import openapi <spec>              one scenario per operation\n"
+                        "  mocksys kit oauth2 --provider github       a stateful recipe\n"
+                        "  mocksys record <service/name> --target URL seed from live traffic"))
           (do
             (println (str (count scenarios) " scenario(s):"))
             (doseq [id scenarios]
@@ -345,6 +554,60 @@
                 (println (str "■ stopped '" scenario "' (port " (:port imp) ")")))
           (println (str "'" scenario "' is not running")))))))
 
+;; --- stacks: bring up a named set of scenarios together -------------------
+
+(defn cmd-stack
+  "Define (or show) a stack — a named set of scenarios brought up together:
+     stack <name> <scenario>...      define/replace
+     stack <name>                    show"
+  [{:keys [pos]}]
+  (let [name (first pos) scenarios (vec (rest pos))]
+    (when-not name (die "stack needs a name: stack <name> <scenario>...  (or `stack <name>` to show)"))
+    (if (empty? scenarios)
+      (if-let [s (store/read-stack name)]
+        (do (println (str "# stack " name))
+            (doseq [sc (:scenarios s)] (println (str "  · " sc)))
+            (println) (println (str "  bring it up:  mocksys up " name)))
+        (die (str "no stack '" name "' yet — define it: stack " name " <scenario>...")))
+      (do (store/write-stack! name {:scenarios scenarios})
+          (println (str "✚ stack '" name "' = " (str/join ", " scenarios)))
+          (println (str "  bring it up:  mocksys up " name))))))
+
+(defn cmd-up
+  "Bring up every scenario in a stack (each on its pinned/auto port) and print a
+   combined env block:  up <stack>"
+  [{:keys [pos]}]
+  (let [name  (first pos)
+        stack (or (store/read-stack name)
+                  (die (str "no stack '" name "' — `mocksys stack " name " <scenario>...` first")))
+        scenarios (:scenarios stack)]
+    (-> (p/loop [scs scenarios acc []]
+          (if (empty? scs)
+            acc
+            (let [sc (first scs)]
+              (ensure-compiled! sc)
+              (p/let [prof (service/effective sc)
+                      port (ensure-running! sc nil)]
+                (p/recur (rest scs) (conj acc [sc port (env-vars-for sc {} prof)]))))))
+        (p/then
+         (fn [results]
+           (println (str "▲ up '" name "' (" (count results) " scenario(s))"))
+           (doseq [[sc port _] results] (println (str "  ▶ " sc "  http://localhost:" port)))
+           (println)
+           (doseq [[_ port vars] results, v vars]
+             (println (str "export " v "=http://localhost:" port))))))))
+
+(defn cmd-down
+  "Stop every scenario in a stack:  down <stack>"
+  [{:keys [pos]}]
+  (let [name  (first pos)
+        stack (or (store/read-stack name) (die (str "no stack '" name "'")))
+        wanted (set (:scenarios stack))]
+    (p/let [live (mb/list-imposters)
+            hits (filter #(wanted (:name %)) live)]
+      (p/all (map #(mb/delete-imposter! (:port %)) hits))
+      (println (str "▽ down '" name "' (" (count hits) " stopped)")))))
+
 ;; --- contract authoring (import / compile / new / validate / examples / use) ---
 
 (defn cmd-import
@@ -373,6 +636,60 @@
       (println)
       (println (str "  run one:       mocksys run " (:scenario (first scenarios))))
       (println (str "  pick examples: mocksys examples " (:scenario (first scenarios)))))))
+
+(defn- default-scenario-for
+  "A sensible default scenario id when --scenario is omitted, per kit."
+  [kind provider]
+  (case kind
+    "oauth2" (str "oauth/" (or provider "github"))
+    (str kind "/" kind)))         ; e.g. okta -> okta/okta
+
+(defn cmd-kit
+  "Generate a complete (often stateful) mock — a digital twin — from a recipe in one
+   shot:
+     kit okta [--users FILE.json] [--scenario NAME] [--port N]
+     kit oauth2 [--provider github|codeberg] [--users FILE.json] [--scenario NAME] [--port N]"
+  [{:keys [pos opts]}]
+  (let [kind (first pos)]
+    (when-not kind
+      (die (str "kit needs a recipe: kit <" (str/join "|" (sort (keys kits/kits))) "> [options]\n"
+                "  (see `mocksys genes` for the building blocks a kit composes)")))
+    (let [builder  (or (:build (get kits/kits kind))
+                       (die (str "unknown kit '" kind "'. known: "
+                                 (str/join ", " (sort (keys kits/kits))))))
+          provider (when (string? (:provider opts)) (:provider opts))
+          users    (when (string? (:users opts))
+                     (try (js->clj (js/JSON.parse (store/slurp (:users opts))))
+                          (catch :default _ (die (str "could not parse --users as JSON: " (:users opts))))))
+          scenario (or (when (string? (:scenario opts)) (:scenario opts))
+                       (default-scenario-for kind provider))
+          built    (cond-> (builder scenario {:provider provider :users users})
+                     (:port opts) (assoc "port" (js/parseInt (:port opts))))]
+      (store/write-contract! scenario built)
+      (compile! scenario)
+      (println (str "✦ generated '" scenario "' from kit '" kind "'"))
+      (when (inject/contract-stateful? built)
+        (println "  (stateful — served via Mountebank injection, managed automatically by `run`)"))
+      (doseq [op (get built "operations")]
+        (println (str "  · " (get-in op ["request" "method"]) " " (get-in op ["request" "path"]))))
+      (println)
+      (println (str "  run it:   mocksys run " scenario
+                    (when (:port opts) (str " --port " (:port opts)))))
+      (println (str "  inspect:  mocksys inspect " scenario)))))
+
+(defn cmd-genes
+  "List the reusable behavioral genes that kits compose (the building blocks of a
+   twin), and the kits available:  genes"
+  [_]
+  (println "# genes — reusable behavioral patterns a kit composes")
+  (doseq [{:keys [name doc]} kits/genes]
+    (println (str "  · " name "  —  " doc)))
+  (println)
+  (println "# kits — full twins generated in one command")
+  (doseq [[k {:keys [doc]}] (sort kits/kits)]
+    (println (str "  · mocksys kit " k "   —  " doc)))
+  (println)
+  (println "  e.g.  mocksys kit okta            # a digital twin of Okta"))
 
 (defn cmd-compile
   "Rebuild imposter.json from contract.yaml (normally automatic on `run`):
@@ -472,7 +789,12 @@
 
 (defn cmd-add
   "Hand-author an endpoint (appends an operation to the contract, then compiles):
-     add <scenario> --request 'METHOD /path' [--status N] [--body FILE | --text STR]"
+     add <scenario> --request 'METHOD /path' [--status N] [--body FILE | --text STR]
+       [--header 'K=V,K2=V2']         response headers (e.g. a redirect Location)
+       [--when-query 'k=v,present']   only match when these query conditions hold
+       [--when-header 'k=v,present']  only match when these header conditions hold
+   Request conditions let several operations share a path and branch on content;
+   order operations specific-first (mountebank serves the first matching stub)."
   [{:keys [pos opts]}]
   (let [scenario (first pos)
         request  (:request opts)]
@@ -481,12 +803,17 @@
     (let [[method path] (str/split (str/trim request) #"\s+" 2)
           status        (js/parseInt (or (:status opts) 200))
           [body json?]  (body-value opts)
+          extras        {:resp-headers (parse-kv (when (string? (:header opts)) (:header opts)))
+                         :query        (parse-conditions (when (string? (:when-query opts)) (:when-query opts)))
+                         :headers      (parse-conditions (when (string? (:when-header opts)) (:when-header opts)))}
           existing      (ensure-contract! scenario)
           svc           (service/service-of scenario)
-          c             (contract/add-operation existing scenario svc method path status body json?)]
+          c             (contract/add-operation existing scenario svc method path status body json? extras)]
       (store/write-contract! scenario c)
       (let [imposter (compile! scenario)]
         (println (str "✚ added " (str/upper-case method) " " path " -> " status
+                      (when (seq (:query extras))   (str "  [?" (str/join "," (keys (:query extras))) "]"))
+                      (when (seq (:headers extras)) (str "  [hdr " (str/join "," (keys (:headers extras))) "]"))
                       " to '" scenario "'  (" (count (get imposter "stubs")) " operation(s))"))))))
 
 (defn cmd-fault
@@ -646,44 +973,68 @@
   (println
    (str/join
     "\n"
-    ["# mocksys — turn real APIs into reusable mock fixtures"
+    ["# mocksys — author reusable mock fixtures for external systems"
      ""
-     "You wrap an external system (github, gitlab, aws-s3, stripe, ...) as a local"
-     "mock an app/test can hit instead of the real thing. Vocabulary: a *scenario*"
-     "(named `service/name`) holds recorded request/response *fixtures*; you record"
-     "reality, scrub secrets+volatility, then replay it offline."
+     "You stand up a local mock of an external system (github, stripe, an OAuth"
+     "provider, ...) that an app/test hits instead of the real thing. Vocabulary: a"
+     "*scenario* (named `service/name`) is described by a canonical `contract.yaml`"
+     "(method/path, response schemas, named selectable *examples*); it compiles to a"
+     "Mountebank imposter automatically on `run`. You usually *author* a contract"
+     "from API docs / a spec / source — recording live traffic is just one way to"
+     "seed one, for when you have real credentials."
      ""
-     "## Core loop"
-     "  mocksys init github                         # one-time: load the service profile"
-     "  mocksys record github/create-issue          # starts a proxy → api.github.com"
-     "  #   ...drive your app/curl at the printed proxy URL to capture traffic..."
-     "  mocksys freeze github/create-issue          # scrub + save it as a replay fixture"
-     "  mocksys run github/create-issue             # host the mock (prints a port)"
+     "## Stand up a digital twin in one command (the fastest path)"
+     "A *kit* generates a whole behavioral clone — stateful, seeded, runnable:"
+     "  mocksys kit okta                              # Okta twin: users+groups CRUD, SCIM filter, OIDC"
+     "  mocksys kit oauth2 --provider github          # OAuth2 provider: picker, single-use codes, userinfo"
+     "  mocksys genes                                 # the reusable behavioral genes a kit composes"
+     "A twin is one stateful scenario sharing one port/state; `run` it like any other."
      ""
-     "## Wire a test/app to the mock"
-     "  eval \"$(mocksys env github/create-issue)\"   # exports GITHUB_API_URL=... etc"
-     "  # point your code at $GITHUB_API_URL, run it, then assert what it called:"
-     "  mocksys assert github/create-issue --saw 'POST /repos/*/issues'   # exit 1 on miss"
-     ""
-     "## Author from a spec / docs / source (no recording)"
-     "The canonical source is contract.yaml; imposter.json is a build artifact that"
-     "`run` recompiles automatically. Three ways to get a contract:"
+     "## Or author a mock yourself (no live access needed)"
      "  mocksys import openapi ./openapi.yaml --service stripe   # one scenario per operation"
-     "  mocksys new acme/get-widget                              # scaffold, then edit contract.yaml"
+     "  mocksys new acme/get-widget                   # scaffold, then edit contract.yaml"
      "  mocksys add acme/get-widget --request 'GET /widgets/1' --status 200 --body w.json"
+     "Stateful resources (a REST collection) are declarative — no JavaScript:"
+     "  state.collections: {users: {idField: id, seed: users}}   # in contract.yaml"
+     "  effect: {bind: {...}, create|get|update|remove|list: {collection: users, ...}}"
      "Each operation keeps its schema plus *named examples* you select to serve:"
-     "  mocksys examples stripe/create-charge                    # list examples, [x]=in play"
+     "  mocksys examples stripe/create-charge          # list examples, [x]=in play"
      "  mocksys use stripe/create-charge --op createCharge --example card_declined --only"
-     "  mocksys validate stripe/create-charge                    # schema/structure check"
-     "  mocksys compile stripe/create-charge                     # (usually automatic on run)"
+     "  mocksys validate stripe/create-charge          # schema/structure check"
      ""
-     "## Failure modes & edge cases"
+     "## Run it & wire a test/app to the mock"
+     "  mocksys run acme/get-widget                    # host the mock (prints a port)"
+     "  eval \"$(mocksys env acme/get-widget)\"          # exports BASE_URL=... etc"
+     "  # point your code at the exported URL, run it, then assert what it called:"
+     "  mocksys assert acme/get-widget --saw 'GET /widgets/*'   # exit 1 on miss"
+     ""
+     "## Validate fidelity against reality (the digital-twin loop)"
+     "  mocksys conform okta/okta --corpus calls.json            # golden: status vs expect"
+     "  mocksys conform okta/okta --corpus calls.json --against https://your.okta.com"
+     "Replays the same requests at the twin and (with creds) the live service, diffs"
+     "responses (normalized by volatile fields), and exits 1 on drift — drive a twin to"
+     "zero observable delta. corpus = a JSON array of {method, path, body?, expect?}."
+     ""
+     "## Branch on request content (several ops share a path, first match wins)"
+     "  mocksys add gh/auth --request 'GET /authorize' --status 302 \\"
+     "      --when-query 'login' --header 'Location=https://app/cb?code=abc'   # ?login present"
+     "  mocksys add gh/auth --request 'GET /authorize' --status 200 --text '<picker/>'  # fallback"
+     ""
+     "## Stateful flows & failure modes"
+     "  mocksys kit oauth2 --provider github           # code→token→userinfo handshake (stateful)"
      "  mocksys add github/rate-limited --request 'GET /rate_limit' --status 403 --body rl.json"
-     "  mocksys fault github/create-issue --latency 2000     # or --timeout --drop-connection --clear"
+     "  mocksys fault github/create-issue --latency 2000   # or --timeout --drop-connection --clear"
      "  mocksys parameterize github/create-issue --path '/repos/{owner}/{repo}/issues'"
      ""
+     "## Seed a contract from live traffic (optional — needs real access)"
+     "  mocksys init github                            # load the service profile (redact/target)"
+     "  mocksys record github/create-issue             # proxy → api.github.com; drive traffic at it"
+     "  mocksys freeze github/create-issue             # scrub secrets+volatility → a contract"
+     "Secrets are redacted and volatile headers stripped on freeze, in memory, so"
+     "nothing unscrubbed is ever written to disk — the store is safe to commit."
+     ""
      "## Inspect / manage"
-     "  mocksys inspect <name>     # agent-readable summary of a fixture"
+     "  mocksys inspect <name>     # agent-readable summary of a scenario"
      "  mocksys doctor  <name>     # lint matchers/volatility; --fix to clean"
      "  mocksys requests <name>    # what the running mock actually received"
      "  mocksys ls                 # all scenarios + which are live"
@@ -694,45 +1045,60 @@
      "with MOCKSYS_HOME). It's the same library from every project."
      "  mocksys home                          # store path + git status"
      "  mocksys status / log                  # uncommitted changes / recent history"
-     "  mocksys publish github/create-issue   # git-commit a frozen scenario"
+     "  mocksys publish github/create-issue   # git-commit a scenario"
      "  mocksys rm github/create-issue        # delete a scenario (or a whole service)"
      "  mocksys restore github/create-issue   # discard uncommitted local edits"
      "  mocksys remote git@host:org/mocks.git # one-time: set the share remote"
      "  mocksys push   /  mocksys pull        # sync with teammates"
      "  mocksys pack <name>                   # or a standalone .mock.tgz (no git needed)"
      ""
-     "Secrets are redacted and volatile headers (Date, request-ids) stripped on freeze,"
-     "and nothing unscrubbed is ever written to disk — so the store is safe to commit."
      "Run `mocksys help` for the full flag list."])))
 
 (defn- usage []
-  (println "mocksys — agent-native Mountebank wrapper")
+  (println "mocksys — author reusable mock fixtures for external systems")
   (println)
-  (println "  mocksys init <service>                          github | gitlab | aws-s3 | stripe | generic-http")
-  (println "  mocksys record <service/name> [--target URL] [--port N]")
-  (println "  mocksys freeze <name>")
-  (println "  mocksys run <name> [--port N] [--env VAR]")
-  (println "  mocksys env <name>                              eval \"$(mocksys env <name>)\"")
+  (println "  TWINS (full behavioral clones in one command — see `mocksys genes`)")
+  (println "  mocksys kit okta [--users F.json] [--scenario NAME] [--port N]   Okta twin: users/groups CRUD + OIDC")
+  (println "  mocksys kit oauth2 [--provider github|codeberg] [--users F.json] [--port N]   OAuth2 provider twin")
+  (println "  mocksys genes                                   list the behavioral genes kits compose")
+  (println "  mocksys conform <name> --corpus FILE [--against URL] [--ignore k1,k2]   replay+diff (exit 1 on drift)")
+  (println)
+  (println "  AUTHOR (hand-author or import — no live access needed)")
+  (println "  mocksys new <service/name> [--service S]        scaffold a contract to hand-author")
+  (println "  mocksys import openapi <spec> [--service NAME] [--target URL]   spec -> one scenario per operation")
+  (println "  mocksys add <name> --request 'METHOD /path' [--status N] [--body FILE | --text STR]")
+  (println "      [--header 'K=V,..'] [--when-query 'k=v,..'] [--when-header 'k=v,..']   response hdrs / request branching")
+  (println "  mocksys examples <name> [--op ID]               list examples + which are in play")
+  (println "  mocksys use <name> --op ID --example NAME [--only|--off]   select example(s) to serve")
+  (println "  mocksys fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--clear]")
+  (println "  mocksys parameterize <name> --path '/a/{var}/b'")
+  (println "  mocksys validate <name>                         check the contract (exit 1 on errors)")
+  (println "  mocksys compile <name>                          rebuild imposter.json from contract.yaml")
+  (println)
+  (println "  RUN / VERIFY")
+  (println "  mocksys run <name> [--port N] [--env VAR] [--watch]   --watch: recompile+reload on edit")
+  (println "  mocksys env <name> [--json|--tilt]              eval \"$(mocksys env <name>)\"; or emit JSON / a Tiltfile resource")
+  (println "  mocksys stack <name> <scenario>...              define a stack (a set of scenarios)")
+  (println "  mocksys up <stack> | down <stack>               bring a whole stack up/down with combined env")
   (println "  mocksys inspect <name>")
   (println "  mocksys doctor <name> [--fix]")
   (println "  mocksys requests <name> [--clear]")
   (println "  mocksys assert <name> --saw 'METHOD /path'")
-  (println)
-  (println "  mocksys import openapi <spec> [--service NAME] [--target URL]   spec -> one scenario per operation")
-  (println "  mocksys new <service/name> [--service S]        scaffold a contract to hand-author")
-  (println "  mocksys compile <name>                          rebuild imposter.json from contract.yaml")
-  (println "  mocksys validate <name>                         check the contract (exit 1 on errors)")
-  (println "  mocksys examples <name> [--op ID]               list examples + which are in play")
-  (println "  mocksys use <name> --op ID --example NAME [--only|--off]   select example(s) to serve")
-  (println "  mocksys add <name> --request 'METHOD /path' [--status N] [--body FILE | --text STR]")
-  (println "  mocksys fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--clear]")
-  (println "  mocksys parameterize <name> --path '/a/{var}/b'")
-  (println "  mocksys pack <name> [--out FILE] | --stdout")
-  (println "  mocksys unpack <file.mock.tgz>")
   (println "  mocksys ls")
   (println "  mocksys stop <name> | --all")
   (println "  mocksys rm <scenario|service>                   delete from the store (stops it if live)")
   (println)
+  (println "  SEED FROM LIVE TRAFFIC (optional — needs real access)")
+  (println "  mocksys init <service>                          github | gitlab | aws-s3 | stripe | generic-http")
+  (println "  mocksys record <service/name> [--target URL] [--port N]")
+  (println "  mocksys freeze <name> [--draft]                 --draft: land for review, then `promote`")
+  (println "  mocksys promote <name>                          make a reviewed draft canonical")
+  (println)
+  (println "  PACK / SHARE")
+  (println "  mocksys pack <name> [--out FILE] | --stdout")
+  (println "  mocksys unpack <file.mock.tgz>")
+  (println)
+  (println "  STORE (git-backed shared library)")
   (println "  mocksys home                                    show the store path + git status")
   (println "  mocksys status                                  list uncommitted changes in the store")
   (println "  mocksys log [--n N]                             recent store history")
@@ -747,10 +1113,16 @@
 (defn -main [& args]
   (let [[cmd & more] args
         parsed (parse-args more)]
-    (-> (case cmd
+    ;; Commands run eagerly inside the case (to produce the promise), so a
+    ;; *synchronous* throw (e.g. a malformed contract.yaml) would escape the
+    ;; promise chain as a raw stack trace. Funnel both sync and async failures
+    ;; through `die` for a clean one-line error.
+    (-> (try
+          (case cmd
           "init"    (p/resolved (cmd-init parsed))
           "record"  (cmd-record parsed)
           "freeze"  (cmd-freeze parsed)
+          "promote" (p/resolved (cmd-promote parsed))
           "run"      (cmd-run parsed)
           "env"      (cmd-env parsed)
           "inspect"  (p/resolved (cmd-inspect parsed))
@@ -758,6 +1130,9 @@
           "requests" (cmd-requests parsed)
           "assert"   (cmd-assert parsed)
           "import"        (cmd-import parsed)
+          "kit"           (p/resolved (cmd-kit parsed))
+          "genes"         (p/resolved (cmd-genes parsed))
+          "conform"       (cmd-conform parsed)
           "compile"       (p/resolved (cmd-compile parsed))
           "new"           (p/resolved (cmd-new parsed))
           "validate"      (p/resolved (cmd-validate parsed))
@@ -770,6 +1145,9 @@
           "unpack"        (p/resolved (cmd-unpack parsed))
           "ls"            (cmd-ls parsed)
           "stop"          (cmd-stop parsed)
+          "stack"         (p/resolved (cmd-stack parsed))
+          "up"            (cmd-up parsed)
+          "down"          (cmd-down parsed)
           ("rm" "delete") (cmd-rm parsed)
           "home"          (p/resolved (cmd-home parsed))
           "status"        (p/resolved (cmd-status parsed))
@@ -782,6 +1160,7 @@
           "prime"         (p/resolved (cmd-prime parsed))
           ("help" nil "--help" "-h") (p/resolved (usage))
           (p/resolved (do (println "unknown command:" cmd) (usage))))
+          (catch :default e (p/rejected e)))
         (p/catch (fn [err] (die (.-message err)))))))
 
 (defn- cli-args

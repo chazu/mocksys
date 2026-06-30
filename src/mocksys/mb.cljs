@@ -54,13 +54,25 @@
       (on-path? "mb")         ["mb" []]
       :else                   ["npx" ["mb"]])))
 
-(defn- spawn-daemon! []
-  ;; `mb start` double-forks into a backgrounded daemon and returns; the child we
-  ;; spawn just triggers it, so we detach + unref and poll for readiness.
-  (let [[cmd extra] (mb-launcher)
-        args  (concat extra ["start" "--port" (str admin-port)])
-        child (.spawn cp cmd (clj->js args) #js {:detached true :stdio "ignore"})]
-    (.unref child)))
+(defn- spawn-daemon!
+  "Start the mb daemon. With `allow-injection?` it is launched with --allowInjection
+   so stateful scenarios (generated response injections) can run."
+  ([] (spawn-daemon! false))
+  ([allow-injection?]
+   ;; `mb start` double-forks into a backgrounded daemon and returns; the child we
+   ;; spawn just triggers it, so we detach + unref and poll for readiness.
+   (let [[cmd extra] (mb-launcher)
+         args  (cond-> (concat extra ["start" "--port" (str admin-port)])
+                 allow-injection? (concat ["--allowInjection"]))
+         child (.spawn cp cmd (clj->js args) #js {:detached true :stdio "ignore"})]
+     (.unref child))))
+
+(defn- kill-daemon!
+  "Stop whatever is listening on the admin port (so we can relaunch it with a
+   different flag). POSIX-only; mocksys targets darwin/linux."
+  []
+  (cp/spawnSync "sh" #js ["-c" (str "lsof -ti tcp:" admin-port " | xargs kill -9")]
+                #js {:stdio "ignore"}))
 
 (defn- wait-up [tries]
   (p/let [ok (up?)]
@@ -70,13 +82,26 @@
       :else         (p/do (p/delay 300) (wait-up (dec tries))))))
 
 (defn ensure-up!
-  "Make sure an mb daemon is listening; start one if not."
+  "Make sure an mb daemon is listening; start one if not. `allow-injection?` only
+   takes effect when *starting* a fresh daemon (an already-running one keeps its
+   flags — see `restart-injecting!` for forcing the flag on)."
+  ([] (ensure-up! false))
+  ([allow-injection?]
+   (p/let [ok (up?)]
+     (if ok
+       true
+       (do (spawn-daemon! allow-injection?)
+           (wait-up 25))))))
+
+(defn restart-injecting!
+  "Kill the running daemon and relaunch it with --allowInjection. Needed when a
+   stateful imposter must be posted but the live daemon was started without the
+   flag. Drops other running imposters (they re-post on their next `run`)."
   []
-  (p/let [ok (up?)]
-    (if ok
-      true
-      (do (spawn-daemon!)
-          (wait-up 25)))))
+  (kill-daemon!)
+  (p/do (p/delay 300)
+        (spawn-daemon! true)
+        (wait-up 25)))
 
 (defn free-port
   "Ask the OS for a free ephemeral port (bind :0, read the assignment, release).
@@ -107,6 +132,18 @@
       body
       (throw (js/Error. (str "mb rejected imposter (" status "): "
                              (js/JSON.stringify (clj->js body))))))))
+
+(defn post-imposter-injecting!
+  "Like `post-imposter!`, but if the daemon rejects the imposter because injection
+   is disabled, relaunch it with --allowInjection and retry once."
+  [imposter]
+  (-> (post-imposter! imposter)
+      (p/catch
+       (fn [err]
+         (if (re-find #"(?i)allowInjection|injection is not allowed" (or (.-message err) ""))
+           (p/do (restart-injecting!)
+                 (post-imposter! imposter))
+           (throw err))))))
 
 (defn delete-imposter!
   "Remove the imposter on `port` if present (idempotent — frees the port)."

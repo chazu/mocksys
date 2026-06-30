@@ -1,36 +1,47 @@
 # mocksys
 
-**Agent-native CLI that turns real API traffic into reusable, scrubbed mock fixtures.**
+**Agent-native CLI for authoring reusable mock fixtures — and full digital twins — of
+external systems.**
 
-Point it at GitHub, Stripe, an internal service — anything HTTP — and it records the
-real interactions, strips the secrets and the volatile noise, names the result, and
-replays it offline. Built so an **agent** can stand up a faithful mock of an external
-system in a few commands, then assert against it like a test oracle.
+Describe an API — GitHub, Stripe, an OAuth provider, Okta, an internal service — as a
+canonical **contract**, and mocksys hosts it as a local mock your app/test hits
+instead of the real thing, then asserts against it like a test oracle. You usually
+*author* the contract from API docs, an OpenAPI spec, or source; recording live
+traffic is just one way to **seed** a contract, for when you have real credentials.
 
-It's a thin, opinionated wrapper over Mountebank: Mountebank
-is the runtime, kept entirely behind the CLI. You work in agent vocabulary —
-*service, scenario, fixture, matcher, fault, assertion* — never in imposters and stubs.
+A contract can be a single endpoint or a **digital twin**: a stateful behavioral clone
+of a whole service — seeded resource **collections** with CRUD, SCIM-style filtering and
+cursor pagination, plus auth handshakes — generated in one command from a **kit**, and
+validated against the real service with `conform`. `mocksys kit okta` stands up an Okta
+twin (users & groups CRUD + OIDC) you can drive at high volume, deterministically.
+
+It's a thin, opinionated wrapper over Mountebank: Mountebank is the runtime, kept
+entirely behind the CLI. You work in agent vocabulary — *service, scenario,
+contract, example, matcher, fault, assertion* — never in imposters and stubs.
 
 ```sh
-mocksys init github
-mocksys record github/create-issue          # starts a proxy → api.github.com
-#   ...drive your app/curl at the printed proxy URL to capture traffic...
-mocksys freeze github/create-issue           # scrub secrets + volatility, save a fixture
-mocksys run github/create-issue              # host the mock — no real API involved
+mocksys new acme/get-widget                            # scaffold a contract to edit
+mocksys add acme/get-widget --request 'GET /widgets/1' --status 200 --body w.json
+mocksys run acme/get-widget                            # host the mock (prints a port)
+mocksys assert acme/get-widget --saw 'GET /widgets/*'  # exit non-zero on a miss
 ```
 
 ## Why
 
-Recording real traffic gives you a *blob*. mocksys turns it into a **reusable capability**:
+A mock is most useful as a **reusable capability** you can author, branch, and
+share — not a one-off blob:
 
-- **Secrets never hit disk.** Raw traffic lives only inside the running Mountebank
-  daemon; `freeze` pulls it, redacts auth headers, and strips volatile headers
-  (`Date`, `ETag`, request-ids) **in memory** before writing anything. The saved
-  fixture is safe to commit and share.
-- **Matchers don't overfit.** Recordings key on method + path only, and `doctor`
-  flags anything that would make a fixture fire on fewer requests than it should.
+- **Author without live access.** Hand-write a contract, `import openapi` a spec, or
+  `kit` a stateful recipe (e.g. an OAuth provider) — no proxy or real credentials
+  needed. Recording is available when you *do* have access, to seed a contract.
+- **Branch on request content.** Several operations can share a path and select by
+  query/header/body, so picker-vs-redirect, authed-vs-anonymous, and error paths are
+  all expressible — not just method+path lookups.
 - **Mocks are test oracles.** `assert` checks what the running mock actually received
   and exits non-zero on a miss, so it drops straight into a test script.
+- **Secrets never hit disk.** When you *do* record, raw traffic lives only inside the
+  running Mountebank daemon; `freeze` redacts auth headers and strips volatile headers
+  (`Date`, `ETag`, request-ids) **in memory** before writing anything.
 - **One shared library.** Every scenario lives in a git-backed store at `~/.mocksys`
   that's the same from every project, and shareable with a remote.
 
@@ -150,6 +161,55 @@ Recorded scenarios are contract-canonical too: `freeze` lifts a contract from th
 scrubbed recording, and any legacy imposter-only scenario gets one the first time a
 contract-aware command touches it.
 
+## Digital twins (kits, collections, conform)
+
+A **kit** generates a complete, stateful behavioral clone of a service in one command —
+no operation-by-operation authoring. Kits are composed from reusable **genes** (an OIDC
+handshake, a CRUD resource, an error envelope); `mocksys genes` lists them.
+
+```sh
+mocksys kit okta                              # users & groups CRUD + OIDC, on one stateful mock
+mocksys run okta/okta                         # host it (prints a port)
+mocksys genes                                 # the behavioral genes a kit composes
+```
+
+The Okta twin is a real resource system, not static fixtures: seeded **collections** with
+create / list / get / update / delete, SCIM-style filters and cursor pagination, and the
+Okta error envelope on misses — all driven by a declarative `effect`, never hand-written
+JavaScript:
+
+```sh
+curl localhost:PORT/api/v1/users?filter='status eq "ACTIVE"'   # SCIM filter
+curl -X POST localhost:PORT/api/v1/users -d '{"profile":{"login":"x@y.com"}}'   # 201, id minted
+curl localhost:PORT/api/v1/users?limit=50                       # paginated; Link: rel="next"
+```
+
+Author your own stateful resource by declaring a collection in `contract.yaml`:
+
+```yaml
+state:
+  collections: { users: { idField: id, seed: users } }
+operations:
+  - id: get-user
+    request: { method: GET, path: "/api/v1/users/{id}" }
+    effect:
+      bind: { id: { pathRegex: "/users/([^/]+)$" } }
+      get:  { collection: users, key: "{id}", miss: { status: 404, json: { errorCode: "E0000007" } } }
+```
+
+**Validate fidelity with `conform`** — the digital-twin loop. Replay a request corpus at
+the twin and (with credentials) the live service, diff the responses normalized by the
+service's volatile fields, and exit non-zero on drift:
+
+```sh
+mocksys conform okta/okta --corpus calls.json                    # golden: each status vs its `expect`
+mocksys conform okta/okta --corpus calls.json --against https://your.okta.com   # twin vs live
+mocksys conform okta/okta --corpus calls.json --against URL --ignore created,lastUpdated
+```
+
+A corpus is a JSON array of `{method, path, body?, expect?}`; omit `--corpus` to replay
+what the running twin has already received. Drive the twin toward zero observable delta.
+
 ## Shared store + sharing
 
 All scenarios live in one git-backed library at `~/.mocksys` (override with
@@ -186,6 +246,9 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `doctor <name> [--fix]` | lint matchers/volatility; `--fix` cleans in place |
 | `requests <name> [--clear]` | what the running mock received |
 | `assert <name> --saw 'METHOD /path'` | verify a call happened (exit 1 on miss) |
+| `kit <okta\|oauth2> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
+| `genes` | list the behavioral genes (and kits) available |
+| `conform <name> --corpus FILE [--against URL] [--ignore k1,k2]` | replay+diff vs reality (exit 1 on drift) |
 | `import openapi <spec> [--service NAME] [--target URL]` | spec → one scenario per operation |
 | `new <service/name> [--service S]` | scaffold a blank contract to hand-author |
 | `compile <name>` | rebuild `imposter.json` from `contract.yaml` (usually automatic) |
@@ -205,6 +268,16 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 
 Run `mocksys prime` to drop the whole workflow into an agent's context.
 
+## Documentation
+
+This README is the quick start. The full reference manual lives in [`docs/`](docs/index.md):
+
+- [docs/architecture.md](docs/architecture.md) — modules, the contract→imposter→Mountebank pipeline, the store, the runtime.
+- [docs/contracts.md](docs/contracts.md) — the `contract.yaml` format: matching, responses, examples, templating, faults, validation.
+- [docs/effects.md](docs/effects.md) — the stateful `effect` language: state buckets and resource collections, every verb, the SCIM filter grammar, pagination.
+- [docs/twins.md](docs/twins.md) — building digital twins: kits, genes, the `okta` anatomy, and the `conform` fidelity loop.
+- [docs/cli.md](docs/cli.md) — the complete command reference.
+
 ## How it's built
 
 ClojureScript compiled with [shadow-cljs](https://github.com/thheller/shadow-cljs) to a
@@ -212,9 +285,12 @@ Node script (`out/mocksys.js`), shipped as prebuilt JS over npm and as a
 `bun build --compile` binary via Homebrew — same Node runtime as Mountebank. Focused
 modules: `mb` (admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
 (redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
-(the canonical source format — compile/lift/validate/example selection), `openapi`
-(spec import, via `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle`
-(pack/unpack), `git` (the shared store), `core` (CLI).
+(the canonical source format — compile/lift/validate/example selection), `inject` (the
+declarative stateful layer — handshakes + resource collections, compiled to generated
+Mountebank injections), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
+(differential fidelity vs reality), `openapi` (spec import, via
+`@apidevtools/swagger-parser` + `openapi-sampler`), `bundle` (pack/unpack), `git` (the
+shared store), `core` (CLI).
 
 ## License
 
