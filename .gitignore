@@ -16,3 +16,6 @@ mb.pid
 
 # local mock store, if MOCKSYS_HOME is pointed at the project
 .mocks/
+
+# Claude Code runtime artifacts (the agent skill under .claude/skills IS tracked)
+.claude/*.lock

@@ -267,7 +267,10 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `home` / `publish` / `remote` / `push` / `pull` | the git-backed store |
 | `prime` | one-screen orientation for an agent |
 
-Run `mocksys prime` to drop the whole workflow into an agent's context.
+Run `mocksys prime` to drop the whole workflow into an agent's context. The repo also
+ships a Claude Code skill at [`.claude/skills/mocksys/`](.claude/skills/mocksys/SKILL.md)
+so agents discover the tool and know when to reach for it (it defers to `mocksys prime`
+and `docs/` for depth).
 
 ## Documentation
 
