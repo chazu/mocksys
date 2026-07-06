@@ -83,6 +83,7 @@ bind:
 | `header: <k>` | header `k`, case-insensitive. Add `bearer: true` to strip a `Bearer `/`token ` prefix. |
 | `pathRegex: <re>` | the first capture group of `re` matched against the request path. The path-segment idiom is `"/users/([^/]+)$"`. |
 | `now: true` | the current [virtual time](#the-virtual-clock) as epoch seconds. `now: { add: N }` offsets it; `now: { iso: true }` formats it as an ISO string. |
+| `baseUrl: true` | the twin's own origin — `http://{Host}` when a `Host` header is present, else the configured issuer. For `iss`/`aud` and self-referential URLs. |
 | `const: <v>` | a literal value. |
 
 ## State buckets and `mint`

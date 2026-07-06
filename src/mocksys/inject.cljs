@@ -88,6 +88,7 @@
                                      (if (get spec "bearer")
                                        (str v "=bearer(hv(" h "));")
                                        (str v "=hv(" h ");")))
+      (contains? spec "baseUrl")   (str v "=baseUrl();")
       (contains? spec "now")       (let [n (get spec "now")
                                          add (if (map? n) (or (get n "add") 0) 0)
                                          t   (str "(now(state)+" add ")")]
@@ -435,6 +436,9 @@
    "function deepInterp(x,v){if(typeof x==='string')return interp(x,v);"
    "if(Array.isArray(x))return x.map(function(e){return deepInterp(e,v);});"
    "if(x&&typeof x==='object'){var o={};for(var k in x){o[k]=deepInterp(x[k],v);}return o;}return x;}"
+   ;; the twin's own origin: http://{Host} when a Host header is present, else the
+   ;; embedded issuer (__issuer, declared per-op in gen). Feeds baseUrl binds + sign.
+   "function baseUrl(){var h=hv('host');return h?('http://'+h):(typeof __issuer!=='undefined'?__issuer:'');}"
    ;; --- virtual clock + ttl-aware bucket reads ---
    "function now(s){return s.__now||0;}"
    "function readBucket(s,bucket,key,del){var b=s[bucket]||{},h=b[key];if(h===undefined)return undefined;"
@@ -489,9 +493,10 @@
    `seed` (handshake seed arrays) and `collections` ({name {idField seed}}) are
    embedded as literals so the function is self-contained. Every declared collection
    is seeded once into shared `state` (idempotent), so all ops see the same data."
-  ([op seed] (gen op seed nil nil))
-  ([op seed collections] (gen op seed collections nil))
-  ([op seed collections clock-start]
+  ([op seed] (gen op seed nil nil nil))
+  ([op seed collections] (gen op seed collections nil nil))
+  ([op seed collections clock-start] (gen op seed collections clock-start nil))
+  ([op seed collections clock-start issuer]
    (let [effect    (get op "effect")
          buck-init (->> (buckets-of effect)
                         (map (fn [b] (str "state[" (js b) "]=state[" (js b) "]||{};")))
@@ -507,6 +512,7 @@
           prelude
           "var seed=" (js (or seed {})) ";"
           "var V={};"
+          "var __issuer=" (js (or issuer "")) ";"
           buck-init
           coll-init
           clock-init
