@@ -23,6 +23,7 @@
   ],
   "scripts": {
     "mb": "mb",
+    "test": "shadow-cljs compile test && node out/test.js",
     "build": "shadow-cljs release cli",
     "watch": "shadow-cljs watch cli",
     "binary": "scripts/build-binary.sh",
