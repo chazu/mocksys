@@ -240,9 +240,13 @@ Effect sketch for the member list:
 ### 2.5 Edge cases & known divergences
 
 - **Idempotent assign**: re-`PUT` returns `204`, no duplicate row (composite key dedupes).
-- **Unassign non-member**: real Okta returns `204` even if not a member; `unlink` should
-  return `204` on miss too (or `404`?) — *confirm against live in review*; recommend
-  `204` to match Okta's forgiving delete.
+  Confirmed: Okta's live integration test double-assigns and asserts the member count stays
+  1 (`okta-sdk-dotnet/GroupApiTests.cs:549-551`).
+- **Unassign non-member**: `unlink` returns `204` even when there is no membership row —
+  **confirmed** against Okta's live integration test (`GroupApiTests.cs:554-555`,
+  `"Idempotency - Unassign user not in group (should not throw)"`). A `404` is returned
+  *only* for a bad group/user id, which the `exists` precheck (§2.3) already handles. So
+  `unlink` must be miss-tolerant (always 204), distinct from `remove` (which 404s on miss).
 - **`Everyone` auto-membership**: NOT emulated — membership is explicit only. Document.
 - **Cascade on user/group delete**: deleting a user/group leaves orphan membership rows.
   v1: leave orphans (list joins drop unhydratable ids, so they're invisible); note it.
@@ -645,7 +649,7 @@ All seven resolved. Full reasoning + rejected alternatives:
 |---|----------|----------|-------|
 | Q1 | Base URL / `iss` (§1.1) | **Request-derived host `http://{Host}`, `--issuer` fallback** | zero-config-portability |
 | Q2 | `link`/`unlink` verbs vs flags (§2.2) | **Distinct new terminal verbs** (+`listJoin`) | separation-and-reuse |
-| Q3 | Unassign non-member (§2.5) | **204 always** (idempotent) — *non-member case inferred, flag for live check* | okta-fidelity |
+| Q3 | Unassign non-member (§2.5) | **204 always** (idempotent) — *confirmed via Okta live integration test* | okta-fidelity |
 | Q4 | Token source-of-truth (§3.3) | **v1: bucket** (bucket ttl enforces exp); `verifyJwt` parked as v2 | v1-simplicity |
 | Q5 | conform JWT diffing (§3.4) | **Build the JWT-aware normalizer now**, alongside feature 2 | conform-fidelity |
 | Q6 | Pin signing key (§3.2) | **Yes: `--signing-key` opt-in**, default per-invocation | reproducibility |
