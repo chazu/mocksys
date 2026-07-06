@@ -121,47 +121,129 @@
          "<h2>mock login</h2><p><small>Authorize as:</small></p>"
          (str/join (map link users)))))
 
-(defn oidc-handshake
-  "OIDC genes over `authz`/`token`/`userinfo` paths, resolving tokens to the
-   `seed-name` user array (by `login`). Returns authorize(+picker), token, userinfo.
-   With `:token-ttl` (seconds), issued tokens expire on the virtual clock."
+(defn- live-picker-row
+  "A picker link over a live collection row: preserves the inbound
+   client_id/redirect_uri/state (bound vars) and carries the row's login + id, so
+   the subsequent authorize needs no lookup."
+  [authz login-field]
+  (str "<a href=\"" authz "?client_id={cid}&redirect_uri={ruri}&state={st}"
+       "&login={" login-field "}&uid={id}\">"
+       "<b>{" login-field "}</b> <small>({profile.email})</small></a>"))
+
+(def ^:private picker-wrap
+  "The styled shell the rendered rows are framed in ({rows} = the joined links)."
+  (str "<!doctype html><meta charset=utf-8><title>mock login</title>"
+       "<style>body{font-family:system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem}"
+       "a{display:block;padding:.75rem 1rem;margin:.5rem 0;border:1px solid #ccc;"
+       "border-radius:.5rem;text-decoration:none;color:#111}a:hover{background:#f3f3f3}"
+       "small{color:#666}</style>"
+       "<h2>mock login</h2><p><small>Authorize as:</small></p>{rows}"))
+
+(defn- oidc-seed-ops
+  "The seed-array handshake (oauth2): static picker, code/token buckets carry the
+   login, userinfo resolves the seed user. Unchanged from the original gene."
   [{:keys [authz token userinfo seed-name users token-ttl]}]
+  [{"id"      "authorize"
+    "summary" "authorize (?login given) -> redirect with a single-use code"
+    "request" {"method" "GET" "path" authz "query" {"login" {"present" true}}}
+    "effect"  {"bind"    {"login" {"query" "login"} "state" {"query" "state"} "ruri" {"query" "redirect_uri"}}
+               "mint"    {"code" {"prefix" "code_"}}
+               "store"   {"bucket" "codes" "key" "{code}" "value" "{login}"}
+               "respond" {"status" 302 "headers" {"Location" "{ruri}?code={code}&state={state}"}}}}
+   {"id"      "authorize-picker"
+    "summary" "authorize (no ?login) -> account picker"
+    "request" {"method" "GET" "path" authz}
+    "responses"
+    [{"status"  200
+      "headers" {"Content-Type" "text/html; charset=utf-8"}
+      "examples" {"picker" {"select" true "body" (picker-html authz users)}}}]}
+   {"id"      "access-token"
+    "summary" "code -> access_token (code is single-use)"
+    "request" {"method" "POST" "path" token}
+    "effect"  {"bind"    {"code" {"body" "code"} "scope" {"body" "scope"}}
+               "consume" {"bucket" "codes" "key" "{code}" "as" "login"
+                          "miss"  {"status" 400 "json" {"error" "bad_verification_code"}}}
+               "mint"    {"token" {"prefix" "mockoauth_"}}
+               "store"   (cond-> {"bucket" "tokens" "key" "{token}" "value" "{login}"}
+                           token-ttl (assoc "ttl" token-ttl))
+               "respond" {"status" 200
+                          "json"  (cond-> {"access_token" "{token}" "token_type" "bearer" "scope" "{scope}"}
+                                    token-ttl (assoc "expires_in" token-ttl))}}}
+   {"id"      "userinfo"
+    "summary" "bearer access_token -> the bound user"
+    "request" {"method" "GET" "path" userinfo}
+    "effect"  {"bind"    {"auth" {"header" "authorization" "bearer" true}}
+               "lookup"  {"bucket" "tokens" "key" "{auth}" "as" "login"
+                          "miss"  {"status" 401 "json" {"message" "Bad credentials"}}}
+               "resolve" {"seed" seed-name "by" "login" "eq" "{login}" "as" "user"
+                          "miss"  {"status" 401 "json" {"message" "Bad credentials"}}}
+               "respond" {"status" 200 "jsonVar" "user"}}}])
+
+(defn- oidc-live-ops
+  "The live-collection handshake (okta): a `render` picker over the mutable
+   collection, a uid carried through the code→token buckets, and userinfo shaped by
+   `find`+dotted `respond`. `active-only?` gates issuance and the picker to
+   `status eq \"ACTIVE\"` (Q7). `claims` is the (dotted) userinfo claim template."
+  [{:keys [authz token userinfo token-ttl user-source]}]
+  (let [{:keys [collection login-field active-only? claims]} user-source
+        login-field (or login-field "profile.login")
+        active-flt  (when active-only? "status eq \"ACTIVE\"")
+        claims      (or claims {"sub" "{user.id}"})]
+    [{"id"      "authorize"
+      "summary" "authorize (?login given) -> code; issuance gated to the live user"
+      "request" {"method" "GET" "path" authz "query" {"login" {"present" true}}}
+      "effect"  {"bind"    {"login" {"query" "login"} "uid" {"query" "uid"}
+                            "state" {"query" "state"} "ruri" {"query" "redirect_uri"}}
+                 ;; presence + (optional) ACTIVE gate on the live row before minting
+                 "find"    (cond-> {"collection" collection "key" "{uid}" "as" "_u"
+                                    "miss" {"status" 403 "json" (okta-error "E0000038" "User is not active or does not exist")}}
+                             active-flt (assoc "filter" active-flt))
+                 "mint"    {"code" {"prefix" "code_"}}
+                 "store"   {"bucket" "codes" "key" "{code}" "value" "{uid}"}
+                 "respond" {"status" 302 "headers" {"Location" "{ruri}?code={code}&state={state}"}}}}
+     {"id"      "authorize-picker"
+      "summary" "authorize (no ?login) -> live account picker (render)"
+      "request" {"method" "GET" "path" authz}
+      "effect"  {"bind"   {"cid" {"query" "client_id"} "ruri" {"query" "redirect_uri"} "st" {"query" "state"}}
+                 "render" (cond-> {"collection" collection
+                                   "row"  (live-picker-row authz login-field)
+                                   "wrap" picker-wrap}
+                            active-flt (assoc "filter" active-flt))}}
+     {"id"      "access-token"
+      "summary" "code -> access_token (code is single-use); carries the uid"
+      "request" {"method" "POST" "path" token}
+      "effect"  {"bind"    {"code" {"body" "code"} "scope" {"body" "scope"}}
+                 "consume" {"bucket" "codes" "key" "{code}" "as" "uid"
+                            "miss"  {"status" 400 "json" {"error" "bad_verification_code"}}}
+                 "mint"    {"token" {"prefix" "mockoauth_"}}
+                 "store"   (cond-> {"bucket" "tokens" "key" "{token}" "value" "{uid}"}
+                             token-ttl (assoc "ttl" token-ttl))
+                 "respond" {"status" 200
+                            "json"  (cond-> {"access_token" "{token}" "token_type" "bearer" "scope" "{scope}"}
+                                      token-ttl (assoc "expires_in" token-ttl))}}}
+     {"id"      "userinfo"
+      "summary" "bearer access_token -> OIDC claims from the live user row"
+      "request" {"method" "GET" "path" userinfo}
+      "effect"  {"bind"    {"auth" {"header" "authorization" "bearer" true}}
+                 "lookup"  {"bucket" "tokens" "key" "{auth}" "as" "uid"
+                            "miss"  {"status" 401 "json" (okta-error "E0000011" "Invalid token provided")}}
+                 ;; find by the carried uid — a deleted user misses → 401
+                 "find"    {"collection" collection "key" "{uid}" "as" "user"
+                            "miss"  {"status" 401 "json" (okta-error "E0000011" "Invalid token provided")}}
+                 "respond" {"status" 200 "json" claims}}}]))
+
+(defn oidc-handshake
+  "OIDC genes over `authz`/`token`/`userinfo` paths. `:user-source` forks the source:
+     {:seed <name>}                            → seed-array resolve (oauth2, default)
+     {:collection <c> :login-field <p> :active-only? bool :claims <tpl>}
+                                               → live mutable collection (okta)
+   Returns authorize(+picker), token, userinfo. With `:token-ttl` (seconds), issued
+   tokens expire on the virtual clock."
+  [{:keys [user-source] :as opts}]
   {:operations
-   [{"id"      "authorize"
-     "summary" "authorize (?login given) -> redirect with a single-use code"
-     "request" {"method" "GET" "path" authz "query" {"login" {"present" true}}}
-     "effect"  {"bind"    {"login" {"query" "login"} "state" {"query" "state"} "ruri" {"query" "redirect_uri"}}
-                "mint"    {"code" {"prefix" "code_"}}
-                "store"   {"bucket" "codes" "key" "{code}" "value" "{login}"}
-                "respond" {"status" 302 "headers" {"Location" "{ruri}?code={code}&state={state}"}}}}
-    {"id"      "authorize-picker"
-     "summary" "authorize (no ?login) -> account picker"
-     "request" {"method" "GET" "path" authz}
-     "responses"
-     [{"status"  200
-       "headers" {"Content-Type" "text/html; charset=utf-8"}
-       "examples" {"picker" {"select" true "body" (picker-html authz users)}}}]}
-    {"id"      "access-token"
-     "summary" "code -> access_token (code is single-use)"
-     "request" {"method" "POST" "path" token}
-     "effect"  {"bind"    {"code" {"body" "code"} "scope" {"body" "scope"}}
-                "consume" {"bucket" "codes" "key" "{code}" "as" "login"
-                           "miss"  {"status" 400 "json" {"error" "bad_verification_code"}}}
-                "mint"    {"token" {"prefix" "mockoauth_"}}
-                "store"   (cond-> {"bucket" "tokens" "key" "{token}" "value" "{login}"}
-                            token-ttl (assoc "ttl" token-ttl))
-                "respond" {"status" 200
-                           "json"  (cond-> {"access_token" "{token}" "token_type" "bearer" "scope" "{scope}"}
-                                     token-ttl (assoc "expires_in" token-ttl))}}}
-    {"id"      "userinfo"
-     "summary" "bearer access_token -> the bound user"
-     "request" {"method" "GET" "path" userinfo}
-     "effect"  {"bind"    {"auth" {"header" "authorization" "bearer" true}}
-                "lookup"  {"bucket" "tokens" "key" "{auth}" "as" "login"
-                           "miss"  {"status" 401 "json" {"message" "Bad credentials"}}}
-                "resolve" {"seed" seed-name "by" "login" "eq" "{login}" "as" "user"
-                           "miss"  {"status" 401 "json" {"message" "Bad credentials"}}}
-                "respond" {"status" 200 "jsonVar" "user"}}}]})
+   (if (:collection user-source)
+     (oidc-live-ops opts)
+     (oidc-seed-ops opts))})
 
 ;; --- gene: group membership (many-to-many relation) -----------------------
 ;; A membership is its own collection whose rows carry a composite id `{gid}:{uid}`.
@@ -286,15 +368,16 @@
   [{"id" "00g1" "type" "OKTA_GROUP" "profile" {"name" "Everyone" "description" "All users"}}
    {"id" "00g2" "type" "OKTA_GROUP" "profile" {"name" "Admins" "description" "Administrators"}}])
 
-;; OIDC users carry a bare `login` (oidc resolve looks it up there), derived from
-;; the same accounts so the login flow and the SCIM users agree at seed time.
-(defn- okta-oidc-users [users]
-  (mapv (fn [u] {"id" (get u "id")
-                 "login" (get-in u ["profile" "login"])
-                 "email" (get-in u ["profile" "email"])
-                 "name" (str/trim (str (get-in u ["profile" "firstName"]) " "
-                                       (get-in u ["profile" "lastName"])))})
-        users))
+;; OIDC userinfo claims (dotted templates read the found live `users` row). Access
+;; token `sub` is the Okta user id; the profile/email scope claims mirror the row.
+(def ^:private okta-userinfo-claims
+  {"sub"                "{user.id}"
+   "name"               "{user.profile.firstName} {user.profile.lastName}"
+   "given_name"         "{user.profile.firstName}"
+   "family_name"        "{user.profile.lastName}"
+   "preferred_username" "{user.profile.login}"
+   "email"              "{user.profile.email}"
+   "email_verified"     true})
 
 (defn okta
   "A digital twin of Okta: users + groups CRUD (SCIM-ish filter + pagination), the
@@ -312,17 +395,20 @@
        "scenario" scenario
        "origin"   "kit"
        "summary"  "Okta (mock) — users & groups CRUD + OIDC + group membership; SCIM-ish filter, pagination, error envelope"
-       "seed"     {"users" users "groups" groups "memberships" []
-                   "oidc_users" (okta-oidc-users users)}}
+       "seed"     {"users" users "groups" groups "memberships" []}}
       (crud-collection {:coll "users" :base "/api/v1/users" :seed-name "users"
                         :id-prefix "00u" :create-defaults {"status" "STAGED"} :rate-limit rate-limit})
       (crud-collection {:coll "groups" :base "/api/v1/groups" :seed-name "groups"
                         :id-prefix "00g" :create-defaults {"type" "OKTA_GROUP"} :rate-limit rate-limit})
       (membership {:coll "memberships" :users-coll "users" :groups-coll "groups"
                    :users-base "/api/v1/users" :groups-base "/api/v1/groups"})
+      ;; OIDC over the LIVE users collection: the picker, login→uid, and userinfo all
+      ;; read the same mutable collection the CRUD ops write, so SCIM-created users can
+      ;; log in. Issuance + picker gate to status==ACTIVE (Q7).
       (oidc-handshake {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token"
-                       :userinfo "/oauth2/v1/userinfo" :seed-name "oidc_users"
-                       :users (okta-oidc-users users) :token-ttl token-ttl}))
+                       :userinfo "/oauth2/v1/userinfo" :token-ttl token-ttl
+                       :user-source {:collection "users" :login-field "profile.login"
+                                     :active-only? true :claims okta-userinfo-claims}}))
       ;; enabling the clock makes `mocksys clock` available and ttl/limit windows move
       clock? (assoc-in ["state" "clock"] {"start" 1700000000}))))
 

@@ -48,7 +48,7 @@ mocksys genes        # list the genes (and kits) available
 | Gene | Behavior |
 |---|---|
 | `crud-collection` | A REST resource: create / list / get / update / delete, SCIM-ish filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). |
-| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Optional token TTL. |
+| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Sources users from a **seed array** (oauth2) or a **live collection** with a dynamic picker + `status`-gated issuance (okta). Optional token TTL. |
 | `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). |
 | `error-envelope` | Provider-shaped error bodies for misses (e.g. Okta `errorCode`/`errorSummary`). |
 | `rate-limit` | A per-client request budget over a [virtual-clock](effects.md#the-virtual-clock) window → `429` + `X-Rate-Limit-*` headers. |
@@ -68,7 +68,8 @@ the `kits` map — `oauth2` and `okta` are the worked examples.
 - `crud-collection` for **groups** at `/api/v1/groups` (id prefix `00g`, default `type:
   OKTA_GROUP`).
 - `membership` relating **users** and **groups** at `/api/v1/groups/{gid}/users/{uid}`.
-- `oidc-handshake` at `/oauth2/v1/authorize|token|userinfo`.
+- `oidc-handshake` at `/oauth2/v1/authorize|token|userinfo`, keyed on the **live** `users`
+  collection (dynamic picker, `userinfo` shaped from the mutable row).
 - the Okta `error-envelope` on every CRUD miss.
 
 So you get, on one stateful imposter:
@@ -85,9 +86,11 @@ curl "$B/api/v1/users/00u1/groups"                                  # the user's
 # OIDC on the same twin: authorize -> token -> userinfo -> the bound user
 ```
 
-> v1 note: OIDC `userinfo` resolves a seeded `oidc_users` array (derived from the same
-> accounts at seed time), not the live SCIM `users` collection — so you can log in as
-> seeded accounts but not yet as SCIM-created ones.
+> OIDC reads the **live** `users` collection: the account picker, the login→uid step, and
+> `userinfo` all read the same mutable collection the CRUD ops write — so a user created via
+> `POST /api/v1/users` can log in (once `ACTIVE`). The picker and issuance are gated to
+> `status eq "ACTIVE"`, matching Okta's refusal of non-ACTIVE users (a freshly-created user
+> is `STAGED` until you PATCH it `ACTIVE`).
 
 ### Seeding your own accounts
 
