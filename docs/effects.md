@@ -22,8 +22,12 @@ There are two families of verbs:
 - **Collection verbs** operate on named **collections** of *objects* with CRUD, filtering
   and pagination — a REST resource like Okta users.
 
-An operation ends **either** in a `respond` (handshake) **or** in one terminal collection
-verb (`create`/`get`/`update`/`remove`/`list`).
+An operation ends **either** in a `respond` (handshake) **or** in exactly one terminal
+collection verb (`create`/`get`/`update`/`remove`/`list`, plus the relation/render verbs
+`link`/`unlink`/`listJoin`/`render`). Read-phase verbs that populate a variable and then
+fall through to a `respond` — `resolve`, `find`, `sign` — are *not* terminal, so an op may
+use several. The relation, lookup, signing, and render verbs are covered in
+[Joins, lookups, signing, rendering](#joins-lookups-signing-rendering-extended-verbs).
 
 ## Execution model
 
@@ -316,6 +320,179 @@ Items are sorted by id. `limit` (default 200) caps the page; `after=<id>` return
 after that id. `list.link` interpolates `{next}` (the last id of the page) into a `Link`
 header, emitted only when more items remain. The cursor in the response and the `after`
 query parameter are the same id value.
+
+## Joins, lookups, signing, rendering (extended verbs)
+
+The verbs above cover a single-resource CRUD twin and an OAuth handshake. Four more verbs
+plus one interpolation upgrade cover *relations between* resources (group membership), a
+non-terminal collection read (used both as a foreign-key guard and to shape a projection),
+and issuing real signed JWTs. Like everything else, they are declarative — you never write
+JavaScript.
+
+### Dotted paths in templates
+
+`{name}` now also resolves **dotted paths** into a bound object: `{user.profile.email}`
+walks `user → profile → email` (missing links interpolate to `""`). This works anywhere a
+template string is interpolated (`respond.json`, `create.body`, a `Location` header). It is
+what lets you *shape* a response from a bound row without a dedicated projection verb:
+
+```yaml
+respond:
+  json:
+    sub:   "{user.id}"                    # dotted read from the bound `user` object
+    email: "{user.profile.email}"
+    name:  "{user.profile.firstName}"
+```
+
+> Interpolation still yields **strings**. For non-string claim values (numbers, arrays) in
+> a JWT, use `sign`'s typed claim directives (below), not a template string.
+
+### `find` — read a collection row into a variable (non-terminal)
+
+`find` reads one row from a collection into a variable and continues; a miss short-circuits
+with `miss` (like `get`, but **not** terminal — the op goes on to `respond`/`sign`/a
+terminal verb). It reads either by id (`key`) or by a secondary (dotted) `field`:
+
+```yaml
+find: { collection: users, key: "{uid}",              as: user, miss: { status: 401, json: { errorCode: "E0000007" } } }
+find: { collection: users, field: profile.login, eq: "{login}", as: user, miss: { status: 404 } }
+# optional: pick a single sub-field instead of the whole row
+find: { collection: users, field: profile.login, eq: "{login}", as: uid, pick: id, miss: { status: 404 } }
+```
+
+`find` runs in the read phase (after `bind`/`consume`/`lookup`, before `mint` and the
+terminal), so several `find`s compose. Field lookups are a linear scan (small collections);
+`key` lookups are O(1).
+
+**The foreign-key guard idiom.** Because a `find` miss returns `miss` and otherwise falls
+through, a `find` you don't consume *is* a presence check. To require that a group and a
+user both exist before writing a membership, `find` each with a `404` miss:
+
+```yaml
+find: { collection: groups, key: "{gid}", as: _g, miss: { status: 404, json: { errorCode: "E0000007" } } }
+find: { collection: users,  key: "{uid}", as: _u, miss: { status: 404, json: { errorCode: "E0000007" } } }
+# ... reaching here means both exist; the bound _g/_u may be ignored ...
+```
+
+### `link` / `unlink` — set membership (terminal)
+
+A **membership** is a many-to-many relation modeled as its own collection whose rows are
+`{ id: "{a}:{b}", … }`. `link` inserts one idempotently; `unlink` removes one and is
+**miss-tolerant**. Both return an empty body (default `204`) and take the composite id from
+bound vars — they do *not* mint an id (unlike `create`) and `unlink` does *not* 404 on a
+non-member (unlike `remove`).
+
+```yaml
+# PUT /api/v1/groups/{gid}/users/{uid}  — assign (idempotent)
+effect:
+  bind: { gid: { pathRegex: "/groups/([^/]+)/users/[^/]+$" }, uid: { pathRegex: "/users/([^/]+)$" } }
+  find: [ { collection: groups, key: "{gid}", as: _g, miss: { status: 404, json: { errorCode: "E0000007" } } },
+          { collection: users,  key: "{uid}", as: _u, miss: { status: 404, json: { errorCode: "E0000007" } } } ]
+  link: { collection: memberships, id: "{gid}:{uid}", row: { gid: "{gid}", uid: "{uid}" }, status: 204 }
+
+# DELETE /api/v1/groups/{gid}/users/{uid} — unassign (204 even if not a member)
+effect:
+  bind:   { gid: {...}, uid: {...} }
+  find:   [ {groups…}, {users…} ]          # 404 only for a bad id
+  unlink: { collection: memberships, id: "{gid}:{uid}", status: 204 }
+```
+
+`find` accepts a single map or a list of maps, so the two guards read as one key.
+`link` re-inserting an existing row is a no-op (the composite id dedupes) → idempotent.
+
+### `listJoin` — filter a relation, hydrate the other side, paginate (terminal)
+
+`listJoin` lists a membership collection filtered to one side, replaces each row with the
+*hydrated* object from a target collection, and cursor-paginates over the returned objects'
+ids (dropping rows whose target no longer exists). It reuses the same `after`/`limit`/`link`
+cursor contract as `list`, but the cursor ranges over the **hydrated ids**, not the
+membership rows:
+
+```yaml
+# GET /api/v1/groups/{gid}/users  → [User]
+effect:
+  bind: { gid: { pathRegex: "/groups/([^/]+)/users$" }, after: { query: after }, lim: { query: limit } }
+  find: { collection: groups, key: "{gid}", as: _g, miss: { status: 404, json: { errorCode: "E0000007" } } }
+  listJoin:
+    via:      memberships        # the relation collection
+    byField:  gid                # keep rows where row.gid == byValue
+    byValue:  "{gid}"
+    hydrate:  users              # target collection
+    hydrateVia: uid              # membership field naming the target id
+    after: "{after}"
+    limit: "{lim}"
+    link:  '</api/v1/groups/{gid}/users?after={next}>; rel="next"'
+```
+
+Swap `byField`/`hydrate`/`hydrateVia` to walk the relation the other way
+(`GET /api/v1/users/{uid}/groups` → `[Group]`).
+
+### `sign` — issue a signed JWT (non-terminal)
+
+`sign` builds a compact **RS256** JWT into a variable, which a later `respond` returns.
+Claims are **typed** (a template string alone can only make string claims):
+
+```yaml
+sign:
+  as:     access_token                 # the compact JWT lands in this var
+  key:    "<PEM private key literal>"  # supplied by the kit/gene (see below)
+  header: { alg: RS256, kid: "<kid>", typ: JWT }
+  claims:
+    iss: { baseUrl: true }             # issuer string (see the baseUrl bind source)
+    aud: { baseUrl: true }
+    sub: "{login}"                     # string claim (interp; dotted paths allowed)
+    cid: "{client_id}"
+    scp: { split: "{scope}", on: " " } # ARRAY claim  → ["openid","email"]
+    iat: { now: true }                 # NUMBER claim (epoch seconds, virtual clock)
+    exp: { now: { add: 3600 } }        # NUMBER claim (now + 3600s)
+    amr: ["pwd"]                        # literal (used as-is)
+```
+
+Claim value forms: a **string** (interpolated, dotted paths allowed) → string; `{now: …}`
+→ number (or ISO string with `{now: {iso: true}}`); `{split: <str>, on: <sep>}` → array;
+`{var: <name>}` → the bound variable verbatim (keeps its JS type); a literal
+number/bool/array → itself.
+
+Signing runs `require('crypto')` inside the injection (a Node built-in, always present).
+`iat`/`exp` read the [virtual clock](#the-virtual-clock); a twin that signs is treated as
+clock-using automatically (so `iat`/`exp` are seeded and deterministic even without a
+`--token-ttl`). The signing key and its published JWKS are generated once at kit-build time
+and embedded as literals, so the same contract always verifies against the same JWKS.
+
+A new **`baseUrl`** bind source gives an injection the twin's own origin (from the request
+`Host`, else a configured issuer), for `iss`/`aud` and any self-referential URL:
+
+```yaml
+bind: { origin: { baseUrl: true } }    # e.g. "http://localhost:9200"
+```
+
+### `render` — an HTML page from live collection state (terminal)
+
+`render` lists a collection (with the same `filter`) and renders each row through an HTML
+`row` template into a full page, returning `text/html` — the one collection response that
+is not JSON. It exists so a human-facing page (e.g. an OAuth account picker) reflects
+*runtime* state, not a snapshot baked at build time:
+
+```yaml
+effect:
+  render:
+    collection: users
+    filter: 'status eq "ACTIVE"'       # optional (same grammar as list)
+    row:  '<a href="/authorize?login={profile.login}&uid={id}">{profile.login}</a>'
+    wrap: '<!doctype html><h2>Sign in</h2>{rows}'   # {rows} = concatenated rendered rows
+    status: 200                         # default 200; Content-Type: text/html
+```
+
+`row` interpolates each listed row with dotted paths; `{rows}` in `wrap` is the joined
+output. `render` is terminal and returns `text/html` (the one collection verb that isn't
+JSON).
+
+### Compiler surface for a new terminal verb
+
+`link`/`unlink`/`listJoin`/`render` are **terminal** collection verbs. Adding one touches
+three sites (the read-phase verbs `find`/`sign` do not, since they end in a normal
+`respond`): the validator's terminal whitelist, the terminal-dispatch table, and this doc.
+See `PLAN-OKTA-DEEPEN.md` §1.4.
 
 ## The generated injection (under the hood)
 

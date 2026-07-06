@@ -1,8 +1,24 @@
 # PLAN — Deepening the Okta twin: group membership, JWT/JWKS/discovery, live userinfo
 
-Status: revised after adversarial review (rev 2); all §7 open questions resolved (rev 3)
+Status: rev 4 — verb set finalized against the compiler; docs drafted; ready to implement
 Scope: three extensions to the `okta` kit (`src/mocksys/kits.cljs`) and the effect
-runtime (`src/mocksys/inject.cljs`, `docs/effects.md`).
+runtime (`src/mocksys/inject.cljs`, `contract.cljs`, `conform.cljs`, `docs/effects.md`).
+
+> **The new effect verbs are specified in [`docs/effects.md`](docs/effects.md) →
+> "Joins, lookups, signing, rendering".** This plan references them; that doc is the
+> contract. Final set (down from rev-1's eight, after reading the compiler):
+>
+> | Verb | Kind | Replaces / note |
+> |---|---|---|
+> | `find` | read-phase | collection read → var; **absorbs** the old `exists` FK-guard (a `find` you don't consume *is* a presence check) |
+> | dotted-path `interp` | interp upgrade | **absorbs** the old `project` verb — `{user.profile.email}` shapes claims in a plain `respond` |
+> | `sign` | read-phase | RS256 JWT → var, typed claims |
+> | `link` / `unlink` | terminal | idempotent set insert / miss-tolerant delete |
+> | `listJoin` | terminal | filter a relation, hydrate, paginate |
+> | `render` | terminal | HTML page from live collection state (dynamic picker) |
+>
+> `exists` and `project` from rev 2/3 are **gone** — folded into `find` and dotted interp.
+> Only the four terminal verbs need the §1.4 compiler edits; `find`/`sign` are read-phase.
 
 > **Rev 3** — the seven §7 open questions were resolved via a recorded dlktk dialectic.
 > Decisions, bases, and the losing arguments: `design/dialectics/okta-twin-deepening.md`
@@ -48,9 +64,9 @@ design** (what composes from existing genes vs. what needs a new primitive), the
 
 A recurring theme: **all three** features require *new effect verbs and edits to the
 effect compiler*, not just gene composition — including feature 3, whose live-collection
-picker and login→uid lookup have no existing verb `[R:B2]`. The spec is explicit about
-that boundary — it is the real work. Every new terminal verb also requires the three
-compiler edits in §1.4, or the contract validator rejects it `[R:B3]`.
+lookup (`find`) and dynamic picker (`render`) have no existing verb `[R:B2]`. The spec is
+explicit about that boundary — it is the real work. Every new *terminal* verb also requires
+the three compiler edits in §1.4, or the contract validator rejects it `[R:B3]`.
 
 ---
 
@@ -68,14 +84,14 @@ mocksys has no configured public base URL today. Add one:
 
 - New kit option `--issuer URL` (default `http://localhost:{port}`), threaded into the
   `okta` builder and stored on the contract as `"issuer"`.
-- In injections, prefer deriving the host from the request `Host` header at request
-  time (`hv("host")`) with the configured issuer as fallback, so a twin reached on any
-  port still self-describes correctly. Add a prelude helper `baseUrl()` that returns
-  `"http://" + hv("host")` when a Host header is present, else the embedded issuer.
+- A new **`baseUrl` bind source** (`bind: { origin: { baseUrl: true } }`) exposes the
+  origin to `sign` and `respond`. It returns `"http://" + hv("host")` when a `Host` header
+  is present, else the embedded issuer. (Documented in effects.md → `sign`.)
 
-> Decision to confirm in review: request-derived host (works on any port, but scheme is
-> always `http`) vs. a fixed configured issuer (stable, but wrong if the port changes).
-> Recommendation: request-derived with configured fallback.
+> **Resolved (Q1, §7): request-derived host with an `--issuer` fallback.** The http-only
+> scheme is correct for a local non-secret mock issuer; `--issuer` covers any fixed-host
+> need. Discovery docs (static ops, not injections) use mb templating
+> `{{request.headers.host}}` instead — see §3.2 `[R:m2]`.
 
 ### 1.2 Confirmed runtime capability — `require` in injections
 
@@ -88,36 +104,44 @@ coupling to mb's eval-in-module-scope is a **pinned-version dependency** — see
 
 ### 1.3 New prelude helpers (added once, shared)
 
+- `dget(o,p)` — already exists (`inject.cljs:338`); reused by dotted-path `interp`, `find`
+  field lookups, and `render`/claim templates.
 - `b64url(buf|str)` — base64url encode (JWT + JWKS `n`/`e`).
 - `signJwt(headerObj, claimsObj, pemPrivateKey)` — compact RS256 JWT via
   `require('crypto').createSign('RSA-SHA256')`. Deterministic given inputs.
-- `joinList(state, coll, field, value)` — return all rows of `coll` whose `field ===
-  value` (membership scans; small N, linear is fine).
-- `hydrate(state, coll, ids)` — map an array of ids to their objects in `coll`, dropping
-  misses. Backs the member/group list joins.
+- `findBy(state, coll, field, value)` — first row of `coll` whose `dget(row,field) ===
+  value` (backs `find` by secondary field; `find` by `key` reuses `coll(...).get`).
+- `joinPage(state, viaColl, byField, byValue, hydrateColl, hydrateField, after, limit)` —
+  filter the relation, hydrate the other side (dropping misses), sort + cursor-paginate
+  over the **hydrated** ids; returns `{items, next}` like `Coll.list`. Backs `listJoin`.
+- `renderPage(rows, rowTpl, wrapTpl)` — join `interp(rowTpl,row)` over rows into
+  `wrapTpl` at `{rows}`. Backs `render`.
+- extend `interp` to accept dotted keys `{a.b.c}` (regex `\{([\w.]+)\}` + `dget`). One
+  change; enables claim/response shaping everywhere without a `project` verb.
 
 All remain dependency-free except `signJwt` (Node built-in `crypto`).
 
-### 1.4 Mandatory compiler edits for every new terminal verb `[R:B3]`
+### 1.4 Mandatory compiler edits `[R:B3]`
 
-Adding `link`/`unlink`/`listJoin`/`sign`/`project` (or a collection-by-field lookup) is
-**not** just codegen — three sites hard-code the known-verb set and will otherwise reject
-or mis-route the new ops:
+Two of the new verbs are **read-phase** (`find`, `sign`): they populate a variable and fall
+through to a normal `respond`, so they need **no** whitelist entry — only new emit branches
+in `effect-body-js` (`inject.cljs:259-311`) at the right point in the read order (see the
+execution model, effects.md).
+
+Four are **terminal** (`link`, `unlink`, `listJoin`, `render`) and each touches three
+hard-coded sites, or the op is rejected / mis-routed:
 
 1. **Validator whitelist** — `src/mocksys/contract.cljs:428-431` errors unless an effect
-   has `respond` or one of `create/get/update/remove/list`. Add the new terminal verbs
-   here, or ops ending in them fail validation with "effect has no `respond` or collection
-   action."
-2. **Terminal dispatch vector** — `inject.cljs:68` (`collection-verbs`) and the
-   `collection-terminal-js` dispatch (`inject.cljs:174-180`) decide which key is the
-   terminal and how it compiles. New collection-shaped terminals must be registered here.
-3. **Docs** — `docs/effects.md` enumerates the verb families; keep it in sync.
+   has `respond` or one of `create/get/update/remove/list`. Add the four terminal verbs
+   here, else "effect has no `respond` or collection action."
+2. **Terminal dispatch** — add the verbs to `collection-verbs` (`inject.cljs:68`) and a
+   branch each in `collection-terminal-js` (`inject.cljs:174-180`) with its `*-js` emitter.
+   `render` additionally needs a non-JSON responder (`collResp` forces
+   `application/json`, `inject.cljs:361-362`) — emit `text/html`.
+3. **Docs** — `docs/effects.md` is the verb contract; keep it in sync.
 
-Non-terminal prechecks (`exists`, and any `sign`/`project` that is *followed* by
-`respond`) do not need whitelist entries — they run in the read phase before the terminal.
-But `link`/`unlink`/`listJoin` **are** terminal and do. Note `sign`/`project` are designed
-as read-phase steps that populate a variable, then a normal `respond` returns it — so they
-stay off the terminal whitelist by construction (see §3.2, §4.2).
+The **interp dotted-path** change and the **`baseUrl` bind source** are additive (a new
+regex branch and a new `bind-js` case, `inject.cljs:75-96`) and touch no whitelist.
 
 ---
 
@@ -157,23 +181,23 @@ CRUD and cannot express it. Model membership as its own keyed set and add three 
 **State:** a `memberships` collection, rows `{ "id": "{gid}:{uid}", "gid": ..., "uid": ... }`,
 `idField: id`. Seed empty (or with a couple of rows for demo — see §2.4).
 
-**New effect verbs** (in `inject.cljs`, documented in `effects.md`):
+**Verbs used** (all specified in effects.md → "Joins, lookups, signing, rendering"):
 
-- `link` — idempotent set insert. Binds `gid`/`uid` from the path, writes the composite
-  row, returns an empty `204` (configurable status). Unlike `create`, it does **not**
-  mint an id and returns **no body**. Guards existence of both endpoints first (`get`
-  on `groups` and `users`, each `miss → 404 E0000007`).
-- `unlink` — set delete by composite key; `204`; miss → `404`.
-- `listJoin` — list rows of a membership collection filtered by one side, hydrate the
-  other side against a target collection, return the hydrated array with the same
-  cursor-pagination + `Link` header machinery `list` already has.
+- `find` (read-phase) — used twice as a **foreign-key guard**: `find` the group and the
+  user by id, each `miss → 404 E0000007`. Reaching the terminal means both exist. This is
+  why there is no separate `exists` verb — a `find` you don't consume *is* the presence
+  check. Confirmed necessary: Okta 404s an assign/unassign to a bad group *or* user id
+  (`GroupApiTests.cs:726,739`).
+- `link` (terminal) — idempotent set insert; composite id `{gid}:{uid}` from bound vars;
+  empty `204`. Unlike `create` it mints no id and returns no body.
+- `unlink` (terminal) — miss-tolerant delete; empty `204` **even on a non-member** (§2.5,
+  confirmed). Unlike `remove` (which 404s on miss) `[R:M5]`.
+- `listJoin` (terminal) — filter the relation by one side, hydrate the other against a
+  target collection, cursor-paginate over the hydrated ids (its own pagination, *not*
+  `Coll.list`'s — see effects.md and `[R:M5]` below).
 
-`listJoin` is the one genuinely new capability; `link`/`unlink` are thinner but **not**
-just `create`/`remove` variants: `create` always mints an id and returns a body
-(`inject.cljs:66-74`), whereas `link` takes a composite id from the path and returns an
-empty `204`; `remove` 404s on miss (`inject.cljs:153-160`), whereas `unlink` must return
-`204` even on a non-member to match Okta `[R:M5]`. So both need their own codegen paths,
-not flags. All three are terminal → all three need the §1.4 edits.
+`link`/`unlink`/`listJoin`/`render` are terminal → each needs the §1.4 edits; `find` is
+read-phase and needs none.
 
 ### 2.3 Operations added by the `membership` gene
 
@@ -184,49 +208,34 @@ GET    /api/v1/groups/{groupId}/users            → listJoin(memberships by gid
 GET    /api/v1/users/{userId}/groups             → listJoin(memberships by uid → groups) → 200 []Group
 ```
 
-Effect sketch for `link` (YAML-shaped; the gene emits this):
+Effect sketches (the gene emits these; full syntax in effects.md):
 
 ```yaml
+# PUT assign — find-guard both endpoints, then idempotent link
 - id: assign-user-to-group
   request: { method: PUT, path: "/api/v1/groups/{gid}/users/{uid}" }
   effect:
     bind: { gid: { pathRegex: "/groups/([^/]+)/users/[^/]+$" },
-            uid: { pathRegex: "/groups/[^/]+/users/([^/]+)$" } }
-    # foreign-key prechecks (both must exist)
-    exists: [ { collection: groups, key: "{gid}", miss: { status: 404, json: <okta-error E0000007> } },
-              { collection: users,  key: "{uid}", miss: { status: 404, json: <okta-error E0000007> } } ]
-    link: { collection: memberships, id: "{gid}:{uid}",
-            row: { gid: "{gid}", uid: "{uid}" }, status: 204 }
-```
+            uid: { pathRegex: "/users/([^/]+)$" } }
+    find: [ { collection: groups, key: "{gid}", as: _g, miss: { status: 404, json: <okta E0000007> } },
+            { collection: users,  key: "{uid}", as: _u, miss: { status: 404, json: <okta E0000007> } } ]
+    link: { collection: memberships, id: "{gid}:{uid}", row: { gid: "{gid}", uid: "{uid}" }, status: 204 }
 
-`exists` is a non-terminal precheck (like `limit`): it short-circuits on miss, else falls
-through. Alternatively fold the checks into `link` as `requires: [...]`. Review to pick.
-
-Effect sketch for the member list:
-
-```yaml
+# GET members — find-guard the group, then join memberships → users
 - id: list-group-users
   request: { method: GET, path: "/api/v1/groups/{gid}/users" }
   effect:
-    bind: { gid: { pathRegex: "/groups/([^/]+)/users$" },
-            after: { query: after }, lim: { query: limit } }
-    listJoin:
-      via: memberships          # membership collection
-      byField: gid              # match rows where row.gid == {gid}
-      byValue: "{gid}"
-      hydrate: users            # target collection to expand the other side (uid)
-      hydrateVia: uid           # membership field naming the target id
-      after: "{after}"
-      limit: "{lim}"
-      link: '</api/v1/groups/{gid}/users?after={next}>; rel="next"'
+    bind: { gid: { pathRegex: "/groups/([^/]+)/users$" }, after: { query: after }, lim: { query: limit } }
+    find: { collection: groups, key: "{gid}", as: _g, miss: { status: 404, json: <okta E0000007> } }
+    listJoin: { via: memberships, byField: gid, byValue: "{gid}",
+                hydrate: users, hydrateVia: uid, after: "{after}", limit: "{lim}",
+                link: '</api/v1/groups/{gid}/users?after={next}>; rel="next"' }
 ```
 
-> `[R:M5]` `listJoin` **cannot reuse** `Coll.list`'s pagination — that logic
-> (`inject.cljs:350-356`) paginates over a single collection's id-keyed map, but a joined,
-> hydrated array is not a `Coll`. The sort/cursor/slice must be reimplemented over the
-> hydrated result. Also decide the cursor domain: Okta cursors over the **returned user
-> list** (the `id` of the last returned user), not over membership rows — implement
-> `after`/`{next}` against the hydrated user ids.
+> `[R:M5]` `listJoin` has its **own** pagination (`joinPage`, §1.3), not `Coll.list`'s —
+> that logic (`inject.cljs:350-356`) ranges over one collection's id-keyed map, but a
+> joined/hydrated array is not a `Coll`. The cursor ranges over the **returned objects'
+> ids** (the last returned user's `id`), matching Okta's cursor domain, not membership rows.
 
 ### 2.4 `okta` kit wiring & seed
 
@@ -245,7 +254,7 @@ Effect sketch for the member list:
 - **Unassign non-member**: `unlink` returns `204` even when there is no membership row —
   **confirmed** against Okta's live integration test (`GroupApiTests.cs:554-555`,
   `"Idempotency - Unassign user not in group (should not throw)"`). A `404` is returned
-  *only* for a bad group/user id, which the `exists` precheck (§2.3) already handles. So
+  *only* for a bad group/user id, which the `find`-guard (§2.3) already handles. So
   `unlink` must be miss-tolerant (always 204), distinct from `remove` (which 404s on miss).
 - **`Everyone` auto-membership**: NOT emulated — membership is explicit only. Document.
 - **Cascade on user/group delete**: deleting a user/group leaves orphan membership rows.
@@ -372,18 +381,20 @@ sign:
     sub: "{login}"                 # login/username, NOT the id
     cid: "{client_id}"             # the client id goes here
     uid: "{uid}"                   # the user id goes here
-    scp: { splitVar: scope, on: " " }   # `[R:M2]` typed array claim, not a string
+    scp: { split: "{scope}", on: " " }  # `[R:M2]` typed array claim, not a string
     iat: { now: true }
-    exp: { now: { add: ttl } }
+    exp: { now: { add: 3600 } }         # build-time literal (the token TTL)
 ```
 
 `sign` calls the `signJwt` prelude helper. Two runtime capabilities this exposes:
 
 - **`[R:M2]` Typed (non-string) claims.** `interp`/`deepInterp` (`inject.cljs:325-328`) do
-  *string* substitution only — `{scpArray}` would yield `"openid,email"` (a string), not
-  `["openid","email"]`. `sign` therefore needs structured claim directives that emit real
-  JSON types: `{ splitVar: <var>, on: " " }` → array, `{ now: … }` → number, and plain
-  `{var}` → string. `amr: ["pwd"]` is a literal and needs nothing.
+  *string* substitution only — a template `"{scope}"` yields `"openid,email"` (a string),
+  not `["openid","email"]`. `sign` claim values are therefore typed directives: a **string**
+  → interp (dotted paths allowed); `{ split: <str>, on: <sep> }` → array; `{ now: … }` →
+  number; `{ var: <name> }` → the bound variable verbatim; a literal → itself. `amr:
+  ["pwd"]` is a literal. `exp`'s `now.add` is a build-time literal (bind's `now.add` is
+  emitted as a literal at `inject.cljs:91-92`), which is fine — the TTL is a kit CLI value.
 - **`[R:M3]` Clock activation.** `iat`/`exp` read the virtual clock, but the clock is only
   auto-enabled when `op-uses-clock?` sees `store.ttl`/`limit`/`now`-**in-bind**
   (`inject.cljs:216-221`). A `now` inside `sign.claims` is invisible to it → without
@@ -428,13 +439,11 @@ to:
    internal source of truth for `userinfo` and rate-limit keying.)
 5. `respond` `{ access_token, token_type: "Bearer", expires_in: ttl, scope, id_token? }`.
 
-> Design tension to resolve in review: with real JWTs, should `userinfo`/CRUD validate the
-> **signature/exp of the presented JWT** rather than a bucket lookup? v1 recommendation:
-> keep the bucket as source of truth (simplest, preserves current behavior); the JWT is
-> for *external* consumers. v2: add a `verifyJwt` verb so the twin rejects tampered/expired
-> tokens by signature. Note the divergence: v1 twin would accept a structurally-valid but
-> unknown JWT only if it's in the bucket — i.e. it still gates on the bucket, which is
-> actually *stricter* than Okta. Acceptable.
+> **Resolved (Q4, §7): the bucket is the token source-of-truth in v1.** `userinfo`/CRUD
+> `lookup` the presented bearer in the `tokens` bucket (whose `ttl` enforces `exp`); the
+> JWT is for *external* validators. This gates on the bucket — *stricter* than Okta (an
+> unknown-but-valid JWT is rejected), which is acceptable. A `verifyJwt` verb that checks
+> the presented JWT's signature/exp is a **v2** reusable feature, parked (see §8).
 
 ### 3.4 Determinism, and what stays reproducible
 
@@ -445,14 +454,15 @@ to:
   the clock in `sign`) — otherwise `iat`/`exp` are neither correct *nor* deterministic in
   the sense intended.
 - `iat`/`exp`/`jti`: `iat`/`exp` are clock-driven (deterministic, once the clock is on).
-  `jti` uses `rnd()`
-  (`Math.random`) — **non-deterministic**, and the signature therefore varies run-to-run.
-  For `conform` diffing, `jti`, `access_token`, and `id_token` must be added to the
-  default volatile/ignore set for the okta service profile (like request-ids/timestamps).
-  Document that JWTs are inherently volatile under diff; conform should compare *decoded
-  claims minus jti/iat/exp/signature*, not the raw compact string. **This needs a conform
-  enhancement** (a JWT-aware normalizer) — flag as follow-up, or simply `--ignore` the
-  three token fields for now.
+  `jti` uses `rnd()` (`Math.random`) — **non-deterministic**, so the raw compact token
+  varies run-to-run.
+- **conform JWT-aware normalizer (Q5, §7 — build now, with feature 2).** conform must
+  compare *decoded claims minus `jti`/`iat`/`exp`/signature*, not the raw compact string —
+  a plain `--ignore` of the token masks the whole thing and would have hidden the
+  `aud`/`sub`/`scp` errors the review caught (M1/M2). Add a small normalizer in
+  `conform.cljs`: detect a compact-JWT-shaped value (`hdr.payload.sig`), base64url-decode
+  the payload, drop the four volatile claims, and diff the rest. Reusable for any
+  JWT-issuing twin. It lands **alongside** feature 2, not before it, so it is not a blocker.
 
 ### 3.5 Security caveats (documented, intentional)
 
@@ -472,9 +482,12 @@ to:
 
 Behavioral test (script, not pure corpus): run authorize→token, take the `access_token`,
 fetch `/oauth2/v1/keys`, and verify the RS256 signature with a standard JWT library
-(e.g. `jose`) against the JWKS; assert `iss`, `aud`, `sub`, `scp`, `exp` claims. Advance
-the clock past `exp` and assert `exp` is in the past. This is the acceptance test that
-proves the twin is a *real* OIDC issuer to third-party validators.
+(e.g. `jose`) against the JWKS; assert the org-server claim shape — `iss == baseUrl`,
+`aud == baseUrl`, `sub == login`, `cid == client_id`, `uid`, `scp` (array), and `exp`.
+Advance the clock past `exp`; a `lookup` of the (bucket-ttl'd) token now misses → `401`.
+This is the acceptance test that proves the twin is a *real* OIDC issuer to third-party
+validators. A second acceptance test asserts `require('crypto')` is reachable in an
+injection (fails loudly if a future mb sandboxes it — `[R:m1]`, §5).
 
 ---
 
@@ -496,74 +509,56 @@ the requested scopes**
 
 ### 4.2 mocksys design — the picker is the hard part `[R:B1][R:B2]`
 
-**This feature is larger than rev 1 claimed. It is not "mostly rewiring."** The blocker:
-the account picker is *static HTML baked at build time* from the seed array
-(`picker-html`, `kits.cljs:104-122`, embedded as a static `responses` example at
-`kits.cljs:137-143`). A user created at runtime via `POST /api/v1/users` is written to the
-live `users` collection but **never appears in that frozen HTML** — so the headline
-outcome ("SCIM-created users can log in") is *undeliverable* by rev 1's design. There is no
-existing verb that (a) renders HTML from live collection state, or (b) finds a collection
-row by a non-id field (`resolve` reads seed arrays only, `inject.cljs:283-290`; `get` is
-by id only, `inject.cljs:126-135`; `list` is terminal). Delivering feature 3 requires
-**both** new capabilities. Concretely:
+**This feature is larger than rev 1 claimed. It is not "mostly rewiring"** — but it is
+smaller than rev 2 feared, because `find` + dotted-path `interp` do the work that rev 2
+budgeted a `project` verb and a bespoke lookup for. The original blocker stands: the
+account picker is *static HTML baked at build time* from the seed (`picker-html`,
+`kits.cljs:104-122`, embedded at `kits.cljs:137-143`), so a runtime `POST /api/v1/users`
+user **never appears in it**. Two capabilities close the gap; both now exist as general
+verbs:
 
-1. **Dynamic picker** — convert `authorize-picker` from a static response into a stateful
-   op that `list`s the live `users` collection and renders the picker HTML at request time.
-   This needs a way to emit **HTML from collection state**: today every collection response
-   forces `Content-Type: application/json` (`collResp`, `inject.cljs:361-362`). Options:
-   (a) a `render` terminal verb that maps a listed array through an HTML-row template, or
-   (b) let `list` take a `format: html` + row template. Either is net-new codegen (§1.4).
-   Each rendered link carries `&login=<profile.login>` exactly as the static one does, so
-   the downstream authorize/token flow is unchanged.
-2. **Login→uid at authorize** — the `authorize` op (with `?login=`) must map the chosen
-   `login` to its `uid` from the live collection to store `uid` in the code bucket. No verb
-   finds a row by `profile.login` today. Add a **collection-by-field lookup**
-   (`find: { collection: users, field: "profile.login", eq: "{login}", as: uid, pick: id, miss: … }`)
-   — a non-terminal read-phase verb (so it needs no §1.4 whitelist entry, but does need the
-   `dget` dotted-path support the filter already has, `inject.cljs:338`). *Alternatively*,
-   the dynamic picker (step 1) can embed each user's `uid` directly in the link
-   (`&login=…&uid=…`), making authorize a pure `bind` — this **avoids the new lookup verb
-   entirely** and is the recommended path since step 1 is already listing the collection.
-3. At **token** time, carry `uid` (and `login`) into the `tokens` bucket. (This also
-   supplies the JWT `sub`/`uid`/`cid` in §3 — the shared plumbing that motivates the
-   sequencing in §5.)
-4. At **userinfo** time: `lookup(tokens) → uid`, then `get(users, key={uid})`, then
-   **project** OIDC claims from the stored SCIM `profile`.
+1. **Dynamic picker** (`render`) — replace the static `authorize-picker` response with a
+   `render` op over the live `users` collection (filter `status eq "ACTIVE"` per Q7). Each
+   row emits a link carrying `&login={profile.login}&uid={id}`, so **authorize needs no
+   lookup** — it `bind`s `login`/`uid` straight from the query. `render` emits `text/html`
+   (the one non-JSON collection responder, §1.4).
+2. **userinfo over the live collection** (`find` + dotted `interp`) — `lookup(tokens) →
+   uid`, then `find { collection: users, key: "{uid}", as: user, miss: 401 }`, then a
+   plain `respond` whose `json` template shapes the OIDC claims with dotted paths. No
+   `project` verb — dotted `interp` (§1.3) reads `{user.profile.email}` directly:
 
-**Claim projection** (`project`) is a read-phase step that maps a bound user object to an
-OIDC claim set, then a normal `respond` returns it (so it stays off the terminal
-whitelist). v1: return the full profile-derived claim set (Okta's userinfo "always contains
-a full set of claims for the requested scopes"; scope enforcement is a separate non-goal).
-Mapping:
-
-```
-sub               ← user.id
-name              ← trim(profile.firstName + " " + profile.lastName)
-given_name        ← profile.firstName
-family_name       ← profile.lastName
-preferred_username← profile.login
-email             ← profile.email
-email_verified    ← (profile.email present) → true
-updated_at        ← user.lastUpdated (if present) else omit
+```yaml
+respond:
+  json:
+    sub:                "{user.id}"
+    name:               "{user.profile.firstName} {user.profile.lastName}"
+    given_name:         "{user.profile.firstName}"
+    family_name:        "{user.profile.lastName}"
+    preferred_username: "{user.profile.login}"
+    email:              "{user.profile.email}"
+    email_verified:     true
 ```
 
-Implement as either (a) a new `project` verb (map collection object → claims via a
-template with `{user.profile.login}` deep refs), or (b) extend `respond` with a
-`fromCollection` + template. Recommendation: a `claims`/`project` step that takes the
-`get` result variable and a template object, reusing deep interpolation. This same
-projection feeds the id_token/userinfo, so build it once.
+(`email_verified` is a literal `true`; if you need it conditional on email presence, that
+is a claim-shaping nicety deferred to v2 — Okta's userinfo returns the full claim set for
+requested scopes, and scope enforcement is a separate non-goal.) The same dotted-template
+shaping feeds the id_token claims in §3, so it is built once.
+
+3. At **token** time, carry `uid` and `login` into the `tokens` bucket (supplying the JWT
+   `sub`/`uid`/`cid` in §3 — the shared plumbing that motivates the §5 sequencing).
 
 ### 4.3 Forking the shared `oidc-handshake` gene `[R:M4]`
 
 Rev 1 framed this as a `userinfo`-only source parameter. It is **three** ops that fork on
-`:user-source`: **authorize** (dynamic-picker + login→uid vs. static picker), **token**
-(store `uid` vs. store only `login`), and **userinfo** (`get`+`project` from collection vs.
-`resolve` from seed). The `oauth2` kit uses flat GitHub/Codeberg seed users with no
-`profile` (`kits.cljs:132-164, 188-210`) and **must keep the seed path exactly as-is**. So
-the gene emits two structurally different effect chains per op:
+`:user-source`: **authorize-picker** (`render` over the live collection vs. static picker),
+**token** (store `uid`+`login` vs. store `login` only), and **userinfo** (`find`+dotted
+`respond` from the collection vs. `resolve` from seed). The `oauth2` kit uses flat
+GitHub/Codeberg seed users with no `profile` (`kits.cljs:132-164, 188-210`) and **must keep
+the seed path exactly as-is**. So the gene emits two structurally different effect chains
+per op:
 
-- `:user-source {:collection "users" :login-field "profile.login"}` → okta path
-  (dynamic picker, `find`/embedded-uid, `get`+`project`).
+- `:user-source {:collection "users" :login-field "profile.login" :active-only? true}` →
+  okta path (`render` picker, query-borne `uid`, `find`+dotted `respond`).
 - `:user-source {:seed "users"}` → oauth2 path (today's static picker,
   `resolve`+`respond{jsonVar}`). **Unchanged behavior — regression-test oauth2.**
 
@@ -579,10 +574,11 @@ the same mutable collection the CRUD ops write.
 - **Picker after SCIM create**: create a user via `POST /api/v1/users`, then the account
   picker should list them and login should succeed. This is the headline acceptance test.
 - **Deleted user mid-session**: token in bucket but user removed from collection →
-  `userinfo` `get` misses → `401`. Matches "token for a gone user is invalid".
-- **STAGED users**: real Okta won't issue tokens for non-`ACTIVE` users. v1: the picker
-  lists all users regardless of status (permissive mock). Optionally filter picker to
-  `status == ACTIVE`. Note the divergence.
+  `userinfo` `find` misses → `401`. Matches "token for a gone user is invalid".
+- **STAGED users (Q7, §7)**: the `render` picker filters `status eq "ACTIVE"`, so the
+  default seed's `carol` (STAGED) does not appear and cannot be issued a token — matching
+  Okta, which refuses non-ACTIVE users. This is a `filter` clause, not a lifecycle state
+  machine (which stays out of scope, §6).
 
 ### 4.5 Tests & conform
 
@@ -607,8 +603,9 @@ the minted id), so this is a scripted integration test.
 - **Injection size**: embedding a PEM + JWKS + claim templates enlarges the generated JS.
   Should be fine (a few KB) but worth a sanity check against mb's request-size limits.
 - **conform + JWTs**: raw compact tokens differ every run (random `jti`, and `iat`/`exp`
-  move with the clock). Needs the JWT-aware normalizer or a documented `--ignore`
-  (§3.4). Do not ship feature 2 without addressing conform, or CI diffs will be noise.
+  move with the clock). Addressed by the JWT-aware normalizer that ships *with* feature 2
+  (Q5, §3.4) — not a `--ignore` mask. Do not ship feature 2 without it, or CI diffs are
+  noise (and claim-level fidelity is lost).
 - **Scope creep into a state machine**: features here deliberately stop short of user
   lifecycle transitions and factor/MFA. Keep them out.
 
@@ -616,19 +613,18 @@ the minted id), so this is a scripted integration test.
 1. **Feature 1 (membership)** first — the most self-contained. `link`/`unlink`/`listJoin`
    touch only new state and the §1.4 compiler edits; nothing else depends on it. Good
    vehicle for landing the §1.4 verb-registration pattern once.
-2. **Feature 3 (live userinfo)** — mid-weight, *not* "rewiring": needs a dynamic-picker
-   render path and a login→uid step (§4.2) plus the three-op gene fork (§4.3). Do it before
-   feature 2 because its authorize/token `uid`/`login` plumbing supplies the JWT
-   `sub`/`uid`/`cid`.
+2. **Feature 3 (live userinfo)** — mid-weight: the `render` picker + `find`-based userinfo
+   (§4.2) and the three-op gene fork (§4.3). Do it before feature 2 because its
+   token-time `uid`/`login` plumbing supplies the JWT `sub`/`uid`/`cid`.
 3. **Feature 2 (JWT/JWKS/discovery)** last — largest, and builds on feature 3's `uid`
    plumbing and the §1.4 pattern.
 
-> If feature 3's dynamic-picker work (§4.2) proves too large, a **de-scoped feature 3** is
-> still worth shipping: wire `userinfo` to `get` from the live collection using a `uid`
-> that the token flow already has, and accept that the *picker* still lists only seeded
-> users (i.e. programmatic authorize with `?login=` works for SCIM-created users, but the
-> HTML picker doesn't show them). That delivers "SCIM users can log in via the API" without
-> the HTML-render verb. Decide in review.
+> **De-scope valve.** If `render` (the dynamic picker) proves too large, ship feature 3
+> without it: keep the static seed picker, but still wire **userinfo** to `find` the live
+> collection via the token's `uid`. Then a SCIM-created user authenticates via a direct
+> `GET /oauth2/v1/authorize?login=…&uid=…` (the flow works end-to-end) but is not clickable
+> in the HTML picker. That still closes the *semantic* gap ("SCIM users can log in") and
+> drops only `render`. The headline picker acceptance test (§4.4) then becomes v2.
 
 ## 6. Out of scope (explicit non-goals)
 
@@ -669,10 +665,12 @@ The decision record's Part 2 is the authoritative taxonomy. Summary rule:
 > reuse it unchanged; it is **okta-kit** (Tier 3) only if it encodes Okta's specific paths,
 > claim values, JWKS/discovery bodies, error codes, lifecycle policy, or seed.
 
-- **Tier 1 (features):** every new verb — `link`, `unlink`, `listJoin`, `exists`, `find`,
-  `sign`, `project`, HTML-from-collection render — plus `baseUrl()`, the RSA/JWKS signing
-  subsystem + `--signing-key`, the `op-uses-clock?` fix, the conform JWT normalizer, and
-  the §1.4 validator/dispatch registration. `verifyJwt` joins here in v2.
+- **Tier 1 (features):** the six new verbs — `find`, `link`, `unlink`, `listJoin`, `sign`,
+  `render` — plus the dotted-path `interp` upgrade, the `baseUrl` bind source, the RSA/JWKS
+  signing subsystem + `--signing-key`, the `op-uses-clock?` fix (detect `now` in `sign`),
+  the conform JWT normalizer, and the §1.4 validator/dispatch registration. `verifyJwt`
+  joins here in v2. (`exists`/`project` from earlier revs were folded into `find` and
+  dotted `interp` — no longer separate.)
 - **Tier 2 (genes):** the new `membership` gene; the `oidc-handshake` extension
   (`:user-source` seed-vs-collection + `:active-only?`). `oauth2` keeps the seed path.
 - **Tier 3 (okta kit):** URL paths, claim values/shapes, JWKS + discovery bodies, error

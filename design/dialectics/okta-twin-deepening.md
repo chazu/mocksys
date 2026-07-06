@@ -49,15 +49,14 @@ Nothing Okta-specific may leak here.
 
 | Capability | Where | Reused by (examples) |
 |---|---|---|
+| `find` — non-terminal collection read → var, by id or secondary (dotted) field; **also serves as the FK-guard** (a find you don't consume is a presence check) | inject.cljs (read-phase; reuses `dget`) | login→id, uid→user, any secondary-key lookup or referenced-id validation |
+| dotted-path `interp` — `{user.profile.email}` in any template; **replaces a `project` verb** | inject.cljs (`interp` regex + `dget`) | any response/claim shaping from a bound object |
 | `link` — idempotent set insert, composite id from path, empty 204 | inject.cljs + §1.4 whitelist | any many-to-many: GitHub team members, Stripe customer↔subscription |
 | `unlink` — miss-tolerant set delete (always 204) | inject.cljs + §1.4 | same |
 | `listJoin` — filter membership rows by one side, hydrate against a target collection, paginate over hydrated ids | inject.cljs + §1.4 | any join-list endpoint |
-| `exists` — non-terminal foreign-key precheck | inject.cljs (read-phase) | any endpoint validating a referenced id |
-| `find` — resolve a collection row by a non-id (dotted) field | inject.cljs (read-phase; reuses `dget`) | login→id, email→id, any secondary-key lookup |
-| `sign` — RS256 compact-JWT signing via `require('crypto')`, with **typed claim directives** (`splitVar`→array, `now`→number, `baseUrl`→issuer string) | inject.cljs prelude (`signJwt`, `b64url`) | any JWT-issuing twin (Auth0, Cognito, a bare OIDC IdP) |
-| `project` — map a bound object → an output/claims object via a dotted-ref template | inject.cljs (read-phase) | any userinfo-style projection |
-| HTML-from-collection render (`render` verb, or `list format:html`) | inject.cljs (relaxes the JSON-only `collResp`) | any dynamic listing/picker rendered from live state |
-| `baseUrl()` prelude helper + request-host derivation | inject.cljs | any twin that must self-describe (discovery, `_links`, redirect URIs) |
+| `sign` — RS256 compact-JWT signing via `require('crypto')`, with **typed claim directives** (`split`→array, `now`→number, `baseUrl`→issuer string) | inject.cljs prelude (`signJwt`, `b64url`) | any JWT-issuing twin (Auth0, Cognito, a bare OIDC IdP) |
+| `render` — HTML page from live collection state (terminal; relaxes the JSON-only `collResp`) | inject.cljs + §1.4 | any dynamic listing/picker rendered from live state |
+| `baseUrl` bind source + request-host derivation | inject.cljs (`bind-js`) | any twin that must self-describe (discovery, `_links`, redirect URIs) |
 | Build-time RSA keypair generation + JWKS derivation + `--signing-key FILE.pem` (Q6) | core.cljs / kit-build path | any JWT-signing twin |
 | `op-uses-clock?` detects `now`/`baseUrl` inside `sign` (Q1/Q3 correctness) | inject.cljs | any clock-stamped signing |
 | conform **JWT-aware normalizer** (decode compact JWT, drop sig/`jti`/`iat`/`exp`, diff claims) (Q5) | conform.cljs | any JWT-issuing twin under `conform` |
@@ -73,7 +72,7 @@ Okta-agnostic; you hand it paths/collections/fields.
 |---|---|---|
 | `crud-collection` | exists | `:coll :base :id-prefix :create-defaults …` |
 | `oidc-handshake` | **extended (Q7 + feature 3)** | now takes `:user-source {:seed …}` **or** `{:collection … :login-field …}`, and an optional `:active-only?` issuance filter. `oauth2` keeps `:seed`; `okta` uses `:collection` + `:active-only? true`. |
-| `membership` | **new** | `:link-base "/…/{gid}/users/{uid}"`, `:members-base`, `:owner-coll`, `:member-coll`, `:join-coll` — composes `link`/`unlink`/`listJoin`/`exists`. Okta calls it with Okta paths; a GitHub kit could call it with team paths. |
+| `membership` | **new** | `:link-base "/…/{gid}/users/{uid}"`, `:members-base`, `:owner-coll`, `:member-coll`, `:join-coll` — composes `find`(guard)/`link`/`unlink`/`listJoin`. Okta calls it with Okta paths; a GitHub kit could call it with team paths. |
 | `error-envelope` | exists | the miss-body shape (provider-shaped) |
 | `rate-limit`, `virtual-clock` | exist | — |
 
@@ -91,7 +90,8 @@ belongs in Tier 1/2.
   `/oauth2/v1/authorize|token|userinfo|keys`, `/.well-known/openid-configuration`.
 - **Claim values & shapes** (Q-none, but M1-corrected): access token `sub=login`,
   `aud=baseUrl` (org audience), `cid=client_id`, `uid`, `scp`; id_token `aud=client_id`,
-  `sub=uid`, `amr:["pwd"]`. These fill the generic `sign`/`project` templates.
+  `sub=uid`, `amr:["pwd"]`. These fill the generic `sign` claim directives / dotted
+  `respond` templates.
 - **JWKS + discovery response bodies**: Okta's exact field set and org-server semantics
   (issuer = bare org URL, `id_token_signing_alg_values_supported: ["RS256"]`).
 - **Error codes**: `E0000007` (not found), `E0000047` (rate limit) — the values, over the
