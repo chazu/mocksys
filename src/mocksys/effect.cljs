@@ -393,9 +393,15 @@
 (defn- run-limit
   "A per-key request counter in a window of the virtual clock. Over budget answers
    `miss` (default 429) with Remaining 0; otherwise the budget headers ride on
-   whatever the request answers."
+   whatever the request answers. The header names default to X-Rate-Limit-*; a
+   twin whose service uses another scheme (e.g. OpenAI's x-ratelimit-*-requests)
+   renames them with `headers` {limit, remaining, reset}."
   [{:keys [state vars] :as ctx} l]
   (let [b      (get l "bucket")
+        hn     (get l "headers")
+        h-lim  (or (get hn "limit") "X-Rate-Limit-Limit")
+        h-rem  (or (get hn "remaining") "X-Rate-Limit-Remaining")
+        h-rst  (or (get hn "reset") "X-Rate-Limit-Reset")
         mx     (or (get l "max") 60)
         window (or (get l "window") 60)
         _      (unchecked-set state b (js-or (unchecked-get state b) (dict)))
@@ -409,13 +415,13 @@
                                   "json" {"errorCode" "E0000047"
                                           "errorSummary" "API call exceeded rate limit due to too many requests."}}))
             hs (unchecked-get m "headers")]
-        (unchecked-set hs "X-Rate-Limit-Limit" (js/String mx))
-        (unchecked-set hs "X-Rate-Limit-Remaining" "0")
-        (unchecked-set hs "X-Rate-Limit-Reset" (js/String (+ win window)))
+        (unchecked-set hs h-lim (js/String mx))
+        (unchecked-set hs h-rem "0")
+        (unchecked-set hs h-rst (js/String (+ win window)))
         m)
-      (do (unchecked-set vars "__rl" (js-obj "X-Rate-Limit-Limit" (js/String mx)
-                                             "X-Rate-Limit-Remaining" (js/String (max 0 (- mx n)))
-                                             "X-Rate-Limit-Reset" (js/String (+ win window))))
+      (do (unchecked-set vars "__rl" (js-obj h-lim (js/String mx)
+                                             h-rem (js/String (max 0 (- mx n)))
+                                             h-rst (js/String (+ win window))))
           nil))))
 
 (defn- read-bucket
@@ -845,7 +851,9 @@
    `publish` runs after the terminal."
   [{:verb "bind"    :run run-bind    :check bind-errors}
    {:verb "limit"   :run run-limit
-    :check (fields-check {"bucket" :name "key" :template "max" :number "window" :number "miss" response-fields} #{"bucket"})}
+    :check (fields-check {"bucket" :name "key" :template "max" :number "window" :number "miss" response-fields
+                   "headers" {"limit" :string "remaining" :string "reset" :string}}
+                  #{"bucket"})}
    {:verb "consume" :run (bucket-reader true)
     :check (fields-check {"bucket" :name "key" :template "as" :name "miss" response-fields} #{"bucket" "key"})}
    {:verb "lookup"  :run (bucket-reader false)

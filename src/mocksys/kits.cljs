@@ -60,12 +60,16 @@
         item     (str base "/{id}")
         nf       (or not-found {"status" 404 "json" (okta-error "E0000007" "Not found: Resource not found")})
         bad-flt  (or invalid-filter {"status" 400 "json" (okta-error "E0000031" "Invalid search criteria.")})
-        ;; rate-limit gene: when enabled, every op binds a client key (the bearer
-        ;; token, else "anon") and guards with a clock-windowed `limit`.
-        rl-bind  (when rate-limit {"__cli" {"header" "authorization" "bearer" true}})
+        ;; rate-limit gene: when enabled, every op binds a client key and guards with
+        ;; a clock-windowed `limit`. "key-source" overrides what to bucket on (default
+        ;; the bearer token); "miss" overrides the 429 (default the Okta envelope);
+        ;; "headers" renames the rate-limit headers.
+        rl-bind  (when rate-limit
+                   {"__cli" (or (get rate-limit "key-source") {"header" "authorization" "bearer" true})})
         rl       (when rate-limit
-                   {"bucket" "rl" "key" "{__cli}"
-                    "max"    (get rate-limit "max") "window" (or (get rate-limit "window") 60)})
+                   (merge {"bucket" "rl" "key" "{__cli}"
+                           "max"    (get rate-limit "max") "window" (or (get rate-limit "window") 60)}
+                          (select-keys rate-limit ["miss" "headers"])))
         eff      (fn [m] (cond-> m
                            rl-bind (update "bind" merge rl-bind)
                            rl      (assoc "limit" rl)))]
@@ -538,6 +542,114 @@
                     (discovery-op "oauth-authz-server" "/.well-known/oauth-authorization-server"
                                   (discovery-body "http://"))]}))))
 
+;; --- kit: bifrost (LLM gateway twin) --------------------------------------
+;; A digital twin of the Bifrost LLM gateway. Slice 1: the client-facing chat
+;; contract — an OpenAI-compatible POST /v1/chat/completions authenticated by a
+;; virtual key (the `x-bf-vk` header), served from a seeded, mutable virtual_keys
+;; collection. Completions are deterministic/canned (no real inference); the point
+;; is to let code that *calls* Bifrost run in tests without a real gateway.
+;;
+;; Load-bearing shapes still unverified against a real Bifrost (see
+;; PLAN-BIFROST-TWIN.md §1): the exact `extra_fields` keys and the error-body JSON.
+;; We mirror OpenAI's error schema and keep extra_fields minimal until conform'd.
+
+(defn bifrost-error
+  "An OpenAI-compatible error body (Bifrost mirrors OpenAI's error schema)."
+  [message type code]
+  {"error" {"message" message "type" type "code" code "param" nil}})
+
+(def ^:private bifrost-virtual-keys
+  "Seed virtual keys. Clients authenticate with the `value` (the `sk-bf-*` secret)
+   via the `x-bf-vk` header; only `status eq \"active\"` keys may call inference."
+  [{"id" "vk_live" "value" "sk-bf-live-0000000000" "name" "primary"
+    "status" "active" "allowed_models" ["gpt-4o" "gpt-4o-mini" "claude-sonnet-5"]}
+   {"id" "vk_off" "value" "sk-bf-off-00000000000" "name" "disabled"
+    "status" "inactive" "allowed_models" []}])
+
+(def ^:private bifrost-ratelimit-headers
+  "OpenAI-style rate-limit header names (Bifrost is OpenAI-compatible). Exact names
+   unverified against a real Bifrost — conform later (PLAN §7)."
+  {"limit" "x-ratelimit-limit-requests"
+   "remaining" "x-ratelimit-remaining-requests"
+   "reset" "x-ratelimit-reset-requests"})
+
+(defn- chat-completions-op
+  "POST {path} — an OpenAI-shaped chat completion. Authenticate the `x-bf-vk`
+   virtual key against the live virtual_keys collection (401 on miss/inactive),
+   echo the requested `model`, and return a canned completion with literal `usage`
+   token counts and the Bifrost `extra_fields` envelope. With `:rate-limit`, a
+   per-VK request budget over a virtual-clock window guards the endpoint (429)."
+  [{:keys [path rate-limit]}]
+  {"id"      "chat-completions"
+   "summary" "OpenAI-compatible chat completion (canned, VK-authenticated)"
+   "request" {"method" "POST" "path" path}
+   "effect"
+   (cond->
+    {"bind"    {"vk" {"header" "x-bf-vk"} "model" {"body" "model"}}
+    ;; VK auth: the raw sk-bf-* value is a secondary field, not the row id; the
+    ;; ACTIVE filter gates issuance. A miss (unknown or inactive) → 401.
+    "find"    {"collection" "virtual_keys" "field" "value" "eq" "{vk}"
+               "filter" "status eq \"active\"" "as" "key"
+               "miss" {"status" 401
+                       "json" (bifrost-error "Invalid or inactive virtual key"
+                                             "invalid_request_error" "invalid_api_key")}}
+    "mint"    {"cid" {"prefix" "chatcmpl-"}}
+    "respond" {"status" 200
+               "json" {"id"      "{cid}"
+                       "object"  "chat.completion"
+                       "created" 1700000000
+                       "model"   "{model}"
+                       "choices" [{"index" 0
+                                   "message" {"role" "assistant"
+                                              "content" "This is a canned completion from the Bifrost twin."}
+                                   "finish_reason" "stop"}]
+                       "usage"   {"prompt_tokens" 9 "completion_tokens" 12 "total_tokens" 21}
+                       ;; Bifrost's non-OpenAI envelope (keys unverified — conform later)
+                       "extra_fields" {"provider" "openai" "latency" 42}}}}
+    ;; opt-in per-VK request budget: keyed on the VK value, over a virtual-clock
+    ;; window, returning a Bifrost-shaped 429 with OpenAI-style rate-limit headers.
+    rate-limit
+    (assoc "limit"
+           {"bucket"  "rl_chat" "key" "{vk}"
+            "max"     (get rate-limit "max") "window" (or (get rate-limit "window") 60)
+            "headers" bifrost-ratelimit-headers
+            "miss"    {"status" 429
+                       "json" (bifrost-error "Rate limit exceeded for this virtual key"
+                                             "rate_limit_error" "rate_limit_exceeded")}}))})
+
+(defn- bifrost-not-found
+  "A bifrost/OpenAI-shaped 404 for CRUD misses."
+  []
+  {"status" 404 "json" (bifrost-error "Not found" "invalid_request_error" "not_found")})
+
+(defn bifrost
+  "A digital twin of the Bifrost LLM gateway. Composed from genes:
+     Slice 1  OpenAI-compatible chat completions, virtual-key auth (`x-bf-vk`)
+     Slice 2  control-plane CRUD — /api/governance/virtual-keys, /api/providers
+   The chat op authenticates against the SAME live virtual_keys collection the
+   control plane writes, so a created key can immediately be used (create-then-use).
+     :virtual-keys [...]        override the seeded virtual keys
+     :rate-limit {\"max\" N \"window\" S} per-VK request budget on inference (429 on exceed)"
+  [scenario {:keys [virtual-keys rate-limit]}]
+  (let [vks (or (seq virtual-keys) bifrost-virtual-keys)
+        nf  (bifrost-not-found)]
+    (compose
+     {"service"  (or (first (str/split scenario #"/")) "bifrost")
+      "scenario" scenario
+      "origin"   "kit"
+      "summary"  "Bifrost LLM gateway (mock) — OpenAI-compatible chat completions + virtual-key auth + control-plane CRUD"
+      "seed"     {"virtual_keys" vks "providers" []}}
+     ;; control plane: virtual keys (the auth surface) + provider configs. A VK
+     ;; created here defaults to active and carries the client-supplied `value`
+     ;; secret (auto-minting the secret is a future crud-collection extension).
+     (crud-collection {:coll "virtual_keys" :base "/api/governance/virtual-keys"
+                       :seed-name "virtual_keys" :id-prefix "vk_"
+                       :create-defaults {"status" "active"} :not-found nf})
+     (crud-collection {:coll "providers" :base "/api/providers"
+                       :seed-name "providers" :id-prefix "prov_" :not-found nf})
+     {:operations [(chat-completions-op {:path "/v1/chat/completions"
+                                         :rate-limit rate-limit})]})))
+
 ;; --- gene registry ------------------------------------------------------------
 
 (def param-shapes
@@ -562,7 +674,7 @@
              [:create-defaults :map "fields a created row gets unless the body sets them"]
              [:not-found :map "miss response {status, json} (default Okta E0000007)"]
              [:invalid-filter :map "bad-filter response {status, json} (default Okta E0000031)"]
-             [:rate-limit :map "{max, window}: per-client budget per window seconds (default 60), then 429 + X-Rate-Limit-*"]]
+             [:rate-limit :map "{max, window, key-source, miss, headers}: per-client budget per window seconds (default 60), then 429 + X-Rate-Limit-* (key-source: a bind spec to bucket on, default the bearer token; miss: the 429 response; headers: {limit, remaining, reset} names)"]]
     :required #{:coll :base}
     :build crud-collection}
    "oidc-handshake"
@@ -715,7 +827,18 @@
                                                           (cond-> {"max" rate-limit}
                                                             rate-window (assoc "window" rate-window)))
                                             :token-ttl token-ttl
-                                            :issuer issuer :signing-key signing-key}))}}
+                                            :issuer issuer :signing-key signing-key}))}
+    "bifrost" {:name   "bifrost"
+               :doc    "Bifrost LLM gateway twin: OpenAI-compatible chat completions + virtual-key auth + control-plane CRUD"
+               :source "built-in"
+               :flags  {:virtual-keys {:default nil :type :json}
+                        :rate-limit   {:default nil :type :number}
+                        :rate-window  {:default nil :type :number}}
+               :build  (fn [scenario {:keys [virtual-keys rate-limit rate-window]}]
+                         (bifrost scenario {:virtual-keys virtual-keys
+                                            :rate-limit (when rate-limit
+                                                          (cond-> {"max" rate-limit}
+                                                            rate-window (assoc "window" rate-window)))}))}}
    (update-vals builtin-yaml #(parse-kit % "built-in" nil))))
 
 (defn with-user-kits
