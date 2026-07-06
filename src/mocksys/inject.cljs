@@ -65,7 +65,8 @@
         (get-in effect ["lookup" "bucket"])]
        (filter some?) distinct vec))
 
-(def ^:private collection-verbs ["create" "get" "update" "remove" "list"])
+(def ^:private collection-verbs
+  ["create" "get" "update" "remove" "list" "link" "unlink" "listJoin" "render"])
 
 (defn- collection-verb
   "The single terminal collection verb present on an effect, or nil."
@@ -204,13 +205,40 @@
   (when-let [f (get effect "find")]
     (if (map? f) [f] f)))
 
+;; --- relation (membership) verbs: terminal, empty body (default 204) ---
+
+(defn- link-js
+  "Insert one membership row idempotently under a composite `id`. Does NOT mint —
+   the id comes from bound vars — and re-inserting an existing id is a no-op, so
+   assign is idempotent. The `row` template is stamped with the id under the
+   collection's idField. Empty body, default 204."
+  [l]
+  (let [coll   (js (get l "collection"))
+        id*    (str "interp(" (js (get l "id")) ",V)")
+        row    (str "deepInterp(" (js (get l "row" {})) ",V)")
+        status (or (get l "status") 204)]
+    (str "{var _c=coll(state," coll "),_id=" id* ";"
+         "if(_c.get(_id)===undefined){var _row=" row ";_row[_c.f]=_id;_c.put(_row);}"
+         "return collResp(" status ",null);}")))
+
+(defn- unlink-js
+  "Remove one membership row by composite `id`. Miss-tolerant — deleting a
+   non-member is not a 404. Empty body, default 204."
+  [u]
+  (let [coll   (js (get u "collection"))
+        id*    (str "interp(" (js (get u "id")) ",V)")
+        status (or (get u "status") 204)]
+    (str "{coll(state," coll ").del(" id* ");return collResp(" status ",null);}")))
+
 (defn- collection-terminal-js [verb effect]
   (case verb
-    "create" (create-js (get effect "create"))
-    "get"    (get-js    (get effect "get"))
-    "update" (update-js (get effect "update"))
-    "remove" (remove-js (get effect "remove"))
-    "list"   (list-js   (get effect "list"))))
+    "create"   (create-js (get effect "create"))
+    "get"      (get-js    (get effect "get"))
+    "update"   (update-js (get effect "update"))
+    "remove"   (remove-js (get effect "remove"))
+    "list"     (list-js   (get effect "list"))
+    "link"     (link-js   (get effect "link"))
+    "unlink"   (unlink-js (get effect "unlink"))))
 
 ;; --- rate limiting --------------------------------------------------------
 
