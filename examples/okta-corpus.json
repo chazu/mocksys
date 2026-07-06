@@ -7,5 +7,14 @@
   { "method": "POST", "path": "/api/v1/users",
     "headers": { "Content-Type": "application/json" },
     "body": { "profile": { "login": "dana@example.com", "email": "dana@example.com" } },
-    "expect": 201 }
+    "expect": 201 },
+
+  { "method": "PUT",    "path": "/api/v1/groups/00g2/users/00u1", "expect": 204 },
+  { "method": "PUT",    "path": "/api/v1/groups/00g2/users/00u1", "expect": 204 },
+  { "method": "GET",    "path": "/api/v1/groups/00g2/users",      "expect": 200 },
+  { "method": "GET",    "path": "/api/v1/users/00u1/groups",      "expect": 200 },
+  { "method": "DELETE", "path": "/api/v1/groups/00g2/users/00u1", "expect": 204 },
+  { "method": "DELETE", "path": "/api/v1/groups/00g2/users/00u1", "expect": 204 },
+  { "method": "PUT",    "path": "/api/v1/groups/nope/users/00u1", "expect": 404 },
+  { "method": "PUT",    "path": "/api/v1/groups/00g2/users/nope", "expect": 404 }
 ]
