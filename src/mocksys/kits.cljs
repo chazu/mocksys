@@ -163,6 +163,69 @@
                            "miss"  {"status" 401 "json" {"message" "Bad credentials"}}}
                 "respond" {"status" 200 "jsonVar" "user"}}}]})
 
+;; --- gene: group membership (many-to-many relation) -----------------------
+;; A membership is its own collection whose rows carry a composite id `{gid}:{uid}`.
+;; assign/unassign guard that both sides exist (else 404); the two list ops hydrate
+;; the far side of the relation and cursor-paginate. Reusable across any twin with
+;; two collections to relate — parameterize the collections, base paths, and 404.
+
+(defn membership
+  "Four operations + a relation collection joining `users-coll` and `groups-coll`:
+     PUT    {groups-base}/{gid}/users/{uid}   assign   (idempotent, 204)
+     DELETE {groups-base}/{gid}/users/{uid}   unassign (miss-tolerant, 204)
+     GET    {groups-base}/{gid}/users         list a group's users  -> [User]
+     GET    {users-base}/{uid}/groups         list a user's groups  -> [Group]
+   assign/unassign FK-guard both ids (404 on a bad group/user); the list ops guard
+   the parent id. `opts`: :coll :users-coll :groups-coll :users-base :groups-base
+   :not-found."
+  [{:keys [coll users-coll groups-coll users-base groups-base not-found]}]
+  (let [coll   (or coll "memberships")
+        ucoll  (or users-coll "users")
+        gcoll  (or groups-coll "groups")
+        ubase  (or users-base "/api/v1/users")
+        gbase  (or groups-base "/api/v1/groups")
+        nf     (or not-found {"status" 404 "json" (okta-error "E0000007" "Not found: Resource not found")})
+        pair   (str gbase "/{gid}/users/{uid}")
+        gid-re (str gbase "/([^/]+)/users/[^/]+$")   ; gid on the assign/unassign path
+        uid-re "/users/([^/]+)$"                       ; uid = last segment
+        guard  [{"collection" gcoll "key" "{gid}" "as" "_g" "miss" nf}
+                {"collection" ucoll "key" "{uid}" "as" "_u" "miss" nf}]]
+    {:collections {coll {"idField" "id" "seed" coll}}
+     :operations
+     [{"id"      "assign-membership"
+       "summary" "assign a user to a group (idempotent)"
+       "request" {"method" "PUT" "path" pair}
+       "effect"  {"bind" {"gid" {"pathRegex" gid-re} "uid" {"pathRegex" uid-re}}
+                  "find" guard
+                  "link" {"collection" coll "id" "{gid}:{uid}"
+                          "row" {"gid" "{gid}" "uid" "{uid}"} "status" 204}}}
+      {"id"      "unassign-membership"
+       "summary" "remove a user from a group (204 even if not a member)"
+       "request" {"method" "DELETE" "path" pair}
+       "effect"  {"bind"   {"gid" {"pathRegex" gid-re} "uid" {"pathRegex" uid-re}}
+                  "find"   guard
+                  "unlink" {"collection" coll "id" "{gid}:{uid}" "status" 204}}}
+      {"id"      "list-group-users"
+       "summary" "list the users in a group"
+       "request" {"method" "GET" "path" (str gbase "/{gid}/users")}
+       "effect"  {"bind" {"gid" {"pathRegex" (str gbase "/([^/]+)/users$")}
+                          "after" {"query" "after"} "lim" {"query" "limit"}}
+                  "find" {"collection" gcoll "key" "{gid}" "as" "_g" "miss" nf}
+                  "listJoin" {"via" coll "byField" "gid" "byValue" "{gid}"
+                              "hydrate" ucoll "hydrateVia" "uid"
+                              "after" "{after}" "limit" "{lim}"
+                              "link" (str "<" gbase "/{gid}/users?after={next}>; rel=\"next\"")}}}
+      {"id"      "list-user-groups"
+       "summary" "list the groups a user belongs to"
+       "request" {"method" "GET" "path" (str ubase "/{uid}/groups")}
+       "effect"  {"bind" {"uid" {"pathRegex" (str ubase "/([^/]+)/groups$")}
+                          "after" {"query" "after"} "lim" {"query" "limit"}}
+                  "find" {"collection" ucoll "key" "{uid}" "as" "_u" "miss" nf}
+                  "listJoin" {"via" coll "byField" "uid" "byValue" "{uid}"
+                              "hydrate" gcoll "hydrateVia" "gid"
+                              "after" "{after}" "limit" "{lim}"
+                              "link" (str "<" ubase "/{uid}/groups?after={next}>; rel=\"next\"")}}}]}))
+
 ;; --- default seed accounts (match snooker's mockoauth) --------------------
 
 (def ^:private default-users
@@ -248,12 +311,15 @@
       {"service"  (or (first (str/split scenario #"/")) "okta")
        "scenario" scenario
        "origin"   "kit"
-       "summary"  "Okta (mock) — users & groups CRUD + OIDC; SCIM-ish filter, pagination, error envelope"
-       "seed"     {"users" users "groups" groups "oidc_users" (okta-oidc-users users)}}
+       "summary"  "Okta (mock) — users & groups CRUD + OIDC + group membership; SCIM-ish filter, pagination, error envelope"
+       "seed"     {"users" users "groups" groups "memberships" []
+                   "oidc_users" (okta-oidc-users users)}}
       (crud-collection {:coll "users" :base "/api/v1/users" :seed-name "users"
                         :id-prefix "00u" :create-defaults {"status" "STAGED"} :rate-limit rate-limit})
       (crud-collection {:coll "groups" :base "/api/v1/groups" :seed-name "groups"
                         :id-prefix "00g" :create-defaults {"type" "OKTA_GROUP"} :rate-limit rate-limit})
+      (membership {:coll "memberships" :users-coll "users" :groups-coll "groups"
+                   :users-base "/api/v1/users" :groups-base "/api/v1/groups"})
       (oidc-handshake {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token"
                        :userinfo "/oauth2/v1/userinfo" :seed-name "oidc_users"
                        :users (okta-oidc-users users) :token-ttl token-ttl}))
@@ -275,6 +341,7 @@
   "The reusable behavioral genes a kit composes — shown by `mocksys genes`."
   [{:name "crud-collection" :doc "REST resource: create/list/get/update/delete, SCIM-ish filter + cursor pagination"}
    {:name "oidc-handshake"  :doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"}
+   {:name "membership"      :doc "Group membership: assign/unassign (idempotent, FK-guarded) + list either side of the relation, hydrated + paginated"}
    {:name "error-envelope"  :doc "Provider-shaped error bodies for misses (e.g. Okta errorCode/errorSummary)"}
    {:name "rate-limit"      :doc "Per-client request budget over a virtual-clock window → 429 + X-Rate-Limit-* headers"}
    {:name "virtual-clock"   :doc "Deterministic, advanceable time (store.ttl expiry, now bind); driven by `mocksys clock`"}])
