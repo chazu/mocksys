@@ -22,7 +22,7 @@ mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use 
 
 | Kit | Options | Produces |
 |---|---|---|
-| `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), Okta error envelope, OIDC authorize/token/userinfo — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` makes OIDC tokens expire on the virtual clock. |
+| `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` makes OIDC tokens expire on the virtual clock. |
 | `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
 
 The default scenario id is `oauth/<provider>` for `oauth2` and `okta/okta` for `okta`;
@@ -49,6 +49,7 @@ mocksys genes        # list the genes (and kits) available
 |---|---|
 | `crud-collection` | A REST resource: create / list / get / update / delete, SCIM-ish filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). |
 | `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Optional token TTL. |
+| `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). |
 | `error-envelope` | Provider-shaped error bodies for misses (e.g. Okta `errorCode`/`errorSummary`). |
 | `rate-limit` | A per-client request budget over a [virtual-clock](effects.md#the-virtual-clock) window → `429` + `X-Rate-Limit-*` headers. |
 | `virtual-clock` | Deterministic, advanceable time (TTL expiry, rate-limit windows, `now` binds); driven by `mocksys clock`. |
@@ -66,6 +67,7 @@ the `kits` map — `oauth2` and `okta` are the worked examples.
   STAGED`), seeded with Okta-shaped accounts.
 - `crud-collection` for **groups** at `/api/v1/groups` (id prefix `00g`, default `type:
   OKTA_GROUP`).
+- `membership` relating **users** and **groups** at `/api/v1/groups/{gid}/users/{uid}`.
 - `oidc-handshake` at `/oauth2/v1/authorize|token|userinfo`.
 - the Okta `error-envelope` on every CRUD miss.
 
@@ -77,6 +79,9 @@ curl "$B/api/v1/users?filter=status%20eq%20%22ACTIVE%22"            # SCIM filte
 curl -X POST "$B/api/v1/users" -d '{"profile":{"login":"x@y.com"}}' # 201, id minted
 curl "$B/api/v1/users?limit=50"                                     # paginated; Link: rel="next"
 curl "$B/api/v1/users/missing"                                      # 404 Okta error envelope
+curl -X PUT "$B/api/v1/groups/00g2/users/00u1"                      # 204, assign to a group (idempotent)
+curl "$B/api/v1/groups/00g2/users"                                  # the group's users, hydrated
+curl "$B/api/v1/users/00u1/groups"                                  # the user's groups, hydrated
 # OIDC on the same twin: authorize -> token -> userinfo -> the bound user
 ```
 
