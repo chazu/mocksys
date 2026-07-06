@@ -230,15 +230,39 @@
         status (or (get u "status") 204)]
     (str "{coll(state," coll ").del(" id* ");return collResp(" status ",null);}")))
 
+(defn- list-join-js
+  "List a membership collection filtered to one side, replace each row with the
+   hydrated object from a target collection (dropping rows whose target is gone),
+   and cursor-paginate over the hydrated ids — same after/limit/link contract as
+   `list`, but the cursor ranges over the hydrated objects. Terminal, JSON array."
+  [j]
+  (let [via     (js (get j "via"))
+        byfield (js (get j "byField"))
+        byval   (str "interp(" (js (get j "byValue")) ",V)")
+        hydrate (js (get j "hydrate"))
+        hvia    (js (get j "hydrateVia"))
+        after   (if (get j "after") (str "interp(" (js (get j "after")) ",V)") "''")
+        limit   (if (get j "limit") (str "parseInt(interp(" (js (get j "limit")) ",V),10)") "0")
+        link    (get j "link")
+        status  (or (get j "status") 200)]
+    (str "{var _via=coll(state," via "),_hy=coll(state," hydrate "),_mm=_via.m,_k,_objs=[];"
+         "for(_k in _mm){var _r=_mm[_k];"
+         "if(String(dget(_r," byfield "))===" byval "){"
+         "var _t=_hy.get(dget(_r," hvia "));if(_t!==undefined)_objs.push(_t);}}"
+         "var _p=pageBy(_objs,_hy.f," after "," limit ");var _h={};"
+         (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",Object.assign({},V,{next:_p.next}));}"))
+         "return collResp(" status ",_p.items,_h);}")))
+
 (defn- collection-terminal-js [verb effect]
   (case verb
-    "create"   (create-js (get effect "create"))
-    "get"      (get-js    (get effect "get"))
-    "update"   (update-js (get effect "update"))
-    "remove"   (remove-js (get effect "remove"))
-    "list"     (list-js   (get effect "list"))
-    "link"     (link-js   (get effect "link"))
-    "unlink"   (unlink-js (get effect "unlink"))))
+    "create"   (create-js    (get effect "create"))
+    "get"      (get-js       (get effect "get"))
+    "update"   (update-js    (get effect "update"))
+    "remove"   (remove-js    (get effect "remove"))
+    "list"     (list-js      (get effect "list"))
+    "link"     (link-js      (get effect "link"))
+    "unlink"   (unlink-js    (get effect "unlink"))
+    "listJoin" (list-join-js (get effect "listJoin"))))
 
 ;; --- rate limiting --------------------------------------------------------
 
@@ -411,13 +435,18 @@
    "Coll.prototype.get=function(id){return this.m[String(id)];};"
    "Coll.prototype.put=function(o){this.m[String(o[this.f])]=o;return o;};"
    "Coll.prototype.del=function(id){var k=String(id),o=this.m[k];delete this.m[k];return o;};"
-   "Coll.prototype.list=function(opt){opt=opt||{};var f=this.f,arr=[],k;for(k in this.m)arr.push(this.m[k]);"
-   "if(opt.filter)arr=arr.filter(scimPred(opt.filter));"
+   ;; sort `arr` by id field `f`, apply cursor (`after`) + `limit`; returns
+   ;; {items,next}. Shared by Coll.list and the listJoin verb (which paginates over
+   ;; hydrated objects, not the collection itself).
+   "function pageBy(arr,f,after,limit){"
    "arr.sort(function(a,b){var x=String(a[f]),y=String(b[f]);return x<y?-1:x>y?1:0;});"
-   "var lim=opt.limit>0?opt.limit:200,start=0,i;"
-   "if(opt.after){for(i=0;i<arr.length;i++){if(String(arr[i][f])===String(opt.after)){start=i+1;break;}}}"
+   "var lim=limit>0?limit:200,start=0,i;"
+   "if(after){for(i=0;i<arr.length;i++){if(String(arr[i][f])===String(after)){start=i+1;break;}}}"
    "var page=arr.slice(start,start+lim),next=(start+lim<arr.length&&page.length)?String(page[page.length-1][f]):'';"
-   "return {items:page,next:next};};"
+   "return {items:page,next:next};}"
+   "Coll.prototype.list=function(opt){opt=opt||{};var arr=[],k;for(k in this.m)arr.push(this.m[k]);"
+   "if(opt.filter)arr=arr.filter(scimPred(opt.filter));"
+   "return pageBy(arr,this.f,opt.after,opt.limit);};"
    "function initColl(state,name,idField,seed){state.__c=state.__c||{};state.__cf=state.__cf||{};"
    "if(!state.__c[name]){var m={},i,r,s=seed||[];for(i=0;i<s.length;i++){r=s[i];m[String(r[idField])]=r;}"
    "state.__c[name]=m;state.__cf[name]=idField;}}"
