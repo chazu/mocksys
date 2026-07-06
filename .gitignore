@@ -19,3 +19,6 @@ mb.pid
 
 # Claude Code runtime artifacts (the agent skill under .claude/skills IS tracked)
 .claude/*.lock
+
+# dlktk local session pointer (dialectic data lives in the pudl store; export lives in design/dialectics/)
+.dlktk/
