@@ -106,6 +106,64 @@ invocations, or `--issuer URL` to fix the `iss`/discovery host when there's no `
 > `status eq "ACTIVE"`, matching Okta's refusal of non-ACTIVE users (a freshly-created user
 > is `STAGED` until you PATCH it `ACTIVE`).
 
+### Endpoint reference
+
+The full surface, on one stateful imposter. `4xx` misses return the Okta error envelope
+(`errorCode`/`errorSummary`); with `--rate-limit` every CRUD op can also return `429` +
+`X-Rate-Limit-*`.
+
+**Users** (SCIM CRUD over a live collection)
+
+| Method | Path | Behavior | Status |
+|---|---|---|---|
+| `POST` | `/api/v1/users` | Create a user (id minted `00u…`; defaults to `STAGED`, request body merged in). | `201` |
+| `GET` | `/api/v1/users` | List / filter / paginate (`?filter=` SCIM, `?after=`, `?limit=`; `Link: rel="next"`). | `200` |
+| `GET` | `/api/v1/users/{id}` | Get one user. | `200` · `404` |
+| `POST` | `/api/v1/users/{id}` | Merge-patch a user (e.g. `{"status":"ACTIVE"}` to activate). | `200` · `404` |
+| `DELETE` | `/api/v1/users/{id}` | Delete a user. | `204` · `404` |
+
+**Groups** (same CRUD shape)
+
+| Method | Path | Behavior | Status |
+|---|---|---|---|
+| `POST` | `/api/v1/groups` | Create a group (id minted `00g…`; `type: OKTA_GROUP`). | `201` |
+| `GET` | `/api/v1/groups` | List / filter / paginate groups. | `200` |
+| `GET` | `/api/v1/groups/{id}` | Get one group. | `200` · `404` |
+| `POST` | `/api/v1/groups/{id}` | Merge-patch a group. | `200` · `404` |
+| `DELETE` | `/api/v1/groups/{id}` | Delete a group. | `204` · `404` |
+
+**Group membership** (a many-to-many relation)
+
+| Method | Path | Behavior | Status |
+|---|---|---|---|
+| `PUT` | `/api/v1/groups/{gid}/users/{uid}` | Assign a user to a group (idempotent; both ids must exist). | `204` · `404` |
+| `DELETE` | `/api/v1/groups/{gid}/users/{uid}` | Unassign (miss-tolerant — a non-member is still `204`). | `204` · `404` |
+| `GET` | `/api/v1/groups/{gid}/users` | List a group's users, hydrated + paginated. | `200` · `404` |
+| `GET` | `/api/v1/users/{uid}/groups` | List a user's groups, hydrated + paginated. | `200` · `404` |
+
+**OIDC** (over the live `users` collection; issues signed RS256 JWTs)
+
+| Method | Path | Behavior | Status |
+|---|---|---|---|
+| `GET` | `/oauth2/v1/authorize` | No `?login`: HTML account picker of `ACTIVE` users (dynamic, reflects runtime creates). | `200` |
+| `GET` | `/oauth2/v1/authorize?login=&uid=&…` | With `?login`: mint a single-use code and redirect to `redirect_uri` (gated to `ACTIVE`). | `302` · `403` |
+| `POST` | `/oauth2/v1/token` | Exchange the code for a signed `access_token` + `id_token` (RS256). | `200` · `400` |
+| `GET` | `/oauth2/v1/userinfo` | Bearer access token → OIDC claims shaped from the live user row. | `200` · `401` |
+
+**Discovery & keys** (static; discovery host-templated from the request `Host`)
+
+| Method | Path | Behavior | Status |
+|---|---|---|---|
+| `GET` | `/oauth2/v1/keys` | JWKS — the RS256 public signing key that verifies the twin's tokens. | `200` |
+| `GET` | `/.well-known/openid-configuration` | OIDC discovery document (issuer + endpoints). | `200` |
+| `GET` | `/.well-known/oauth-authorization-server` | OAuth authorization-server discovery (same shape). | `200` |
+
+**Control** (built in because the twin carries a [virtual clock](effects.md#the-virtual-clock))
+
+| Method | Path | Behavior | Status |
+|---|---|---|---|
+| `POST` | `/_mocksys/clock` | Read / advance / set the virtual clock (drives `iat`/`exp`, TTLs, rate-limit windows). Use via `mocksys clock okta/okta [advance 1h \| set <ISO>]`. | `200` |
+
 ### Seeding your own accounts
 
 ```sh
