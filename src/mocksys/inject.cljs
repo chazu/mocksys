@@ -253,6 +253,20 @@
          (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",Object.assign({},V,{next:_p.next}));}"))
          "return collResp(" status ",_p.items,_h);}")))
 
+(defn- render-js
+  "List a collection (optional `filter`), render each row through the `row` template
+   and frame them in `wrap` at {rows}, returning text/html — the one collection verb
+   that isn't JSON. Reflects live collection state (a runtime-created row appears)."
+  [r]
+  (let [coll   (js (get r "collection"))
+        filt   (if (get r "filter") (str "interp(" (js (get r "filter")) ",V)") "''")
+        row    (js (get r "row" ""))
+        wrap   (js (get r "wrap" "{rows}"))
+        status (or (get r "status") 200)]
+    (str "{var _p=coll(state," coll ").list({filter:" filt "});"
+         "var _html=renderPage(_p.items," row "," wrap ",V);"
+         "return {statusCode:" status ",headers:withRl({'Content-Type':'text/html; charset=utf-8'}),body:_html};}")))
+
 (defn- collection-terminal-js [verb effect]
   (case verb
     "create"   (create-js    (get effect "create"))
@@ -262,7 +276,8 @@
     "list"     (list-js      (get effect "list"))
     "link"     (link-js      (get effect "link"))
     "unlink"   (unlink-js    (get effect "unlink"))
-    "listJoin" (list-join-js (get effect "listJoin"))))
+    "listJoin" (list-join-js (get effect "listJoin"))
+    "render"   (render-js    (get effect "render"))))
 
 ;; --- rate limiting --------------------------------------------------------
 
@@ -455,6 +470,12 @@
    "function coll(state,name){return new Coll(state.__c[name]||{},state.__cf[name]||'id');}"
    "function collResp(status,obj,headers){var h=withRl(headers||{});h['Content-Type']=h['Content-Type']||'application/json';"
    "return {statusCode:status,headers:h,body:obj==null?'':JSON.stringify(obj)};}"
+   ;; render `rowTpl` for each row (interp against the bound vars merged with the row,
+   ;; so a row link can carry both request-borne vars and dotted row fields), join
+   ;; them, and splice into `wrapTpl` at {rows}. Backs the `render` verb (text/html).
+   "function renderPage(rows,rowTpl,wrapTpl,base){var out='',i;"
+   "for(i=0;i<rows.length;i++){out+=interp(rowTpl,Object.assign({},base,rows[i]));}"
+   "return interp(wrapTpl,Object.assign({},base,{rows:out}));}"
    ;; merge any stashed rate-limit budget headers (set by a passing `limit`) into a
    ;; response, so every response — not just the 429 — advertises the remaining budget.
    "function withRl(h){if(V&&V.__rl){for(var k in V.__rl){if(h[k]===undefined)h[k]=V.__rl[k];}}return h;}"))
