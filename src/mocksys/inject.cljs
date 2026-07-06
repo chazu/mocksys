@@ -410,7 +410,9 @@
    "var ps=String(b).split('&');for(var i=0;i<ps.length;i++){var kv=ps[i].split('=');"
    "if(decodeURIComponent(kv[0])===k)return decodeURIComponent((kv[1]||'').replace(/\\+/g,' '));}return '';}"
    "function bodyJson(){var b=request.body;if(b==null)return {};if(typeof b==='object')return b;try{return JSON.parse(b)||{};}catch(e){return {};}}"
-   "function interp(t,v){return String(t).replace(/\\{(\\w+)\\}/g,function(_,k){return v[k]!=null?v[k]:'';});}"
+   ;; `{name}` and dotted `{a.b.c}` (walked via dget, a fn-hoisted helper below);
+   ;; a missing key/path interpolates to ''. Flat keys stay a one-segment dget.
+   "function interp(t,v){return String(t).replace(/\\{([\\w.]+)\\}/g,function(_,k){var x=dget(v,k);return x!=null?x:'';});}"
    "function deepInterp(x,v){if(typeof x==='string')return interp(x,v);"
    "if(Array.isArray(x))return x.map(function(e){return deepInterp(e,v);});"
    "if(x&&typeof x==='object'){var o={};for(var k in x){o[k]=deepInterp(x[k],v);}return o;}return x;}"
