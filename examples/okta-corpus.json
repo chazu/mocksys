@@ -16,5 +16,9 @@
   { "method": "DELETE", "path": "/api/v1/groups/00g2/users/00u1", "expect": 204 },
   { "method": "DELETE", "path": "/api/v1/groups/00g2/users/00u1", "expect": 204 },
   { "method": "PUT",    "path": "/api/v1/groups/nope/users/00u1", "expect": 404 },
-  { "method": "PUT",    "path": "/api/v1/groups/00g2/users/nope", "expect": 404 }
+  { "method": "PUT",    "path": "/api/v1/groups/00g2/users/nope", "expect": 404 },
+
+  { "method": "GET",    "path": "/oauth2/v1/keys",                    "expect": 200 },
+  { "method": "GET",    "path": "/.well-known/openid-configuration", "expect": 200 },
+  { "method": "GET",    "path": "/.well-known/oauth-authorization-server", "expect": 200 }
 ]

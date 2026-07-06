@@ -22,7 +22,7 @@ mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use 
 
 | Kit | Options | Produces |
 |---|---|---|
-| `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` makes OIDC tokens expire on the virtual clock. |
+| `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--issuer URL` `--signing-key FILE.pem` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo minting **signed RS256 JWTs** with published JWKS + discovery — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` makes OIDC tokens expire on the virtual clock, `--signing-key` pins the JWT key, `--issuer` fixes the discovery/`iss` host. |
 | `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
 
 The default scenario id is `oauth/<provider>` for `oauth2` and `okta/okta` for `okta`;
@@ -69,7 +69,9 @@ the `kits` map — `oauth2` and `okta` are the worked examples.
   OKTA_GROUP`).
 - `membership` relating **users** and **groups** at `/api/v1/groups/{gid}/users/{uid}`.
 - `oidc-handshake` at `/oauth2/v1/authorize|token|userinfo`, keyed on the **live** `users`
-  collection (dynamic picker, `userinfo` shaped from the mutable row).
+  collection (dynamic picker, `userinfo` shaped from the mutable row). The token endpoint
+  mints **signed RS256 JWTs** (access + id token), published at `/oauth2/v1/keys` (JWKS)
+  and `/.well-known/openid-configuration` (discovery).
 - the Okta `error-envelope` on every CRUD miss.
 
 So you get, on one stateful imposter:
@@ -83,8 +85,20 @@ curl "$B/api/v1/users/missing"                                      # 404 Okta e
 curl -X PUT "$B/api/v1/groups/00g2/users/00u1"                      # 204, assign to a group (idempotent)
 curl "$B/api/v1/groups/00g2/users"                                  # the group's users, hydrated
 curl "$B/api/v1/users/00u1/groups"                                  # the user's groups, hydrated
-# OIDC on the same twin: authorize -> token -> userinfo -> the bound user
+curl "$B/oauth2/v1/keys"                                            # JWKS (verify the twin's JWTs)
+curl "$B/.well-known/openid-configuration"                         # OIDC discovery
+# OIDC on the same twin: authorize -> token (signed RS256 access + id JWTs) -> userinfo
 ```
+
+The token endpoint issues real RS256 JWTs that verify against the twin's published JWKS,
+so third-party validators (`jose`, `jsonwebtoken`, …) accept them. The keypair is generated
+once per `kit okta` invocation; pass `--signing-key FILE.pem` to pin one across
+invocations, or `--issuer URL` to fix the `iss`/discovery host when there's no `Host` header.
+
+> **Security:** the private signing key is embedded in the contract JSON and shipped with
+> the twin — this is a *mock*; the key is not secret and must never be reused for anything
+> real. There is also no client-secret/PKCE/nonce enforcement: the JWT is well-formed and
+> verifiable, but the *flow* is still the permissive mock flow.
 
 > OIDC reads the **live** `users` collection: the account picker, the login→uid step, and
 > `userinfo` all read the same mutable collection the CRUD ops write — so a user created via
