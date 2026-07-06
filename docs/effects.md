@@ -358,7 +358,13 @@ find: { collection: users, key: "{uid}",              as: user, miss: { status: 
 find: { collection: users, field: profile.login, eq: "{login}", as: user, miss: { status: 404 } }
 # optional: pick a single sub-field instead of the whole row
 find: { collection: users, field: profile.login, eq: "{login}", as: uid, pick: id, miss: { status: 404 } }
+# optional: require the located row to also satisfy a SCIM filter, else miss
+find: { collection: users, key: "{uid}", filter: 'status eq "ACTIVE"', as: user, miss: { status: 403 } }
 ```
+
+An optional `filter` (the same grammar as `list`) constrains the match: the row must
+satisfy the key/field lookup **and** the filter, otherwise it's a miss. This is how an
+op gates on a row's state — e.g. only issue a token to a `status eq "ACTIVE"` user.
 
 `find` runs in the read phase (after `bind`/`consume`/`lookup`, before `mint` and the
 terminal), so several `find`s compose. Field lookups are a linear scan (small collections);

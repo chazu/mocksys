@@ -187,16 +187,20 @@
         bindv (if pick
                 (str "V[" as "]=dget(_r," (js pick) ");")
                 (str "V[" as "]=_r;"))
+        ;; optional SCIM filter: the located row must also satisfy it, else miss
+        gate  (if-let [flt (get f "filter")]
+                (str "if(_r!==undefined&&!scimPred(interp(" (js flt) ",V))(_r)){_r=undefined;}")
+                "")
         miss  (resp-js (or (get f "miss") {"status" 404}))]
     (if (contains? f "field")
       (let [field (js (get f "field"))
             eq    (str "interp(" (js (get f "eq")) ",V)")]
         (str "{var _c=coll(state," coll "),_r,_mm=_c.m,_k;"
              "for(_k in _mm){if(String(dget(_mm[_k]," field "))===" eq "){_r=_mm[_k];break;}}"
-             "if(_r===undefined){return " miss ";}" bindv "}"))
+             gate "if(_r===undefined){return " miss ";}" bindv "}"))
       (let [key* (str "interp(" (js (get f "key")) ",V)")]
         (str "{var _r=coll(state," coll ").get(" key* ");"
-             "if(_r===undefined){return " miss ";}" bindv "}")))))
+             gate "if(_r===undefined){return " miss ";}" bindv "}")))))
 
 (defn- finds-of
   "`find` is a single map or a list of maps (the FK-guard reads as one key); return
