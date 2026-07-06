@@ -57,10 +57,34 @@
        :headers (js->clj (js/Object.fromEntries (.entries (.-headers res))))
        :body   text})))
 
+(def ^:private jwt-re #"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
+
+;; claims that legitimately change every issuance (random id / clock-driven), so a raw
+;; JWT string diff is all noise. Dropping them (and comparing the decoded payload, which
+;; also drops the signature segment) leaves the meaningful claims — aud/sub/scp/… — to
+;; diff. A blanket `--ignore` of the token field would have masked those too (Q5).
+(def ^:private jwt-volatile-claims #{"jti" "iat" "exp" "auth_time" "nbf"})
+
+(defn- normalize-jwt
+  "If `s` is a compact JWT, decode its payload and drop the volatile claims, so the
+   diff compares claims not the raw signed string. Otherwise return `s` unchanged."
+  [s]
+  (if (and (string? s) (re-matches jwt-re s))
+    (try
+      (let [payload (-> (second (str/split s #"\."))
+                        (str/replace "-" "+") (str/replace "_" "/"))
+            claims  (js->clj (js/JSON.parse (.toString (js/Buffer.from payload "base64") "utf8")))]
+        (if (map? claims)
+          {"__jwt_claims" (apply dissoc claims jwt-volatile-claims)}
+          s))
+      (catch :default _ s))
+    s))
+
 (defn- canonical-body
   "A stable, comparable form of a response body: JSON is parsed, the `ignore` keys
-   masked (top-level, recursively), and re-serialized with sorted keys; non-JSON is
-   returned verbatim. So key order and volatile fields don't create false diffs."
+   masked (top-level, recursively), compact JWTs normalized to their non-volatile
+   decoded claims, and re-serialized with sorted keys; non-JSON is returned verbatim.
+   So key order, volatile fields, and per-issuance token noise don't create false diffs."
   [text ignore]
   (let [ign (set ignore)]
     (try
@@ -71,6 +95,7 @@
                                        (for [[k val] x]
                                          [k (if (contains? ign k) "<ignored>" (mask val))]))
                      (vector? x) (mapv mask x)
+                     (string? x) (let [j (normalize-jwt x)] (if (map? j) (mask j) x))
                      :else x))]
         (js/JSON.stringify (clj->js (mask v))))
       (catch :default _ text))))
