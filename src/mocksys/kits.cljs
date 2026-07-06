@@ -12,7 +12,8 @@
   genes* rather than written from scratch. `oauth2` reproduces snooker's mockoauth;
   `okta` composes a users + groups CRUD twin with the Okta error envelope and an
   OIDC token flow — a digital twin of Okta in one command."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            ["crypto" :as crypto]))
 
 ;; --- composition ----------------------------------------------------------
 
@@ -185,10 +186,47 @@
    `find`+dotted `respond`. `active-only?` gates issuance and the picker to
    `status eq \"ACTIVE\"` (Q7). `claims` is the (dotted) userinfo claim template."
   [{:keys [authz token userinfo token-ttl user-source]}]
-  (let [{:keys [collection login-field active-only? claims]} user-source
+  (let [{:keys [collection login-field active-only? claims jwt]} user-source
         login-field (or login-field "profile.login")
         active-flt  (when active-only? "status eq \"ACTIVE\"")
-        claims      (or claims {"sub" "{user.id}"})]
+        claims      (or claims {"sub" "{user.id}"})
+        ;; the access-token op: opaque bucket token, or a signed RS256 JWT pair when
+        ;; the kit supplies a `:jwt` config (private PEM + kid + claim templates).
+        access-op
+        (if jwt
+          (let [{:keys [private-pem kid access-claims id-claims ttl]} jwt
+                hdr {"alg" "RS256" "kid" kid "typ" "JWT"}]
+            {"id"      "access-token"
+             "summary" "code -> signed access_token + id_token JWTs (RS256)"
+             "request" {"method" "POST" "path" token}
+             "effect"  {"bind"    {"code" {"body" "code"} "scope" {"body" "scope"}
+                                   "client_id" {"body" "client_id"}}
+                        "consume" {"bucket" "codes" "key" "{code}" "as" "uid"
+                                   "miss"  {"status" 400 "json" {"error" "bad_verification_code"}}}
+                        ;; the JWT sub/email/name come off the live row → find it
+                        "find"    {"collection" collection "key" "{uid}" "as" "user"
+                                   "miss" {"status" 400 "json" {"error" "invalid_grant"}}}
+                        "mint"    {"jti" {"prefix" "AT."} "idjti" {"prefix" "ID."}}
+                        "sign"    [{"as" "access_token" "key" private-pem "header" hdr "claims" access-claims}
+                                   {"as" "id_token" "key" private-pem "header" hdr "claims" id-claims}]
+                        ;; bucket stays the internal source of truth for userinfo, keyed
+                        ;; on the JWT and TTL'd so bearer lookups expire on the clock
+                        "store"   {"bucket" "tokens" "key" "{access_token}" "value" "{uid}" "ttl" ttl}
+                        "respond" {"status" 200
+                                   "json"  {"access_token" "{access_token}" "id_token" "{id_token}"
+                                            "token_type" "Bearer" "expires_in" ttl "scope" "{scope}"}}}})
+          {"id"      "access-token"
+           "summary" "code -> access_token (code is single-use); carries the uid"
+           "request" {"method" "POST" "path" token}
+           "effect"  {"bind"    {"code" {"body" "code"} "scope" {"body" "scope"}}
+                      "consume" {"bucket" "codes" "key" "{code}" "as" "uid"
+                                 "miss"  {"status" 400 "json" {"error" "bad_verification_code"}}}
+                      "mint"    {"token" {"prefix" "mockoauth_"}}
+                      "store"   (cond-> {"bucket" "tokens" "key" "{token}" "value" "{uid}"}
+                                  token-ttl (assoc "ttl" token-ttl))
+                      "respond" {"status" 200
+                                 "json"  (cond-> {"access_token" "{token}" "token_type" "bearer" "scope" "{scope}"}
+                                           token-ttl (assoc "expires_in" token-ttl))}}})]
     [{"id"      "authorize"
       "summary" "authorize (?login given) -> code; issuance gated to the live user"
       "request" {"method" "GET" "path" authz "query" {"login" {"present" true}}}
@@ -209,18 +247,7 @@
                                    "row"  (live-picker-row authz login-field)
                                    "wrap" picker-wrap}
                             active-flt (assoc "filter" active-flt))}}
-     {"id"      "access-token"
-      "summary" "code -> access_token (code is single-use); carries the uid"
-      "request" {"method" "POST" "path" token}
-      "effect"  {"bind"    {"code" {"body" "code"} "scope" {"body" "scope"}}
-                 "consume" {"bucket" "codes" "key" "{code}" "as" "uid"
-                            "miss"  {"status" 400 "json" {"error" "bad_verification_code"}}}
-                 "mint"    {"token" {"prefix" "mockoauth_"}}
-                 "store"   (cond-> {"bucket" "tokens" "key" "{token}" "value" "{uid}"}
-                             token-ttl (assoc "ttl" token-ttl))
-                 "respond" {"status" 200
-                            "json"  (cond-> {"access_token" "{token}" "token_type" "bearer" "scope" "{scope}"}
-                                      token-ttl (assoc "expires_in" token-ttl))}}}
+     access-op
      {"id"      "userinfo"
       "summary" "bearer access_token -> OIDC claims from the live user row"
       "request" {"method" "GET" "path" userinfo}
@@ -368,6 +395,83 @@
   [{"id" "00g1" "type" "OKTA_GROUP" "profile" {"name" "Everyone" "description" "All users"}}
    {"id" "00g2" "type" "OKTA_GROUP" "profile" {"name" "Admins" "description" "Administrators"}}])
 
+;; --- JWT: keypair at build time, JWKS + discovery, claim templates ---------
+
+(defn- b64url [buf]
+  (-> (.toString buf "base64") (str/replace "+" "-") (str/replace "/" "_") (str/replace #"=+$" "")))
+
+(defn- jwt-config
+  "Generate an RSA-2048 keypair once at build time (or load `signing-key` PEM for a
+   pinned, cross-invocation-stable key), returning the private PEM for `sign`, a
+   stable thumbprint `kid`, and the published JWK (n/e). Deterministic within one
+   built contract — the same JWKS verifies every run of that contract."
+  [signing-key]
+  (let [priv (if signing-key
+               (crypto/createPrivateKey signing-key)
+               (.-privateKey (crypto/generateKeyPairSync "rsa" #js {:modulusLength 2048})))
+        pub  (crypto/createPublicKey priv)
+        jwk  (js->clj (.export pub #js {:format "jwk"}))            ; {kty n e}
+        der  (.export pub #js {:type "spki" :format "der"})
+        kid  (b64url (-> (.createHash crypto "sha256") (.update der) (.digest)))]
+    {:private-pem (.export priv #js {:type "pkcs8" :format "pem"})
+     :kid  kid
+     :jwk  (assoc jwk "alg" "RS256" "use" "sig" "kid" kid)}))
+
+(defn- okta-access-claims
+  "Org-server access-token claims. sub=login (NOT the id), aud=org URL (NOT client_id),
+   cid=client_id, uid=user id, scp=scope array."
+  [ttl]
+  {"ver" 1 "jti" "{jti}"
+   "iss" {"baseUrl" true} "aud" {"baseUrl" true}
+   "sub" "{user.profile.login}" "cid" "{client_id}" "uid" "{uid}"
+   "scp" {"split" "{scope}" "on" " "}
+   "iat" {"now" true} "exp" {"now" {"add" ttl}}})
+
+(defn- okta-id-claims
+  "ID-token claims — the mirror of the access token: aud=client_id, sub=uid, plus the
+   profile/email scope claims and amr/auth_time."
+  [ttl]
+  {"ver" 1 "jti" "{idjti}"
+   "iss" {"baseUrl" true} "sub" "{uid}" "aud" "{client_id}"
+   "iat" {"now" true} "exp" {"now" {"add" ttl}} "auth_time" {"now" true} "amr" ["pwd"]
+   "email" "{user.profile.email}" "email_verified" true
+   "name" "{user.profile.firstName} {user.profile.lastName}"
+   "preferred_username" "{user.profile.login}"})
+
+(defn- jwks-op
+  "GET /oauth2/v1/keys — the published JWKS (a static literal from the built key)."
+  [jwk]
+  {"id" "jwks"
+   "summary" "JWKS — the twin's RS256 public signing key"
+   "request" {"method" "GET" "path" "/oauth2/v1/keys"}
+   "responses" [{"status" 200 "headers" {"Content-Type" "application/json"}
+                 "examples" {"jwks" {"select" true "body" {"keys" [jwk]}}}}]})
+
+(defn- discovery-body [path-issuer]
+  ;; host-templated so the doc reflects the requesting origin (mb copy behavior on
+  ;; {{request.headers.host}}); matches the JWT `iss` (baseUrl = http://{Host}).
+  (let [base (str path-issuer "{{request.headers.host}}")]
+    {"issuer"                                 base
+     "authorization_endpoint"                 (str base "/oauth2/v1/authorize")
+     "token_endpoint"                         (str base "/oauth2/v1/token")
+     "userinfo_endpoint"                      (str base "/oauth2/v1/userinfo")
+     "jwks_uri"                               (str base "/oauth2/v1/keys")
+     "response_types_supported"               ["code" "id_token" "code id_token" "token" "token id_token"]
+     "grant_types_supported"                  ["authorization_code" "implicit" "refresh_token"]
+     "subject_types_supported"                ["public"]
+     "id_token_signing_alg_values_supported"  ["RS256"]
+     "scopes_supported"                       ["openid" "profile" "email"]
+     "token_endpoint_auth_methods_supported"  ["client_secret_basic" "none"]
+     "claims_supported"                       ["ver" "jti" "iss" "aud" "sub" "iat" "exp" "cid" "uid" "scp"
+                                               "email" "email_verified" "name" "preferred_username"]}))
+
+(defn- discovery-op [id path body]
+  {"id" id
+   "summary" (str "OIDC discovery — " path)
+   "request" {"method" "GET" "path" path}
+   "responses" [{"status" 200 "headers" {"Content-Type" "application/json"}
+                 "examples" {"cfg" {"select" true "body" body}}}]})
+
 ;; OIDC userinfo claims (dotted templates read the found live `users` row). Access
 ;; token `sub` is the Okta user id; the profile/email scope claims mirror the row.
 (def ^:private okta-userinfo-claims
@@ -385,32 +489,42 @@
    one stateful imposter. Composed entirely from genes.
      :rate-limit {:max N :window S}  rate-limit the CRUD ops (429 + X-Rate-Limit-*)
      :token-ttl  S                   OIDC tokens expire after S seconds (virtual clock)"
-  [scenario users {:keys [rate-limit token-ttl]}]
+  [scenario users {:keys [rate-limit token-ttl issuer signing-key]}]
   (let [users  (or (seq users) okta-users)
         groups okta-groups
-        clock? (or rate-limit token-ttl)]
+        ttl    (or token-ttl 3600)
+        cfg    (jwt-config signing-key)
+        jwt    {:private-pem (:private-pem cfg) :kid (:kid cfg) :ttl ttl
+                :access-claims (okta-access-claims ttl) :id-claims (okta-id-claims ttl)}]
     (cond->
      (compose
-      {"service"  (or (first (str/split scenario #"/")) "okta")
-       "scenario" scenario
-       "origin"   "kit"
-       "summary"  "Okta (mock) — users & groups CRUD + OIDC + group membership; SCIM-ish filter, pagination, error envelope"
-       "seed"     {"users" users "groups" groups "memberships" []}}
+      (cond-> {"service"  (or (first (str/split scenario #"/")) "okta")
+               "scenario" scenario
+               "origin"   "kit"
+               "summary"  "Okta (mock) — users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + group membership"
+               ;; OIDC signs JWTs (iat/exp on the clock), so the twin always carries one
+               "state"    {"clock" {"start" 1700000000}}
+               "seed"     {"users" users "groups" groups "memberships" []}}
+        issuer (assoc "issuer" issuer))
       (crud-collection {:coll "users" :base "/api/v1/users" :seed-name "users"
                         :id-prefix "00u" :create-defaults {"status" "STAGED"} :rate-limit rate-limit})
       (crud-collection {:coll "groups" :base "/api/v1/groups" :seed-name "groups"
                         :id-prefix "00g" :create-defaults {"type" "OKTA_GROUP"} :rate-limit rate-limit})
       (membership {:coll "memberships" :users-coll "users" :groups-coll "groups"
                    :users-base "/api/v1/users" :groups-base "/api/v1/groups"})
-      ;; OIDC over the LIVE users collection: the picker, login→uid, and userinfo all
-      ;; read the same mutable collection the CRUD ops write, so SCIM-created users can
-      ;; log in. Issuance + picker gate to status==ACTIVE (Q7).
+      ;; OIDC over the LIVE users collection, minting signed RS256 JWTs. The picker,
+      ;; login→uid, and userinfo all read the same mutable collection the CRUD ops
+      ;; write, so SCIM-created users can log in. Issuance + picker gate to ACTIVE (Q7).
       (oidc-handshake {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token"
                        :userinfo "/oauth2/v1/userinfo" :token-ttl token-ttl
                        :user-source {:collection "users" :login-field "profile.login"
-                                     :active-only? true :claims okta-userinfo-claims}}))
-      ;; enabling the clock makes `mocksys clock` available and ttl/limit windows move
-      clock? (assoc-in ["state" "clock"] {"start" 1700000000}))))
+                                     :active-only? true :claims okta-userinfo-claims :jwt jwt}})
+      ;; JWKS + discovery so third-party validators can verify the twin's tokens
+      {:operations [(jwks-op (:jwk cfg))
+                    (discovery-op "openid-config" "/.well-known/openid-configuration"
+                                  (discovery-body "http://"))
+                    (discovery-op "oauth-authz-server" "/.well-known/oauth-authorization-server"
+                                  (discovery-body "http://"))]}))))
 
 ;; --- registry -------------------------------------------------------------
 
@@ -419,15 +533,17 @@
   {"oauth2" {:doc "OAuth2 provider (picker, single-use codes, userinfo)"
              :build (fn [scenario {:keys [provider users]}]
                       (oauth2 scenario (or provider "github") users))}
-   "okta"   {:doc "Okta twin: users & groups CRUD + OIDC, SCIM filter & pagination [--rate-limit N] [--token-ttl S]"
-             :build (fn [scenario {:keys [users rate-limit token-ttl]}]
-                      (okta scenario users {:rate-limit rate-limit :token-ttl token-ttl}))}})
+   "okta"   {:doc "Okta twin: users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + membership [--rate-limit N] [--token-ttl S] [--issuer URL] [--signing-key FILE.pem]"
+             :build (fn [scenario {:keys [users rate-limit token-ttl issuer signing-key]}]
+                      (okta scenario users {:rate-limit rate-limit :token-ttl token-ttl
+                                            :issuer issuer :signing-key signing-key}))}})
 
 (def genes
   "The reusable behavioral genes a kit composes — shown by `mocksys genes`."
   [{:name "crud-collection" :doc "REST resource: create/list/get/update/delete, SCIM-ish filter + cursor pagination"}
    {:name "oidc-handshake"  :doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"}
    {:name "membership"      :doc "Group membership: assign/unassign (idempotent, FK-guarded) + list either side of the relation, hydrated + paginated"}
+   {:name "jwt-signing"     :doc "RS256-signed access/id JWTs (require('crypto')), published JWKS + OIDC discovery; typed claims via the sign verb"}
    {:name "error-envelope"  :doc "Provider-shaped error bodies for misses (e.g. Okta errorCode/errorSummary)"}
    {:name "rate-limit"      :doc "Per-client request budget over a virtual-clock window → 429 + X-Rate-Limit-* headers"}
    {:name "virtual-clock"   :doc "Deterministic, advanceable time (store.ttl expiry, now bind); driven by `mocksys clock`"}])

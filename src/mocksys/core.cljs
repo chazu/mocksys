@@ -717,8 +717,13 @@
                        {:max    (js/parseInt (:rate-limit opts))
                         :window (when (string? (:rate-window opts)) (js/parseInt (:rate-window opts)))})
           token-ttl  (when (string? (:token-ttl opts)) (js/parseInt (:token-ttl opts)))
+          issuer     (when (string? (:issuer opts)) (:issuer opts))
+          signing-key (when (string? (:signing-key opts))
+                        (try (store/slurp (:signing-key opts))
+                             (catch :default _ (die (str "could not read --signing-key file: " (:signing-key opts))))))
           built    (cond-> (builder scenario {:provider provider :users users
-                                              :rate-limit rate-limit :token-ttl token-ttl})
+                                              :rate-limit rate-limit :token-ttl token-ttl
+                                              :issuer issuer :signing-key signing-key})
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))]
       (store/write-contract! scenario built)
       (compile! scenario)
