@@ -171,6 +171,39 @@
          (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",{next:_p.next});}"))
          "return collResp(" status ",_p.items,_h);}")))
 
+;; --- find: read-phase collection lookup (non-terminal) --------------------
+
+(defn- find-js
+  "One read-phase collection lookup. Binds the matched row — or a picked (dotted)
+   sub-field — into `as` and falls through to the rest of the effect; a miss
+   short-circuits with `miss`. Looks up by id (`key`, O(1)) or by a secondary
+   dotted `field` (linear scan). A `find` whose bound var is ignored IS a
+   foreign-key presence guard."
+  [f]
+  (let [coll  (js (get f "collection"))
+        as    (js (get f "as"))
+        pick  (get f "pick")
+        bindv (if pick
+                (str "V[" as "]=dget(_r," (js pick) ");")
+                (str "V[" as "]=_r;"))
+        miss  (resp-js (or (get f "miss") {"status" 404}))]
+    (if (contains? f "field")
+      (let [field (js (get f "field"))
+            eq    (str "interp(" (js (get f "eq")) ",V)")]
+        (str "{var _c=coll(state," coll "),_r,_mm=_c.m,_k;"
+             "for(_k in _mm){if(String(dget(_mm[_k]," field "))===" eq "){_r=_mm[_k];break;}}"
+             "if(_r===undefined){return " miss ";}" bindv "}"))
+      (let [key* (str "interp(" (js (get f "key")) ",V)")]
+        (str "{var _r=coll(state," coll ").get(" key* ");"
+             "if(_r===undefined){return " miss ";}" bindv "}")))))
+
+(defn- finds-of
+  "`find` is a single map or a list of maps (the FK-guard reads as one key); return
+   the ordered seq of specs."
+  [effect]
+  (when-let [f (get effect "find")]
+    (if (map? f) [f] f)))
+
 (defn- collection-terminal-js [verb effect]
   (case verb
     "create" (create-js (get effect "create"))
@@ -288,6 +321,9 @@
           [(str "{var _m=" arr ".filter(function(x){return String(x[" by "])===" eq ";})[0];"
                 "if(!_m){return " miss ";}"
                 "V[" (js (get r "as")) "]=_m;}")]))
+      ;; find: read-phase collection lookup(s) (miss -> early return). Non-terminal,
+      ;; so it precedes mint and composes before either terminal path.
+      (map find-js (finds-of effect))
       ;; mint: random hex ids (after reads, so a minted id can't be clobbered)
       (for [[n spec] (get effect "mint")]
         (str "V[" (js n) "]=rnd(" (js (or (get spec "prefix") "")) ");"))
