@@ -210,6 +210,48 @@
   (when-let [f (get effect "find")]
     (if (map? f) [f] f)))
 
+;; --- sign: read-phase RS256 JWT (typed claims) ----------------------------
+
+(defn- claim-val-js
+  "A JS expression for one typed claim value. A string → interp (dotted allowed) →
+   string; `{now …}` → number (or ISO string); `{split,on}` → array; `{baseUrl}` →
+   origin; `{var}` → the bound variable verbatim (keeps its JS type); any other
+   literal (number/bool/array/object) → itself."
+  [v]
+  (cond
+    (string? v) (str "interp(" (js v) ",V)")
+    (map? v)
+    (cond
+      (contains? v "now")     (let [n   (get v "now")
+                                    add (if (map? n) (or (get n "add") 0) 0)
+                                    t   (str "(now(state)+" add ")")]
+                                (if (and (map? n) (get n "iso"))
+                                  (str "new Date(" t "*1000).toISOString()")
+                                  t))
+      (contains? v "split")   (str "String(interp(" (js (get v "split")) ",V)).split("
+                                   (js (get v "on" " ")) ").filter(Boolean)")
+      (contains? v "baseUrl") "baseUrl()"
+      (contains? v "var")     (str "V[" (js (get v "var")) "]")
+      :else                   (js v))
+    :else (js v)))
+
+(defn- sign-js
+  "Build a compact RS256 JWT into `as`. `header` is deep-interpolated; each claim is a
+   typed directive (claim-val-js). Read-phase (after mint) so it can sign a minted id."
+  [s]
+  (let [as     (js (get s "as"))
+        header (str "deepInterp(" (js (get s "header" {})) ",V)")
+        claims (str "{" (str/join "," (for [[k v] (get s "claims")]
+                                        (str (js k) ":" (claim-val-js v)))) "}")
+        key*   (js (get s "key"))]
+    (str "V[" as "]=signJwt(" header "," claims "," key* ");")))
+
+(defn- signs-of
+  "`sign` is a single map or a list of maps (access_token + id_token); ordered seq."
+  [effect]
+  (when-let [s (get effect "sign")]
+    (if (map? s) [s] s)))
+
 ;; --- relation (membership) verbs: terminal, empty body (default 204) ---
 
 (defn- link-js
@@ -323,6 +365,9 @@
     (boolean
      (or (get-in e ["store" "ttl"])
          (get e "limit")
+         ;; a signing op almost always has iat/exp reading the clock; force it on so
+         ;; those claims aren't stamped at epoch 0 (1970) in a no-ttl build.
+         (get e "sign")
          (some (fn [[_ spec]] (and (map? spec) (contains? spec "now"))) (get e "bind"))))))
 
 (defn contract-uses-clock?
@@ -399,6 +444,8 @@
       ;; mint: random hex ids (after reads, so a minted id can't be clobbered)
       (for [[n spec] (get effect "mint")]
         (str "V[" (js n) "]=rnd(" (js (or (get spec "prefix") "")) ");"))
+      ;; sign: read-phase RS256 JWT(s) into vars, after mint (so a minted jti signs)
+      (map sign-js (signs-of effect))
       (if coll-verb
         ;; terminal collection action (CRUD/list) — forms + returns its own response
         [(collection-terminal-js coll-verb effect)]
@@ -486,7 +533,12 @@
    "return interp(wrapTpl,Object.assign({},base,{rows:out}));}"
    ;; merge any stashed rate-limit budget headers (set by a passing `limit`) into a
    ;; response, so every response — not just the 429 — advertises the remaining budget.
-   "function withRl(h){if(V&&V.__rl){for(var k in V.__rl){if(h[k]===undefined)h[k]=V.__rl[k];}}return h;}"))
+   "function withRl(h){if(V&&V.__rl){for(var k in V.__rl){if(h[k]===undefined)h[k]=V.__rl[k];}}return h;}"
+   ;; --- JWT signing (the one place an injection uses a Node built-in: crypto) ---
+   "function b64url(x){var b=(typeof Buffer!=='undefined'&&Buffer.isBuffer(x))?x:Buffer.from(String(x));"
+   "return b.toString('base64').replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}"
+   "function signJwt(header,claims,pem){var enc=b64url(JSON.stringify(header))+'.'+b64url(JSON.stringify(claims));"
+   "var sig=require('crypto').createSign('RSA-SHA256').update(enc).sign(pem);return enc+'.'+b64url(sig);}"))
 
 (defn gen
   "The Mountebank inject function (as a JS source string) for one stateful op.
