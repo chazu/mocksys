@@ -18,8 +18,8 @@
 (def ^:private live-gene
   (kits/oidc-handshake
    {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token" :userinfo "/oauth2/v1/userinfo"
-    :user-source {:collection "users" :login-field "profile.login" :active-only? true
-                  :claims {"sub" "{user.id}"
+    :user-source {"collection" "users" "login-field" "profile.login" "active-only" true
+                  "claims" {"sub" "{user.id}"
                            "email" "{user.profile.email}"
                            "preferred_username" "{user.profile.login}"
                            "name" "{user.profile.firstName} {user.profile.lastName}"
