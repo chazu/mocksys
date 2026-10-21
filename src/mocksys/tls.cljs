@@ -227,30 +227,40 @@
 
 ;; --- the CLI's own calls to a mock -------------------------------------------------
 
+(def ^:private loopback #{"localhost" "127.0.0.1" "[::1]"})
+
 (defn fetch-own
-  "`fetch` for a mock the CLI found through its own daemon. Over https it skips the
-   certificate check, since a contract's own certificate may come from a CA mocksys
-   does not know. Node's fetch cannot skip it, so that request goes through
-   node:https and resolves a Response built from the reply. Never follows a
-   redirect, as `fetch` with redirect: manual."
+  "`fetch` for a mock the CLI found through its own daemon, so only on this
+   machine: a corpus path such as `@host/x` would otherwise name another host. Over
+   https it skips the certificate check, since a contract's own certificate may come
+   from a CA mocksys does not know. Node's fetch cannot skip it, so that request
+   goes through node:https and resolves a Response built from the reply. Never
+   follows a redirect, as `fetch` with redirect: manual."
   [url ^js init]
-  (if-not (str/starts-with? url "https:")
-    (js/fetch url (js/Object.assign #js {} init #js {:redirect "manual"}))
-    (js/Promise.
-     (fn [resolve reject]
-       (let [^js rq (https/request url #js {:method             (or (.-method init) "GET")
-                                            :headers            (or (.-headers init) #js {})
-                                            :rejectUnauthorized false}
-                                   (fn [^js res]
-                                     (let [chunks #js []]
-                                       (.on res "data" #(.push chunks %))
-                                       (.on res "end"
-                                            (fn []
-                                              (let [buf (js/Buffer.concat chunks)]
-                                                (resolve (js/Response.
-                                                          (when (pos? (.-length buf)) buf)
-                                                          #js {:status  (.-statusCode res)
-                                                               :headers (clj->js (partition 2 (array-seq (.-rawHeaders res))))}))))))))]
-         (.on rq "error" reject)
-         (when (some? (.-body init)) (.write rq (.-body init)))
-         (.end rq))))))
+  (let [host (.-hostname (js/URL. url))]
+    (cond
+      (not (loopback host))
+      (js/Promise.reject (js/Error. (str "refusing to call " url ": " host " is not this machine")))
+
+      (not (str/starts-with? url "https:"))
+      (js/fetch url (js/Object.assign #js {} init #js {:redirect "manual"}))
+
+      :else
+      (js/Promise.
+       (fn [resolve reject]
+         (let [^js rq (https/request url #js {:method             (or (.-method init) "GET")
+                                              :headers            (or (.-headers init) #js {})
+                                              :rejectUnauthorized false}
+                                     (fn [^js res]
+                                       (let [chunks #js []]
+                                         (.on res "data" #(.push chunks %))
+                                         (.on res "end"
+                                              (fn []
+                                                (let [buf (js/Buffer.concat chunks)]
+                                                  (resolve (js/Response.
+                                                            (when (pos? (.-length buf)) buf)
+                                                            #js {:status  (.-statusCode res)
+                                                                 :headers (clj->js (partition 2 (array-seq (.-rawHeaders res))))}))))))))]
+           (.on rq "error" reject)
+           (when (some? (.-body init)) (.write rq (.-body init)))
+           (.end rq)))))))

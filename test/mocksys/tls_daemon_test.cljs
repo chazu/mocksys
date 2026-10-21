@@ -99,14 +99,22 @@
                                                 "responses" [{"is" {"statusCode" 302 "headers" {"Location" "/elsewhere"}}}]}]})
                 base  (str "https://localhost:" port)
                 echo  (conform/fire base {"method" "POST" "path" "/echo" "body" "ping"} tls/fetch-own)
-                away  (conform/fire base {"path" "/away"} tls/fetch-own)]
+                away  (conform/fire base {"path" "/away"} tls/fetch-own)
+                escape (p/catch (conform/fire base {"path" "@evil.invalid/x"} tls/fetch-own) ex-message)
+                plain  (p/catch (conform/fire (str "http://localhost:" port) {"path" "@evil.invalid/x"} tls/fetch-own)
+                                ex-message)]
           (testing "conform's twin requests go over https"
             (is (= 201 (:status echo)))
             (is (= "got ping" (:body echo)))
             (is (= "ping" (get-in echo [:headers "x-seen"]))))
           (testing "without following a redirect"
             (is (= 302 (:status away)))
-            (is (= "/elsewhere" (get-in away [:headers "location"])))))))))
+            (is (= "/elsewhere" (get-in away [:headers "location"]))))
+          (testing "and only to this machine, so a corpus path cannot send it elsewhere unverified"
+            (is (= (str "refusing to call https://localhost:" port "@evil.invalid/x: evil.invalid is not this machine")
+                   escape))
+            (is (= (str "refusing to call http://localhost:" port "@evil.invalid/x: evil.invalid is not this machine")
+                   plain))))))))
 
 (deftest a-bad-tls-field-is-refused
   (async done
