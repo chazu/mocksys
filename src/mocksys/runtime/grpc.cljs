@@ -213,12 +213,19 @@
      (.bindAsync server addr (.createInsecure grpc/ServerCredentials)
                  (fn [err port] (if err (reject err) (resolve port)))))))
 
+(defn- no-ipv6?
+  "Whether a bind failed because the host has no ::1, which is the one failure the
+   ::1 bind may have. grpc-js puts the cause in the message, not in a code."
+  [e]
+  (boolean (re-find #"EADDRNOTAVAIL|EAFNOSUPPORT" (str (ex-message e)))))
+
 (defn- check-stubs! [imp]
   (doseq [s (:stubs @imp), r (get-in s [:spec "responses"]) :when (contains? r "proxy")]
     (bad (str "stubs[" (:id s) "]: proxy responses are not supported for protocol grpc"))))
 
 (defn start!
-  "Serve `imp` over gRPC on 127.0.0.1 and, where the host has IPv6, ::1. Resolves
+  "Serve `imp` over gRPC on 127.0.0.1 and, where the host has IPv6, ::1, as the HTTP
+   imposters do: a port taken on either address fails the start. Resolves
    [{:stop f}], where `f` closes the server and resolves when it has."
   [imp]
   (check-stubs! imp)
@@ -230,7 +237,8 @@
       (.addService server svc (clj->js impl)))
     (.register server clock-path (clock-handler imp) text-out text-in "unary")
     (-> (p/let [_ (bind! server (str "127.0.0.1:" port))
-                _ (p/catch (bind! server (str "[::1]:" port)) (fn [_] nil))]
+                _ (p/catch (bind! server (str "[::1]:" port))
+                           (fn [e] (when-not (no-ipv6? e) (throw e))))]
           [{:stop stop}])
         (p/catch (fn [e]
                    (.forceShutdown server)
