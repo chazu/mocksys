@@ -408,3 +408,16 @@
                 (is (not (fs/existsSync (path/join dir "ran"))) "the module's top level did not run")
                 (is (not (fs/existsSync (path/join dir "imposter.json"))) "nothing was compiled"))))
           (p/finally (fn [] (js-delete env "MOCKSYS_NO_INJECTION") (done)))))))
+
+(deftest a-replayable-imposter-reposts-with-its-modules
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (let [dir (scenario-dir! {"verbs.js" upper-module})]
+          (p/let [port   (free-port)
+                  _      (post! admin (contract/lower (shout-contract ["./verbs.js"]) nil dir) port)
+                  got    (call (str admin "/imposters/" port "?replayable=true"))
+                  _      (post! admin (:json got) port)
+                  served (call (str "http://127.0.0.1:" port "/shout?w=hey"))]
+            (is (= [(path/join dir "verbs.js")] (get-in got [:json "modules"])))
+            (is (= {"loud" "HEY!"} (:json served)) "the reposted imposter still reaches its verbs")))))))
