@@ -9,7 +9,8 @@
             [mocksys.store :as store]
             [mocksys.service :as service]
             [mocksys.contract :as contract]
-            [mocksys.inject :as inject]))
+            [mocksys.inject :as inject]
+            [mocksys.modules :as modules]))
 
 (defn compile!
   "Lower a scenario's contract to imposter.json and refresh mock.yaml. Returns the
@@ -82,7 +83,8 @@
                        pinned   pinned
                        :else    (mb/free-port))]
       (mb/delete-imposter! port)
-      (let [imp (assoc imposter "port" port "name" scenario "recordRequests" true)]
+      (let [imp (cond-> (assoc imposter "port" port "name" scenario "recordRequests" true)
+                  (get imposter "modules") (update "modules" #(modules/absolute (store/scenario-dir scenario) %)))]
         (p/let [_ (mb/post-imposter! imp)]
           (when (and port-opt contract (not= port pinned))
             (store/write-contract! scenario (assoc contract "port" port)))

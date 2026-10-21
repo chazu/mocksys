@@ -321,13 +321,13 @@
   "Compile a contract into an imposter for the mocksys daemon. `port` is carried through if a
    prior artifact had one (ensure-running! reassigns at run time regardless). `dir` is the
    scenario directory that `modules` paths resolve against; the imposter records them
-   absolute, with `calls`, the verbs its operations name. Lowering never runs a
+   relative to it, with `calls`, the verbs its operations name. Lowering never runs a
    module: the daemon loads them and checks `calls` when the imposter is posted."
   ([contract] (lower contract nil nil))
   ([contract port] (lower contract port nil))
   ([contract port dir]
    (let [contract (expand contract)
-         mods     (modules/resolve-paths dir (get contract "modules"))
+         mods     (modules/scenario-paths dir (get contract "modules"))
          calls    (into [] (comp (mapcat #(inject/calls-of (get % "effect"))) (keep #(get % "verb")) (distinct))
                         (get contract "operations"))
          fault (get contract "fault")

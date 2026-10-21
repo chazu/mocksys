@@ -14,11 +14,11 @@
 
 (defn- inside? [dir file] (str/starts-with? file (str dir path/sep)))
 
-(defn resolve-paths
-  "The absolute path of each entry of `modules`, resolved against the scenario
-   directory `dir`. A module must be a file inside `dir`, symlinks followed: the
-   scenario directory is what pack, publish and push carry, so a module outside it
-   would not travel with the scenario."
+(defn scenario-paths
+  "Each entry of `modules` as a normalized path relative to the scenario directory
+   `dir`, which is how imposter.json records them. A module must be a file inside
+   `dir`, symlinks followed: the scenario directory is what pack, publish and push
+   carry, so a module outside it would not travel with the scenario."
   [dir modules]
   (when-not (or (nil? modules) (and (sequential? modules) (every? string? modules)))
     (fail "expected a list of file paths, relative to the scenario directory"))
@@ -33,8 +33,14 @@
             (let [real (fs/realpathSync file)]
               (when-not (inside? (fs/realpathSync dir) real)
                 (fail (str m " is outside the scenario directory " dir " (it links to " real ")"))))
-            file))
+            (path/relative (path/resolve dir) file)))
         modules))
+
+(defn absolute
+  "`paths` from scenario-paths, resolved against the scenario directory `dir`: the
+   form the daemon accepts."
+  [dir paths]
+  (mapv #(path/resolve dir %) paths))
 
 (defn- exports-of
   "Run one module afresh (never from the require cache) and return its exports.
