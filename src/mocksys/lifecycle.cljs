@@ -36,12 +36,19 @@
 
 (defn ensure-contract!
   "The scenario's contract, lifting one from a recorded/legacy imposter if none
-   exists yet. nil when there's nothing to work from."
+   exists yet. nil when there's nothing to work from. A grpc imposter is refused:
+   its contract names the proto, which the imposter does not."
   [scenario]
   (or (store/read-contract scenario)
       (when (store/exists? scenario)
         (let [prof (service/effective scenario)
-              c    (contract/lift (store/read-imposter scenario) scenario (:service prof))]
+              imp  (store/read-imposter scenario)
+              _    (when (= "grpc" (get imp "protocol"))
+                     (throw (js/Error. (str "'" scenario "' has a grpc imposter.json but no contract.yaml, and a grpc "
+                                            "contract names its proto file (proto: ./x.proto), which the imposter "
+                                            "does not. Write contract.yaml with protocol: grpc and proto:, or record "
+                                            "the scenario again with record --proto."))))
+              c    (contract/lift imp scenario (:service prof))]
           (store/write-contract! scenario c)
           c))))
 
@@ -53,8 +60,9 @@
     (let [result (contract/validate c (store/scenario-dir scenario))]
       (if (seq (contract/gene-errors c))
         result
-        (update result :errors into
-                (proto/contract-errors c (get (contract/expand c) "operations") (store/scenario-dir scenario)))))))
+        (let [{:keys [errors warnings]} (proto/contract-problems c (get (contract/expand c) "operations")
+                                                                 (store/scenario-dir scenario))]
+          (-> result (update :errors into errors) (update :warnings into warnings)))))))
 
 (defn address
   "Where a consumer reaches `scenario` on `port`: a URL for HTTP(S), and host:port

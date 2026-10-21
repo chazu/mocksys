@@ -292,13 +292,16 @@
 (defn proxy-imposter
   "An imposter that records everything it proxies to `target`, generating
   replay stubs keyed on method+path (deliberately loose to avoid overfitting).
-  Tagged with the scenario `name` so the catalog can track it."
-  [port target name]
-  {:port     port
-   :name     name
-   :protocol "http"
-   :stubs    [{:responses
-               [{:proxy {:to                  target
-                         :mode                "proxyOnce"
-                         :predicateGenerators [{:matches {:method true
-                                                          :path   true}}]}}]}]})
+  Tagged with the scenario `name` so the catalog can track it. Given a proto's
+  `descriptor`, it is a grpc imposter, which keys on the rpc."
+  ([port target name] (proxy-imposter port target name nil))
+  ([port target name descriptor]
+   (cond-> {:port     port
+            :name     name
+            :protocol (if descriptor "grpc" "http")
+            :stubs    [{:responses
+                        [{:proxy {:to                  target
+                                  :mode                "proxyOnce"
+                                  :predicateGenerators [{:matches {:method true
+                                                                   :path   true}}]}}]}]}
+     descriptor (assoc :descriptor descriptor))))

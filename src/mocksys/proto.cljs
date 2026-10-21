@@ -28,9 +28,8 @@
 
 (defn- rpcs [^js root]
   (into {} (for [^js svc (services root)
-                 ^js m   (.-methodsArray svc)
-                 :let [k (kind m)]]
-             [(str (subs (.-fullName svc) 1) "/" (.-name m)) {:unary? (= "unary" k) :kind k}])))
+                 ^js m   (.-methodsArray svc)]
+             [(str (subs (.-fullName svc) 1) "/" (.-name m)) {:kind (kind m)}])))
 
 (defn- read-error [^js e]
   (if (= "ENOENT" (.-code e))
@@ -40,7 +39,8 @@
 (defn read-proto
   "Load the proto at `file` and the files it imports. Returns {:descriptor (the
    protobufjs JSON form) :files (the local files read, absolute) :methods
-   {\"pkg.Service/Method\" {:unary? :kind}}}. Throws naming the file on a missing
+   {\"pkg.Service/Method\" {:kind}}}, the kind being unary, server-streaming,
+   client-streaming or bidi-streaming. Throws naming the file on a missing
    file or import, or a syntax error (with its line)."
   [file]
   (let [file    (path/resolve file)
@@ -72,26 +72,39 @@
             in-svc  (sort (for [k (keys methods) :when (str/starts-with? k (str svc "/"))]
                             (second (str/split k #"/" 2))))]
         (cond
-          (and m (:unary? m)) nil
-          m (str id ": rpc " rpc " is " (:kind m) "; only unary rpcs are served")
+          m nil
           (seq in-svc) (str id ": rpc " rpc " is not in " proto-name " (" svc " has " (str/join ", " in-svc) ")")
           :else (str id ": rpc " rpc " is not in " proto-name " (services: "
                      (str/join ", " (sort (distinct (map #(first (str/split % #"/" 2)) (keys methods))))) ")"))))))
 
-(defn contract-errors
-  "What `validate` finds wrong with a grpc contract's proto, as messages: the proto
-   does not load, or an operation's rpc is not in it or is not unary. `operations`
+(defn- batch-merge-warnings
+  "A client stream's body is the array of its messages, so a collection verb that
+   merges it as a record stores the array: a warning for each such merge."
+  [methods {:strs [id request effect]}]
+  (when (= "client-streaming" (:kind (get methods (get request "rpc"))))
+    (let [batch (set (for [[v spec] (get effect "bind") :when (get spec "bodyJson")] v))]
+      (for [[verb v] (concat (map #(vector "create" %) (get-in effect ["create" "merge"]))
+                             [["update" (get-in effect ["update" "mergeVar"])]])
+            :when (batch v)]
+        (str id ": " verb " merges " v ", the client stream's body, which is the array of its messages, "
+             "not one message; the record would hold the array")))))
+
+(defn contract-problems
+  "What `validate` finds wrong with a grpc contract's proto, as {:errors :warnings}:
+   errors when the proto does not load or an operation's rpc is not in it, warnings
+   when an operation merges a client stream's batch into a record. `operations`
    should be the expanded ones. Empty for an http contract, or a grpc one with no
    proto named (contract/validate reports that)."
-  ([contract dir] (contract-errors contract (get contract "operations") dir))
+  ([contract dir] (contract-problems contract (get contract "operations") dir))
   ([contract operations dir]
    (if-not (and (grpc? contract) (string? (get contract "proto")))
-     []
+     {:errors [] :warnings []}
      (let [loaded (try (read-proto (contract-file contract dir))
                        (catch :default e {:error (ex-message e)}))]
        (if-let [e (:error loaded)]
-         [(str "proto: " e)]
-         (vec (keep #(rpc-errors (get contract "proto") (:methods loaded) %) operations)))))))
+         {:errors [(str "proto: " e)] :warnings []}
+         {:errors   (vec (keep #(rpc-errors (get contract "proto") (:methods loaded) %) operations))
+          :warnings (vec (mapcat #(batch-merge-warnings (:methods loaded) %) operations))})))))
 
 (defn with-descriptor
   "`imposter` lowered from `contract`, with the descriptor of its proto when the

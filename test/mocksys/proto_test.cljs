@@ -13,11 +13,13 @@
 (deftest loads-a-proto-with-its-imports
   (let [dir (fx/kv-dir)
         {:keys [descriptor files methods]} (proto/read-proto (path/join dir "kv.proto"))]
-    (testing "every rpc, with whether it is unary"
-      (is (= {"kv.Store/Put"   {:unary? true  :kind "unary"}
-              "kv.Store/Get"   {:unary? true  :kind "unary"}
-              "kv.Store/List"  {:unary? true  :kind "unary"}
-              "kv.Store/Watch" {:unary? false :kind "server-streaming"}}
+    (testing "every rpc, with its kind"
+      (is (= {"kv.Store/Put"     {:kind "unary"}
+              "kv.Store/Get"     {:kind "unary"}
+              "kv.Store/List"    {:kind "unary"}
+              "kv.Store/Watch"   {:kind "server-streaming"}
+              "kv.Store/PutMany" {:kind "client-streaming"}
+              "kv.Store/Sync"    {:kind "bidi-streaming"}}
              methods)))
     (testing "the local files it read, absolute; well-known google types are built in"
       (is (= #{(path/join dir "kv.proto") (path/join dir "types.proto")} (set files))))
@@ -54,21 +56,36 @@
 (defn- op [id rpc] {"id" id "request" {"rpc" rpc}
                     "responses" [{"status" 200 "examples" {"ok" {"select" true "body" {}}}}]})
 
-(deftest contract-errors-check-rpcs-against-the-proto
+(defn- errors-of [c dir] (:errors (proto/contract-problems c dir)))
+
+(deftest contract-problems-check-rpcs-against-the-proto
   (let [dir (fx/kv-dir)]
-    (testing "a contract whose rpcs are unary methods of the proto has none"
-      (is (= [] (proto/contract-errors (grpc-contract [(op "get" "kv.Store/Get")]) dir))))
+    (testing "a contract whose rpcs are methods of the proto, of any kind, has none"
+      (is (= [] (errors-of (grpc-contract [(op "get" "kv.Store/Get") (op "watch" "kv.Store/Watch")
+                                                       (op "put-many" "kv.Store/PutMany") (op "sync" "kv.Store/Sync")])
+                                       dir))))
     (testing "an rpc the proto does not declare"
-      (is (= ["nope: rpc kv.Store/Nope is not in ./kv.proto (kv.Store has Get, List, Put, Watch)"]
-             (proto/contract-errors (grpc-contract [(op "nope" "kv.Store/Nope")]) dir))))
+      (is (= ["nope: rpc kv.Store/Nope is not in ./kv.proto (kv.Store has Get, List, Put, PutMany, Sync, Watch)"]
+             (errors-of (grpc-contract [(op "nope" "kv.Store/Nope")]) dir))))
     (testing "a service the proto does not declare"
       (is (= ["x: rpc kv.Other/Get is not in ./kv.proto (services: kv.Store)"]
-             (proto/contract-errors (grpc-contract [(op "x" "kv.Other/Get")]) dir))))
-    (testing "a streaming rpc"
-      (is (= ["watch: rpc kv.Store/Watch is server-streaming; only unary rpcs are served"]
-             (proto/contract-errors (grpc-contract [(op "watch" "kv.Store/Watch")]) dir))))
+             (errors-of (grpc-contract [(op "x" "kv.Other/Get")]) dir))))
     (testing "a proto that does not load"
       (is (= [(str "proto: cannot read proto " (path/join dir "gone.proto"))]
-             (proto/contract-errors (assoc (grpc-contract []) "proto" "gone.proto") dir))))
+             (errors-of (assoc (grpc-contract []) "proto" "gone.proto") dir))))
     (testing "an http contract has none to report"
-      (is (= [] (proto/contract-errors {"operations" []} dir))))))
+      (is (= [] (errors-of {"operations" []} dir))))))
+
+(deftest merging-a-client-streams-body-into-a-record-warns
+  (let [dir    (fx/kv-dir)
+        stored (fn [id rpc effect] (assoc (op id rpc) "effect" (merge {"bind" {"incoming" {"bodyJson" true}}} effect)))
+        warn   (fn [ops] (proto/contract-problems (grpc-contract ops) dir))]
+    (is (= {:errors [] :warnings [(str "put-many: create merges incoming, the client stream's body, which is the array "
+                                       "of its messages, not one message; the record would hold the array")]}
+           (warn [(stored "put-many" "kv.Store/PutMany" {"create" {"collection" "items" "merge" ["incoming"]}})])))
+    (is (= 1 (count (:warnings (warn [(stored "up" "kv.Store/PutMany" {"update" {"collection" "items" "key" "a" "mergeVar" "incoming"}})]))))
+        "and so does update's mergeVar")
+    (is (= {:errors [] :warnings []}
+           (warn [(stored "put" "kv.Store/Put" {"create" {"collection" "items" "merge" ["incoming"]}})
+                  (stored "count" "kv.Store/PutMany" {"respond" {"json" {"n" "{incoming.length}"}}})]))
+        "a unary body is one message, and reading the batch is fine")))

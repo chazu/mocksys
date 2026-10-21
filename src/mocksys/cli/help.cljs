@@ -42,7 +42,7 @@
      "  mocksys use stripe/createcharge --op createcharge --example card_declined --only"
      "  mocksys validate stripe/createcharge          # schema/structure check"
      ""
-     "## gRPC (unary): the same contract, with a proto next to it"
+     "## gRPC: the same contract, with a proto next to it"
      "  protocol: grpc"
      "  proto: ./todo.proto                           # relative to the scenario directory"
      "  operations: [{id: get, request: {rpc: todo.v1.Todos/GetTodo}, effect: {...}}]"
@@ -50,6 +50,9 @@
      "holding only the fields the caller set)."
      "A 2xx JSON body is the reply; a 404 is NOT_FOUND; {grpcCode, message} picks a code."
      "A reply is checked against its type: a wrong type is INTERNAL naming the field."
+     "Streams: a server stream sends a 2xx JSON array as its messages; a client stream's"
+     "body is the array it sent; each bidirectional message is a request of its own."
+     "Server reflection is on: grpcurl -plaintext localhost:PORT list."
      "run/env print localhost:PORT; assert --saw 'POST /todo.v1.Todos/GetTodo'."
      ""
      "## Run it & wire a test/app to the mock"
@@ -150,7 +153,7 @@
   (println)
   (println "  SEED FROM LIVE TRAFFIC (optional — needs real access)")
   (println "  mocksys init <service>                          github | gitlab | aws-s3 | stripe | generic-http")
-  (println "  mocksys record <service/name> [--target URL] [--port N]")
+  (println "  mocksys record <service/name> [--target URL] [--port N] [--proto FILE]   --proto: a gRPC upstream")
   (println "  mocksys freeze <name> [--draft]                 --draft: land for review, then `promote`")
   (println "  mocksys promote <name>                          make a reviewed draft canonical")
   (println)

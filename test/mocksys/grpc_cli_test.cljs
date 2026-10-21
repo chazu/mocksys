@@ -11,6 +11,9 @@
             [mocksys.store :as store]
             [mocksys.lifecycle :as lifecycle]
             [mocksys.bundle :as bundle]
+            [mocksys.cli.record :as record]
+            [mocksys.cli.util :as util]
+            [mocksys.mb :as mb]
             [mocksys.grpc-fixture :as fx]))
 
 (def ^:private contract-yaml "
@@ -64,11 +67,48 @@ operations:
                (thrown #(lifecycle/compile! "t/kv"))))))))
 
 (deftest validate-checks-rpcs-against-the-proto
+  (let [home (home-with (update kv-files "t/kv/contract.yaml" str/replace "kv.Store/Get" "kv.Store/Gone"))]
+    (in-store home
+      (fn []
+        (is (= ["get: rpc kv.Store/Gone is not in ./kv.proto (kv.Store has Get, List, Put, PutMany, Sync, Watch)"]
+               (:errors (lifecycle/validate "t/kv")))))))
   (let [home (home-with (update kv-files "t/kv/contract.yaml" str/replace "kv.Store/Get" "kv.Store/Watch"))]
     (in-store home
       (fn []
-        (is (= ["get: rpc kv.Store/Watch is server-streaming; only unary rpcs are served"]
-               (:errors (lifecycle/validate "t/kv"))))))))
+        (is (= [] (:errors (lifecycle/validate "t/kv"))) "a streaming rpc is served")))))
+
+(deftest a-grpc-imposter-without-a-contract-is-refused-by-name
+  (let [home (home-with {"t/kv/imposter.json" (js/JSON.stringify (clj->js {"protocol" "grpc" "descriptor" {} "stubs" []}))})]
+    (in-store home
+      (fn []
+        (let [m (thrown #(lifecycle/ensure-contract! "t/kv"))]
+          (is (str/includes? (str m) "t/kv") m)
+          (is (str/includes? (str m) "proto:") m))
+        (is (not (fs/existsSync (path/join home "t/kv/contract.yaml"))) "and no contract is written")))))
+
+(defn- record-refusal
+  "What `record` dies with for `opts`, in a fresh store, before it reaches the daemon:
+   [message files-in-the-scenario-dir]."
+  [opts]
+  (let [home (home-with {})]
+    (in-store home
+      (fn []
+        (with-redefs [util/die     (fn [msg] (throw (ex-info msg {:die true})))
+                      mb/ensure-up! #(throw (js/Error. "record reached the daemon"))]
+          [(thrown #(record/cmd-record {:pos ["t/rec"] :opts opts}))
+           (when (fs/existsSync (path/join home "t/rec")) (vec (fs/readdirSync (path/join home "t/rec"))))])))))
+
+(deftest record-refuses-a-tls-target
+  (let [[m files] (record-refusal {:proto (path/join (fx/kv-dir) "kv.proto") :target "https://localhost:8443"})]
+    (is (str/includes? (str m) "--target must be host:port, without TLS") m)
+    (is (empty? files) "and copies nothing")))
+
+(deftest record-refuses-a-proto-that-imports-from-outside-its-directory
+  (let [dir       (fx/write-tree! {"protos/kv.proto" (str/replace fx/kv-proto "\"types.proto\"" "\"../types.proto\"")
+                                   "types.proto"     fx/types-proto})
+        [m files] (record-refusal {:proto (path/join dir "protos/kv.proto") :target "localhost:50051"})]
+    (is (str/includes? (str m) (str "imports " (path/join dir "types.proto") ", outside its directory")) m)
+    (is (empty? files) "and copies nothing")))
 
 (deftest a-bundle-carries-the-proto
   (let [home (home-with kv-files)

@@ -278,6 +278,7 @@ check "the example validates against its proto" 0 "$code"
 out="$("$MS" run demo/todos --port $GP)"
 check "run names a host:port target" 1 "$(echo "$out" | grep -c "running 'demo/todos' at localhost:$GP (gRPC)")"
 rpc() { node "$G/client.js" "localhost:$GP" "$@" || true; }
+each_field() { while read -r line; do echo "$line" | json_field "$1"; done | paste -sd, -; }
 check "GetTodo reads a seeded todo" "Write the proto" "$(rpc GetTodo '{"id":"t1"}' | json_field '.title')"
 tid="$(rpc CreateTodo '{"title":"ship grpc"}' | json_field '.id')"
 check "GetTodo reads what CreateTodo stored" "ship grpc" "$(rpc GetTodo "{\"id\":\"$tid\"}" | json_field '.title')"
@@ -287,15 +288,35 @@ check "a miss is NOT_FOUND" '{"code":"NOT_FOUND","details":"no todo nope"}' "$(r
 check "ListTodos fills the repeated field" 2 "$(rpc ListTodos '{}' | json_field '.todos.length')"
 check "ListTodos filters" "$tid" "$(rpc ListTodos '{"filter":"done eq false"}' | json_field '.todos[0].id')"
 check "a {grpcCode, message} body picks the code" PERMISSION_DENIED "$(rpc DeleteTodo '{"id":"t1"}' | json_field '.code')"
+check "a server stream sends one message per todo" "t1,$tid" "$(rpc WatchTodos '{}' | each_field '.id')"
+check "and the filter narrows it" "$tid" "$(rpc WatchTodos '{"filter":"done eq false"}' | each_field '.id')"
+check "a client stream's messages arrive as one array" '{"count":2,"first_title":"a"}' \
+  "$(rpc PreviewImport '[{"title":"a"},{"title":"b"}]')"
+check "a bidi stream answers each message" "x,y" "$(rpc CreateTodos '[{"title":"x"},{"title":"y"}]' | each_field '.title')"
+check "and each one created a todo" 4 "$(rpc ListTodos '{}' | json_field '.todos.length')"
+check "reflection lists the service without the proto" todo.v1.Todos "$(node "$G/reflect.js" "localhost:$GP")"
+check "and describes its streams" 1 "$(node "$G/reflect.js" "localhost:$GP" todo.v1.Todos | grep -c '^rpc CreateTodos (stream todo.v1.CreateTodoRequest) returns (stream todo.v1.Todo)$')"
 "$MS" assert demo/todos --saw 'POST /todo.v1.Todos/CreateTodo' >/dev/null && code=0 || code=$?
 check "assert sees an rpc as its POST path" 0 "$code"
 check "env exports the target without a scheme" "export TODOS=localhost:$GP" "$("$MS" env demo/todos --env TODOS | head -1)"
-sed 's#todo.v1.Todos/GetTodo#todo.v1.Todos/WatchTodos#' "$G/contract.yaml" > "$MOCKSYS_HOME/demo/todos/contract.yaml"
-out="$("$MS" validate demo/todos 2>&1)" && code=0 || code=$?
-check "validate refuses a streaming rpc" 1 "$code"
-check "and says why" 1 "$(echo "$out" | grep -c 'get: rpc todo.v1.Todos/WatchTodos is server-streaming; only unary rpcs are served')"
-cp "$G/contract.yaml" "$MOCKSYS_HOME/demo/todos/contract.yaml"
+RP=$((PORT + 3))
+out="$("$MS" record demo/rec-todos --target "localhost:$GP" --proto "$G/todo.proto" --port $RP)"
+check "record proxies a gRPC upstream" 1 "$(echo "$out" | grep -c "proxy:  localhost:$RP (gRPC)  ->  localhost:$GP")"
+rec() { node "$G/client.js" "localhost:$RP" "$@" || true; }
+check "a call through the proxy is answered upstream" "Write the proto" "$(rec GetTodo '{"id":"t1"}' | json_field '.title')"
+check "and a server stream" "t1" "$(rec WatchTodos '{}' | each_field '.id')"
+check "and an error, with its code" PERMISSION_DENIED "$(rec DeleteTodo '{"id":"t1"}' | json_field '.code')"
+"$MS" freeze demo/rec-todos >/dev/null
+"$MS" validate demo/rec-todos >/dev/null && code=0 || code=$?
+check "the frozen contract validates against the copied proto" 0 "$code"
 "$MS" stop demo/todos >/dev/null
+"$MS" run demo/rec-todos --port $RP >/dev/null
+check "the frozen mock replays a reply" "Write the proto" "$(rec GetTodo '{"id":"t1"}' | json_field '.title')"
+check "a stream" "t1" "$(rec WatchTodos '{}' | each_field '.id')"
+check "and a code" PERMISSION_DENIED "$(rec DeleteTodo '{"id":"t1"}' | json_field '.code')"
+"$MS" stop demo/rec-todos >/dev/null
+out="$("$MS" record demo/tls --target https://localhost:$GP --proto "$G/todo.proto" 2>&1)" && code=0 || code=$?
+check "record refuses a TLS gRPC upstream" 1 "$code"
 
 echo "# recorded-request cap"
 "$MS" daemon stop >/dev/null

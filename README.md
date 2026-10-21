@@ -38,7 +38,8 @@ share — not a one-off blob:
   query/header/body, so picker-vs-redirect, authed-vs-anonymous, and error paths are
   all expressible — not just method+path lookups.
 - **gRPC as well as HTTP.** A contract with `protocol: grpc` and a `.proto` serves its
-  unary RPCs, statefully, through the same effects, matching and `assert`.
+  RPCs, unary and streaming, statefully, through the same effects, matching and `assert`,
+  and serves reflection so `grpcurl` needs no proto.
 - **HTTPS and gRPC over TLS.** `tls: true` serves a mock with a certificate for
   localhost from a local CA, so a client that insists on TLS keeps verifying:
   `export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"`.

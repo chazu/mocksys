@@ -91,13 +91,22 @@ already match on.
 - `validate` knows each method's kind from the proto.
 
 **Reflection.** Every gRPC mock serves server reflection (v1 and v1alpha), so `grpcurl`
-and Postman can list and call it without the proto.
+and Postman can list and call it without the proto. `@grpc/reflection` answers the
+requests, but its `addToServer` loads `reflection.proto` from a path that bun bakes into
+the binary from the build machine, so the daemon registers the service from proto text
+it carries. `list` names the proto's services, not the reflection service itself.
 
-**Recording.** `mocksys record` works against a gRPC upstream for unary and server
-streaming calls. The daemon forwards each call with a grpc-js client built from the
-descriptor and records it as a stub. The status becomes the HTTP status and a
-`grpcCode` body, so the recorded stub replays through the existing mapping. `freeze`
-then works unchanged.
+**Recording.** `mocksys record --proto FILE --target host:port` works against a gRPC
+upstream, without TLS, for unary, server streaming and client streaming calls. A client
+stream's request body is already the array of its messages, so it forwards as one call.
+A bidirectional call is refused with `UNIMPLEMENTED`, since its turns are separate
+requests and would not replay as one stream. `record` copies the proto and its imports
+into the scenario directory. The daemon forwards each call with a grpc-js client built
+from the descriptor and records it as a stub. The status becomes the HTTP status that
+`google.rpc.Code` gives it and a `grpcCode` body, so the recorded stub replays through
+the existing mapping. An upstream that does not connect fails the call at once and is
+not recorded. `freeze` lifts a grpc imposter to a grpc contract (`protocol`, `proto`,
+`rpc` operations).
 
 ## D. TLS
 

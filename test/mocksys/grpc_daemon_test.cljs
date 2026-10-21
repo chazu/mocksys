@@ -1,8 +1,8 @@
 (ns mocksys.grpc-daemon-test
   "gRPC imposters on the real daemon, called with a real grpc-js client: a call is
    matched as POST /pkg.Service/Method with metadata as headers and the message as
-   a JSON body; replies, status codes, response metadata, UNIMPLEMENTED for what
-   is not served, and a stateful contract over a collection."
+   a JSON body; replies, status codes, response metadata, UNIMPLEMENTED for a
+   method the proto does not declare, and a stateful contract over a collection."
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
@@ -169,12 +169,8 @@
         (p/let [dir    (fx/kv-dir)
                 port   (free-port)
                 _      (admin-call (str admin "/imposters") "POST" (kv-imposter dir port []))
-                c      (fx/connect (path/join dir "kv.proto") "kv.Store" port)
-                nope   (fx/raw-unary port "/kv.Store/Nope")
-                stream (fx/streaming c "Watch" {:key "a"})]
-          (fx/close c)
-          (is (= (codes "UNIMPLEMENTED") (:code nope)) "a method the proto does not declare")
-          (is (= (codes "UNIMPLEMENTED") (:code stream)) "a streaming method"))))))
+                nope   (fx/raw-unary port "/kv.Store/Nope")]
+          (is (= (codes "UNIMPLEMENTED") (:code nope)) "a method the proto does not declare"))))))
 
 (defn- hold!
   "Listen on `host`:`port` with a plain TCP server; resolves a fn that closes it."
@@ -261,7 +257,7 @@
                                                                     {"nested" {"S" {"methods" {"M" {"requestType" "Gone" "responseType" "Gone"}}}}}))
                 on-http (admin-call (str admin "/imposters") "POST" (assoc (kv-imposter dir port []) "protocol" "http"))
                 proxied (admin-call (str admin "/imposters") "POST"
-                                    (kv-imposter dir port [{"responses" [{"proxy" {"to" "http://127.0.0.1:1"}}]}]))
+                                    (kv-imposter dir port [{"responses" [{"proxy" {"to" "https://127.0.0.1:1"}}]}]))
                 listed  (admin-call (str admin "/imposters") "GET" nil)]
           (is (= [400 "protocol grpc needs a descriptor"]
                  [(:status no-desc) (get-in no-desc [:json "errors" 0 "message"])]))
@@ -269,7 +265,7 @@
           (is (str/starts-with? (str (get-in junk [:json "errors" 0 "message"])) "descriptor: "))
           (is (= [400 "unsupported field(s) descriptor"]
                  [(:status on-http) (get-in on-http [:json "errors" 0 "message"])]))
-          (is (= [400 "stubs[0]: proxy responses are not supported for protocol grpc"]
+          (is (= [400 "stubs[0]: a grpc proxy forwards without TLS, so proxy.to must be an http:// origin"]
                  [(:status proxied) (get-in proxied [:json "errors" 0 "message"])]))
           (is (= [] (get-in listed [:json "imposters"])) "no rejected imposter is left registered"))))))
 

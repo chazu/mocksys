@@ -40,6 +40,8 @@ service Store {
   rpc Get (Key) returns (Item);
   rpc List (google.protobuf.Empty) returns (Items);
   rpc Watch (Key) returns (stream Item);
+  rpc PutMany (stream Item) returns (Items);
+  rpc Sync (stream Item) returns (stream Item);
 }
 ")
 
@@ -143,15 +145,47 @@ message RecList { repeated Rec recs = 1; map<string, string> meta = 2; }
                             (.close c)
                             (resolve (if err {:code (.-code err) :details (.-details err)} {:ok true}))))))))
 
-(defn streaming
-  "Open the server-streaming `method` and resolve the status it ends with."
+(defn- collect
+  "Resolve what the readable `call` delivers: {:messages [maps] :metadata {k v}},
+   plus :code and :details when it ends with an error."
+  [^js call resolve]
+  (let [got (atom {:messages [] :metadata {}})]
+    (.on call "metadata" (fn [^js m] (swap! got assoc :metadata (js->clj (.getMap m)))))
+    (.on call "data" (fn [m] (swap! got update :messages conj (js->clj m))))
+    (.on call "error" (fn [^js e] (resolve (assoc @got :code (.-code e) :details (.-details e)))))
+    (.on call "end" (fn [] (resolve @got)))))
+
+(defn server-stream
+  "Call the server-streaming `method` with `msg`; resolves as `collect`."
   [^js client method msg]
   (js/Promise.
    (fn [resolve]
-     (let [^js call (.call (aget client method) client (clj->js msg))]
-       (.on call "data" (fn [_]))
-       (.on call "error" (fn [^js e] (resolve {:code (.-code e) :details (.-details e)})))
-       (.on call "end" (fn [] (resolve {:ok true})))))))
+     (collect (.call (aget client method) client (clj->js msg)) resolve))))
+
+(defn client-stream
+  "Send `msgs` on the client-streaming `method` and half-close; resolves as `unary`."
+  [^js client method msgs]
+  (js/Promise.
+   (fn [resolve]
+     (let [^js call (.call (aget client method) client
+                           (fn [err reply]
+                             (resolve (if err {:code (.-code err) :details (.-details err)} {:ok (js->clj reply)}))))]
+       (doseq [m msgs] (.write call (clj->js m)))
+       (.end call)))))
+
+(defn bidi
+  "Open the bidirectional `method`. Returns {:call :done}: write to `call` with
+   `send!`, half-close with `.end`; `done` resolves as `collect`."
+  [^js client method]
+  (let [^js call (.call (aget client method) client)]
+    {:call call :done (js/Promise. (fn [resolve] (collect call resolve)))}))
+
+(defn send! [^js call msg] (.write call (clj->js msg)))
+
+(defn next-message
+  "Resolve the next message `call` reads, as a map."
+  [^js call]
+  (js/Promise. (fn [resolve] (.once call "data" (fn [m] (resolve (js->clj m)))))))
 
 (defn close [^js client] (.close client))
 

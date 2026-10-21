@@ -37,7 +37,7 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `kits` | **Kits** and composable **genes**. A gene is a parameterized contract fragment (an OIDC handshake, a CRUD resource, an error envelope); a kit composes genes into a full twin. Ships `oauth2` and `okta`. A contract can list genes under `genes:`, and a kit can be a YAML template, built in or in `$MOCKSYS_HOME/kits`. A user kit that ships modules is a directory; `kit` copies them into the scenario. |
 | `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff status and canonical bodies (`--ignore` keys masked; volatile headers dropped when headers are compared). |
 | `mb` | The admin-API client and daemon lifecycle (spawn `mocksys daemon` when none answers, free-port allocation, imposter CRUD, replayable pull). The name predates the native runtime. |
-| `runtime` | The daemon: the admin API, one HTTP server per imposter, the proxy client for recording, and wire faults. `runtime.imposter` validates a posted imposter and resolves each request (stub choice, responses, behaviors, effects, proxyOnce recording); `runtime.match` evaluates predicates. `runtime.grpc` serves a `protocol: grpc` imposter with grpc-js, turning each call into a request for `runtime.imposter` and its outcome into a reply or a gRPC status. |
+| `runtime` | The daemon: the admin API, one HTTP server per imposter, the proxy client for recording, and wire faults. `runtime.imposter` validates a posted imposter and resolves each request (stub choice, responses, behaviors, effects, proxyOnce recording); `runtime.match` evaluates predicates. `runtime.grpc` serves a `protocol: grpc` imposter with grpc-js, turning each call into a request for `runtime.imposter` and its outcome into a reply or a gRPC status; `runtime.grpc-reflection` serves server reflection for it. |
 | `tls` | The local CA in `$MOCKSYS_HOME/tls/` and the certificates it issues (node-forge over keys from node's crypto), a contract's `tls` declaration, and `fetch-own`, which the CLI uses to reach its own HTTPS mocks. |
 | `proto` | A grpc contract's `.proto`, read on the CLI side with protobufjs: imports, the descriptor `compile!` embeds in the imposter, and the rpc checks `validate` runs. |
 | `store` | On-disk layout under `~/.mocksys`: contracts, imposters, drafts, recordings, services, stacks. YAML read/write. |
@@ -162,13 +162,19 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 | Admin routes | `GET /` (name, version, pid; needs no token), `DELETE /` (stop), `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
 
 **gRPC.** A `grpc` imposter gets a grpc-js server in place of the HTTP one. It
-registers every unary method of the descriptor. A call becomes an ordinary request
+registers every method of the descriptor. A call becomes an ordinary request
 (`POST /pkg.Service/Method`, metadata as headers, the message as a JSON body), so the
 stubs, predicates, effects and state are the same code as for HTTP. The outcome maps
-back to a reply message or a gRPC status; [contracts.md](contracts.md#grpc-unary) gives
+back to a reply message or a gRPC status; [contracts.md](contracts.md#grpc) gives
 the rules. `compile!` embeds the descriptor, so the daemon reads no scenario files and
-`imposter.json` stays self-contained. Streaming and undeclared methods answer
-`UNIMPLEMENTED`, and a grpc imposter rejects `proxy` responses. The bun binary serves
+`imposter.json` stays self-contained. A client stream's request body is the array of
+its messages, each message of a bidirectional stream is a request of its own, and a
+stream's reply array is its messages. Undeclared methods answer `UNIMPLEMENTED`.
+`runtime.grpc-reflection` adds server reflection (v1 and v1alpha) from the same
+descriptor. It registers the reflection service from proto text it carries, since
+`@grpc/reflection`'s own registration reads a file the bun binary cannot ship. A grpc
+imposter's `proxy` response forwards each call upstream with grpc-js, which is how
+`record --proto` records a gRPC service. The bun binary serves
 gRPC too.
 
 **TLS.** An imposter with `tls` is served as HTTPS, or as gRPC over TLS, on both

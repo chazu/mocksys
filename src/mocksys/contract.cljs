@@ -381,16 +381,20 @@
 (defn- pred-field [stub field]
   (some #(some (fn [op-map] (get op-map field)) (vals %)) (get stub "predicates")))
 
-(defn- stub->operation [stub i]
+(defn- stub->operation
+  "An operation for a recorded stub. A grpc stub's path is its rpc."
+  [stub i grpc?]
   (let [method   (or (pred-field stub "method") "GET")
         path     (or (pred-field stub "path") "/")
         resps    (get stub "responses")
         single?  (= 1 (count resps))]
     {"id"      (slug (str method "-" path "-" i))
      "summary" (str method " " path)
-     "request" {"method" (str/upper-case method)
-                "path"   path
-                "match"  ["method" "path"]}
+     "request" (if grpc?
+                 {"rpc" (subs path 1)}
+                 {"method" (str/upper-case method)
+                  "path"   path
+                  "match"  ["method" "path"]})
      "responses"
      (->> resps
           (map-indexed
@@ -405,12 +409,15 @@
 
 (defn lift
   "Reverse-engineer a contract from a (scrubbed) imposter — used by `freeze` and the
-   lazy migration of legacy imposter-only scenarios."
-  [imposter scenario service]
-  {"service"    service
-   "scenario"   scenario
-   "origin"     "recorded"
-   "operations" (vec (map-indexed #(stub->operation %2 %1) (get imposter "stubs")))})
+   lazy migration of legacy imposter-only scenarios. A grpc imposter lifts to a grpc
+   contract over `proto`, the scenario's proto file."
+  ([imposter scenario service] (lift imposter scenario service nil))
+  ([imposter scenario service proto]
+   (let [grpc? (= "grpc" (get imposter "protocol"))]
+     (-> {"service" service "scenario" scenario "origin" "recorded"}
+         (cond-> grpc?         (assoc "protocol" "grpc")
+                 (and grpc? proto) (assoc "proto" proto))
+         (assoc "operations" (vec (map-indexed #(stub->operation %2 %1 grpc?) (get imposter "stubs"))))))))
 
 ;; --- scaffold: empty contract for hand-authoring --------------------------
 

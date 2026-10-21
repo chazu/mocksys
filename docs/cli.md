@@ -44,7 +44,7 @@ scenarios that list `modules`, the only code a scenario can run.
 | `use <name> --op ID --example NAME [--off] [--only]` | (De)select an example. `--only` clears the operation's others first (happy↔error swap). Refuses a gene operation and names the gene. |
 | `fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--malformed-json] [--clear]` | Overlay a transport fault (stored on the contract). |
 | `parameterize <name> --path '/a/{var}/b'` | Loosen matching exact paths to a `{param}` template. Refuses when the template would change a gene operation. |
-| `validate <name>` | Structural + example-vs-schema check over the expanded operations; an unknown gene or gene param is an error. For a grpc contract, it also loads the proto and checks that each `rpc` exists and is unary. Exit 1 on errors. |
+| `validate <name>` | Structural + example-vs-schema check over the expanded operations; an unknown gene or gene param is an error. For a grpc contract, it also loads the proto and checks that each `rpc` exists. Exit 1 on errors. |
 | `compile <name>` | Rebuild `imposter.json` from `contract.yaml` (normally automatic). |
 
 ## Run & verify
@@ -111,7 +111,7 @@ The CA:
 | Command | Notes |
 |---|---|
 | `init <service>` | Materialize a service profile: `github` \| `gitlab` \| `aws-s3` \| `stripe` \| `generic-http`. |
-| `record <service/name> [--target URL] [--port N]` | Start a recording proxy to the target. |
+| `record <service/name> [--target URL] [--port N] [--proto FILE]` | Start a recording proxy to the target. With `--proto`, record a gRPC upstream at `--target host:port` (no TLS); the proto and its imports are copied into the scenario. See [contracts.md](contracts.md#recording). |
 | `freeze <name> [--draft]` | Scrub secrets + volatility (in memory) and lift a contract from the recording. `--draft` lands it for review (then `promote`). |
 | `promote <name>` | Make a reviewed draft the canonical contract. |
 

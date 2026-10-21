@@ -11,7 +11,12 @@ service Todos {
   rpc UpdateTodo (Todo) returns (Todo);
   rpc ListTodos (ListTodosRequest) returns (ListTodosResponse);
   rpc DeleteTodo (GetTodoRequest) returns (google.protobuf.Empty);
+  // Streams every todo the filter matches, one message each.
   rpc WatchTodos (ListTodosRequest) returns (stream Todo);
+  // Counts a batch and reports its first title, without storing anything.
+  rpc PreviewImport (stream CreateTodoRequest) returns (ImportPreview);
+  // Creates a todo for each request and answers each with the stored todo.
+  rpc CreateTodos (stream CreateTodoRequest) returns (stream Todo);
 }
 
 message Todo {
@@ -35,4 +40,9 @@ message ListTodosRequest {
 
 message ListTodosResponse {
   repeated Todo todos = 1;
+}
+
+message ImportPreview {
+  int32 count = 1;
+  string first_title = 2;
 }
