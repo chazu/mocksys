@@ -5,7 +5,8 @@ orientation. A scenario id is `service/name`. Commands that read a contract reco
 stale `imposter.json` automatically.
 
 Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides how the
-`mb` daemon is launched. `MOCKSYS_NO_INJECTION=1` refuses stateful scenarios.
+`mb` daemon is launched (else `mb` on `PATH`, else the bundled `mountebank` package).
+`MOCKSYS_NO_INJECTION=1` refuses stateful scenarios.
 
 ## Twins — full clones in one command
 

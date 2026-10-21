@@ -64,7 +64,7 @@ npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 Requires **Node 18+** (for global `fetch`). Mountebank installs as a dependency.
 `mocksys` starts and stops the Mountebank daemon for you; you never run `mb` directly.
 Point `MOCKSYS_MB` at an `mb` executable to override how it's launched (otherwise it
-uses `mb` on your `PATH`, falling back to `npx mb`).
+uses `mb` on your `PATH`, falling back to the `mountebank` package installed alongside mocksys).
 
 ## Develop / build
 

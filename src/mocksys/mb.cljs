@@ -6,7 +6,8 @@
   back, repost frozen imposters. Mountebank is the runtime, not the interface."
   (:require [promesa.core :as p]
             ["node:child_process" :as cp]
-            ["node:net" :as net]))
+            ["node:net" :as net]
+            ["node:path" :as path]))
 
 (def admin-port 2525)
 (def base (str "http://localhost:" admin-port))
@@ -42,17 +43,29 @@
   (zero? (.-status (cp/spawnSync "sh" #js ["-c" (str "command -v " cmd)]
                                  #js {:stdio "ignore"}))))
 
+(defn- bundled-mb
+  "mountebank's bin script from our own npm dependency, or nil when there is none.
+   Node only: in the bun binary process.execPath is mocksys itself, not a runtime."
+  []
+  (when-not (.. js/process -versions -bun)
+    (try (path/join (path/dirname (.resolve js/require "mountebank/package.json")) "bin" "mb")
+         (catch :default _ nil))))
+
 (defn mb-launcher
   "How to start mountebank, as [cmd extra-args]:
      $MOCKSYS_MB (a path/command) if set  ->  use it directly
      else `mb` on PATH (e.g. a Homebrew install)
-     else `npx mb` (node_modules / on-demand fetch — the dev/npm path)."
+     else the mountebank npm dependency, run with this node (the npm install path)."
   []
   (let [env (.-MOCKSYS_MB js/process.env)]
     (cond
       (and env (not= env "")) [env []]
       (on-path? "mb")         ["mb" []]
-      :else                   ["npx" ["mb"]])))
+      :else
+      (if-let [bin (bundled-mb)]
+        [(.-execPath js/process) [bin]]
+        (throw (js/Error. (str "Mountebank not found: install it (`npm install -g mountebank`) "
+                               "or point MOCKSYS_MB at an `mb` executable")))))))
 
 (defn- spawn-daemon!
   "Start the mb daemon. With `allow-injection?` it is launched with --allowInjection
@@ -61,8 +74,10 @@
   ([allow-injection?]
    ;; `mb start` double-forks into a backgrounded daemon and returns; the child we
    ;; spawn just triggers it, so we detach + unref and poll for readiness.
+   ;; --localOnly: the admin API accepts imposters carrying injected JS, so it must
+   ;; never be reachable from another machine.
    (let [[cmd extra] (mb-launcher)
-         args  (cond-> (concat extra ["start" "--port" (str admin-port)])
+         args  (cond-> (concat extra ["start" "--port" (str admin-port) "--localOnly"])
                  allow-injection? (concat ["--allowInjection"]))
          child (.spawn cp cmd (clj->js args) #js {:detached true :stdio "ignore"})]
      (.unref child))))
@@ -71,7 +86,7 @@
   "Stop whatever is listening on the admin port (so we can relaunch it with a
    different flag). POSIX-only; mocksys targets darwin/linux."
   []
-  (cp/spawnSync "sh" #js ["-c" (str "lsof -ti tcp:" admin-port " | xargs kill -9")]
+  (cp/spawnSync "sh" #js ["-c" (str "lsof -ti tcp:" admin-port " -sTCP:LISTEN | xargs kill -9")]
                 #js {:stdio "ignore"}))
 
 (defn- wait-up [tries]

@@ -29,7 +29,7 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `inject` | The **stateful** layer. Compiles a declarative `effect` into a generated, dependency-free Mountebank response injection over a shared `state` object — handshake buckets and resource collections. The agent never writes JavaScript. |
 | `kits` | **Kits** and composable **genes**. A gene is a parameterized contract fragment (an OIDC handshake, a CRUD resource, an error envelope); a kit composes genes into a full twin. Ships `oauth2` and `okta`. |
 | `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff responses normalized by volatility. |
-| `mb` | The Mountebank admin-API client and daemon lifecycle (start/relaunch, `--allowInjection`, free-port allocation, imposter CRUD, replayable pull). |
+| `mb` | The Mountebank admin-API client and daemon lifecycle (start/relaunch with `--localOnly` and `--allowInjection`, free-port allocation, imposter CRUD, replayable pull). |
 | `store` | On-disk layout under `~/.mocksys`: contracts, imposters, drafts, recordings, services, stacks. YAML read/write. |
 | `service` | Service templates (github, gitlab, aws-s3, stripe, generic-http): redact/volatile headers, default target, the consumer's base-URL env var. Composed with the base sets in `analyze`. |
 | `scrub` | Redaction (secrets → a marker) and volatility stripping, in memory, on `freeze`. |
