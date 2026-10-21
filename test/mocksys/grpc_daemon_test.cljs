@@ -123,6 +123,20 @@
           (doseq [[st code] table]
             (is (= (codes code) (:code (get rs (str st)))) (str st " is " code))))))))
 
+(deftest an-errors-details-are-a-message-not-a-body
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (p/let [rs (answers admin {"both"   {"statusCode" 400 "body" {"message" "m" "error" "e"}}
+                                   "oauth"  {"statusCode" 400 "body" {"error" "invalid_grant" "error_description" "expired"}}
+                                   "okta"   {"statusCode" 404 "body" {"errorCode" "E0000007" "errorSummary" "Not found"}}
+                                   "nested" {"statusCode" 400 "body" {"message" {"text" "x"}}}
+                                   "array"  {"statusCode" 500 "body" [1 2]}
+                                   "text"   {"statusCode" 418 "body" "short and stout"}})]
+          (is (= {"both" "m" "oauth" "invalid_grant" "okta" "HTTP 404" "nested" "HTTP 400" "array" "HTTP 500"
+                  "text" "short and stout"}
+                 (update-vals rs :details))))))))
+
 (deftest what-is-not-served-is-unimplemented
   (async done
     (with-daemon done
