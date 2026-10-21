@@ -145,7 +145,10 @@ take effect. A module is different, because no flag changes it. A module that ma
 kit's copy is left alone. A module that differs was most likely edited by hand, so `kit`
 stops and writes nothing. Pass `--force` to replace it with the kit's copy, or use
 `--scenario NAME` to generate a separate scenario. The edits you keep in the scenario are
-the ones `mocksys run` loads.
+the ones `mocksys run` loads. `kit` never deletes a file: when a new version of a kit
+drops a module, the old copy stays in the scenario directory. The new contract no longer
+lists it, so `run` does not load it, but `pack`, `publish` and `push` still carry it.
+Delete it by hand.
 
 [`examples/kits/webhooks/`](../examples/kits/webhooks/) is a directory kit that ships the
 signature-checking verb from the webhooks example:
