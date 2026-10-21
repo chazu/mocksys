@@ -6,11 +6,18 @@
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
+            ["node:fs" :as fs]
             ["node:http" :as http]
+            ["node:https" :as https]
             ["node:net" :as net]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            ["ws" :refer [WebSocket]]
             [mocksys.daemon-fixture :as daemon]
             [mocksys.runtime :as runtime]
-            [mocksys.runtime.imposter :as imposter]))
+            [mocksys.runtime.imposter :as imposter]
+            [mocksys.store :as store]
+            [mocksys.tls :as tls]))
 
 (defn- free-port []
   (js/Promise.
@@ -225,6 +232,34 @@
           (is (= 200 (first to-sse)) "an answer that is not a websocket is written as plain HTTP")
           (is (= 426 (:status plain)) "a plain GET that reaches a websocket answer is told to upgrade")
           (is (= :upgraded accepted)))))))
+
+(deftest streams-run-over-tls
+  (async done
+    (daemon/with-daemon done
+      (fn [admin]
+        (p/let [ca    (let [home (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-stream-tls-"))]
+                        (with-redefs [store/root home] (tls/ensure-ca!)))
+                port  (free-port)
+                stubs [(stub "GET" "^/count$" {"sse" {"events" [{"data" "a"}]}})
+                       (stub "GET" "^/socket$" {"websocket" {"messages" [{"data" "welcome"}]}})]
+                made  (call (str admin "/imposters") {:method "POST" :body (assoc (imposter port stubs) "tls" (tls/issue ca))})
+                sse   (js/Promise.
+                       (fn [resolve reject]
+                         (-> (.get https #js {:host "127.0.0.1" :port port :path "/count" :servername "localhost" :ca (:cert ca)}
+                                   (fn [^js res]
+                                     (let [text (atom "")]
+                                       (.setEncoding res "utf8")
+                                       (.on res "data" #(swap! text str %))
+                                       (.on res "end" #(resolve @text)))))
+                             (.on "error" reject))))
+                hello (js/Promise.
+                       (fn [resolve reject]
+                         (let [^js c (WebSocket. (str "wss://localhost:" port "/socket") #js {:ca (:cert ca)})]
+                           (.on c "message" (fn [data] (.close c) (resolve (.toString data))))
+                           (.on c "error" reject))))]
+          (is (= 201 (:status made)) (pr-str (:json made)))
+          (is (str/includes? sse "data: a") "SSE over https")
+          (is (= "welcome" hello) "a wss upgrade is accepted"))))))
 
 (deftest a-closed-client-leaves-no-subscriber
   (async done
