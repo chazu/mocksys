@@ -206,8 +206,11 @@ as everything else.
   `: keep-alive` comment goes out every `keepAlive` ms (default 15000, 0 turns it off).
   `Last-Event-ID` resumes the script after the event with that id; channel events are
   live only, never replayed.
-- **WebSockets.** The imposter's server takes the `upgrade` event for `Upgrade:
-  websocket` only (`shouldUpgradeCallback`), so an h2c upgrade keeps its body. The upgrade request
+- **WebSockets.** Only an imposter with a `websocket` answer listens for `upgrade`,
+  and only for `Upgrade: websocket` (`shouldUpgradeCallback`), so an h2c upgrade keeps
+  its body. Node before 22.21 and 24.9 ignores `shouldUpgradeCallback`; there an
+  imposter with a `websocket` answer gets every upgrade, and a non-WebSocket one
+  arrives without its body. The upgrade request
   goes through the imposter as `GET <path>`; an answer other than `websocket` is
   written back as a plain HTTP response, so a gate refuses the upgrade with its own
   status. A plain GET that reaches a `websocket` answer gets 426. Each inbound message

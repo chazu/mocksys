@@ -90,6 +90,9 @@
 
 (def ^:private room {"pathRegex" "/rooms/([^/]+)"})
 
+(def ^:private echo
+  (stub "POST" "^/echo$" {"bind" {"t" {"body" "text"}} "respond" {"text" "got {t}"}}))
+
 (def ^:private chat
   [(stub "GET" "^/count$"
          {"sse" {"retry" 500
@@ -115,8 +118,7 @@
          {"equals" {"body" "shout"} "jsonpath" {"selector" "$.type"}})
    (stub "GET" "^/gate$"
          {"bind" {"x" {"query" "x"}} "respond" {"status" 401 "headers" {"X-Realm" "r={x}"}}})
-   (stub "POST" "^/echo$"
-         {"bind" {"t" {"body" "text"}} "respond" {"text" "got {t}"}})
+   echo
    {"predicates" [{"deepEquals" {"path" "/late"}}]
     "responses"  [{"effect" {"sse" {"channel" "late"}} "behaviors" [{"wait" 300}]}]}
    (stub "POST" "^/rooms/[^/]+/messages$"
@@ -241,12 +243,22 @@
        (.on rq "error" reject)
        (.end rq body)))))
 
+(def ^:private filters-upgrades?
+  "Whether this node's HTTP server takes shouldUpgradeCallback (node 22.21+, 24.9+)."
+  (fn? (.-shouldUpgradeCallback (.createServer http))))
+
 (deftest an-upgrade-other-than-websocket-is-an-ordinary-request
   (async done
     (with-chat done
-      (fn [port _]
-        (p/let [r (h2c-post port "/echo" "{\"text\":\"hello\"}")]
-          (is (= [200 "got hello"] r) "the body still arrives"))))))
+      (fn [ws-port admin]
+        (p/let [port (free-port)
+                made (call (str admin "/imposters") {:method "POST" :body (imposter port [echo])})
+                r    (h2c-post port "/echo" "{\"text\":\"hello\"}")
+                ws-r (h2c-post ws-port "/echo" "{\"text\":\"hello\"}")]
+          (is (= 201 (:status made)))
+          (is (= [200 "got hello"] r) "an imposter without a websocket answer takes no upgrade, on any node")
+          (when filters-upgrades?
+            (is (= [200 "got hello"] ws-r) "nor does one with a websocket answer, where node can tell the upgrades apart")))))))
 
 (deftest a-refused-upgrade-cannot-inject-headers
   (async done

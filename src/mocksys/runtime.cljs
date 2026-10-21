@@ -193,8 +193,10 @@
 (defn- tracked-server
   "An HTTP server, or HTTPS with `tls` ({cert key} PEM), that remembers its open
    sockets, so stopping it can cut them (a response may be parked in a long `wait`).
-   With `on-upgrade`, a WebSocket upgrade goes there; any other Upgrade request, such
-   as curl's h2c, stays an ordinary request with its body."
+   With `on-upgrade`, a WebSocket upgrade goes there. Any other Upgrade request, such
+   as curl's h2c, stays an ordinary request with its body, except on a node without
+   shouldUpgradeCallback (before 22.21 and 24.9), which hands it to `on-upgrade` with
+   its body unread."
   [handler {:keys [tls on-upgrade]}]
   (let [opts       (cond-> {}
                      tls        (assoc :cert (get tls "cert") :key (get tls "key"))
@@ -236,7 +238,8 @@
         handler (fn [rq rs] (serve! imp rq rs))
         wss     (WebSocketServer. #js {:noServer true :clientTracking false})
         server  #(tracked-server handler {:tls        (imposter/tls imp)
-                                          :on-upgrade (fn [rq socket head] (upgrade! imp wss rq socket head))})]
+                                          :on-upgrade (when (imposter/websockets? imp)
+                                                        (fn [rq socket head] (upgrade! imp wss rq socket head)))})]
     (-> (p/let [v4 (listen! (server) port "127.0.0.1")]
           (-> (listen! (server) port "::1")
               (p/then (fn [v6] [v4 v6]))

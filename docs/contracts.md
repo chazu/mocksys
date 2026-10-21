@@ -521,7 +521,10 @@ works. The reply becomes outbound messages:
 The upgrade request is itself recorded as a `GET`. An upgrade that reaches any other
 answer gets that answer as plain HTTP, and a plain `GET` that reaches a `websocket`
 answer gets `426 Upgrade Required`. Only `Upgrade: websocket` is taken over; any other
-upgrade, such as curl's `h2c`, stays an ordinary request with its body. [`examples/chat.yaml`](../examples/chat.yaml) is a
+upgrade, such as curl's `h2c`, stays an ordinary request with its body. A mock with no
+`websocket` answer takes over no upgrade at all. On node before 22.21 (or 24.9 on the
+24 line), a mock with a `websocket` answer cannot tell the upgrades apart, so another
+upgrade reaches the contract without its body. [`examples/chat.yaml`](../examples/chat.yaml) is a
 chat room served both ways.
 
 ## TLS

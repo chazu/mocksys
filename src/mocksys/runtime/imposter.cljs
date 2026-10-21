@@ -379,6 +379,12 @@
 (defn tls [imp] (get-in @imp [:spec "tls"]))
 (defn channels [imp] (:channels @imp))
 
+(defn websockets?
+  "Whether any of the imposter's stubs can answer with a WebSocket."
+  [imp]
+  (boolean (some #(= "websocket" (effect/stream-verb (get % "effect")))
+                 (for [s (:stubs @imp), r (get-in s [:spec "responses"])] r))))
+
 (defn to-json
   "The imposter as the admin API shows it. `:list?` is the summary row; the full
    view adds the recorded requests and how many the cap dropped. `:replayable?`
