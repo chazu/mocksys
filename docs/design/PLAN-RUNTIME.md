@@ -13,6 +13,14 @@ they move serving off Mountebank so mocksys can speak protocols Mountebank canno
 
 Phases 1+2 and phase 3 run in parallel. Phases 4 and 5 run in parallel after 3 lands.
 
+**Status (2026-10-21).** All five phases have landed, each after an independent review
+and a round of fixes. Still open:
+- **The interpreter rewrite.** Effects are still JavaScript generated as strings.
+- **gRPC beyond unary calls.** No streaming, reflection, recording or TLS.
+- **Kits that ship modules.** A disk kit cannot carry `modules` yet.
+- **No admin-API auth for local users,** the same as Mountebank.
+- **The recorded-request log has no size cap.**
+
 ## Why
 
 Today an author outside the repo can only hand-write effects. Genes are ClojureScript
