@@ -257,3 +257,25 @@ contract:
     (testing "--force true forces"
       (is (nil? (:died (kit-in home ["hooks"] {:force "true"}))))
       (is (= verbs (slurp module))))))
+
+(deftest a-rerun-leaves-a-matching-module-untouched
+  (let [home   (hooks-store)
+        module (scenario-file home "lib" "verbs.js")
+        past   (js/Date. 1000000000000)]
+    (is (nil? (:died (kit-in home ["hooks"] {}))))
+    (fs/utimesSync module past past)
+    (is (nil? (:died (kit-in home ["hooks"] {:force true}))))
+    (is (= (.getTime past) (.getTime (.-mtime (fs/statSync module)))) "the file was not rewritten")
+    (is (= verbs (slurp module)))))
+
+(deftest a-kit-directory-may-be-a-link
+  (let [home (store! {})
+        real (tmp "mocksys-kit-real-")]
+    (fs/mkdirSync (path/join real "lib"))
+    (fs/writeFileSync (path/join real "kit.yaml") (hooks-kit "./lib/verbs.js"))
+    (fs/writeFileSync (path/join real "lib" "verbs.js") verbs)
+    (fs/symlinkSync real (path/join home "kits" "hooks"))
+    (let [{:keys [died]} (kit-in home ["hooks"] {})]
+      (is (nil? died))
+      (is (= verbs (slurp (scenario-file home "lib" "verbs.js"))))
+      (is (fs/existsSync (scenario-file home "imposter.json"))))))
