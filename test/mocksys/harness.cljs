@@ -13,9 +13,10 @@
 
 (defn compile-fn
   "Eval the generated injection source for `op` into a callable JS function.
-   `opts` may carry :seed, :collections, :clock-start and :issuer (all optional)."
-  [op {:keys [seed collections clock-start issuer]}]
-  (js/eval (str "(" (inject/gen op seed collections clock-start issuer) ")")))
+   `opts` may carry :seed, :collections, :clock-start, :issuer and :random-seed
+   (all optional)."
+  [op opts]
+  (js/eval (str "(" (inject/gen op opts) ")")))
 
 (defn fresh-state
   "A blank per-imposter state object. Pass the SAME one across several `run` calls

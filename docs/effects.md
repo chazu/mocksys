@@ -38,7 +38,7 @@ the order you write the keys:
 2. `consume` / `lookup` — read (and for `consume`, delete) bucket entries. A miss
    short-circuits with the verb's `miss` response.
 3. `resolve` — find a seed-array item. A miss short-circuits.
-4. `mint` — generate fresh random ids (after reads, so a minted id can't be clobbered).
+4. `mint` — generate fresh ids (after reads, so a minted id can't be clobbered).
 5. **Terminal:** either a collection verb (`create`/`get`/`update`/`remove`/`list`) which
    forms and returns its own response, **or** `store` (write a bucket) followed by
    `respond`.
@@ -89,11 +89,20 @@ bind:
 ## State buckets and `mint`
 
 Flat buckets (`string → string`) are declared implicitly — any bucket named by a `store`/
-`consume`/`lookup` is auto-initialized. `mint` makes a random 24-hex-char id with an
-optional prefix:
+`consume`/`lookup` is auto-initialized. `mint` makes a 24-hex-char id with an optional
+prefix:
 
 ```yaml
 mint: { token: { prefix: "mockoauth_" } }   # -> token = "mockoauth_<24 hex>"
+```
+
+Ids are drawn from a seeded pseudo-random stream kept in the imposter's shared state, not
+from `Math.random`. A freshly started twin mints the same ids for the same sequence of
+requests on every run. Set `state.randomSeed` (a number) to pick a different stream:
+
+```yaml
+state:
+  randomSeed: 42
 ```
 
 ## Handshake verbs

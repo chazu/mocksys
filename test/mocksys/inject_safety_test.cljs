@@ -10,7 +10,7 @@
 (def ^:private payload "200,body:require('child_process').execSync('id').toString()")
 
 (defn- gen-error [op]
-  (try (inject/gen op nil) nil
+  (try (inject/gen op {}) nil
        (catch :default e (.-message e))))
 
 (deftest code-shaped-numbers-are-rejected

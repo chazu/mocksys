@@ -500,7 +500,10 @@
 (def ^:private prelude
   "Dependency-free runtime helpers shared by every generated injection."
   (str
-   "function rnd(p){var s=p||'',h='0123456789abcdef';for(var i=0;i<24;i++){s+=h[Math.floor(Math.random()*16)];}return s;}"
+   ;; ids/tokens come from a xorshift32 stream kept in shared state, so a twin mints
+   ;; the same ids for the same request sequence on every run.
+   "function rng(){var x=(state.__rng>>>0)||1;x^=x<<13;x>>>=0;x^=x>>>17;x^=x<<5;x>>>=0;state.__rng=x;return x;}"
+   "function rnd(p){var s=p||'',h='0123456789abcdef';for(var i=0;i<24;i++){s+=h[rng()>>>28];}return s;}"
    "function qv(k){return (request.query&&request.query[k])||'';}"
    "function hv(k){var H=request.headers||{};for(var n in H){if(n.toLowerCase()===k)return H[n];}return '';}"
    "function bearer(h){h=String(h||'');if(/^bearer /i.test(h))return h.slice(7);if(/^token /i.test(h))return h.slice(6);return h;}"
@@ -596,33 +599,38 @@
    "function signJwt(header,claims,pem){var enc=b64url(JSON.stringify(header))+'.'+b64url(JSON.stringify(claims));"
    "var sig=require('crypto').createSign('RSA-SHA256').update(enc).sign(pem);return enc+'.'+b64url(sig);}"))
 
+(def default-random-seed
+  "The id stream's starting state when a contract sets no `state.randomSeed`."
+  1)
+
 (defn gen
   "The Mountebank inject function (as a JS source string) for one stateful op.
-   `seed` (handshake seed arrays) and `collections` ({name {idField seed}}) are
-   embedded as literals so the function is self-contained. Every declared collection
-   is seeded once into shared `state` (idempotent), so all ops see the same data."
-  ([op seed] (gen op seed nil nil nil))
-  ([op seed collections] (gen op seed collections nil nil))
-  ([op seed collections clock-start] (gen op seed collections clock-start nil))
-  ([op seed collections clock-start issuer]
-   (let [effect    (get op "effect")
-         buck-init (->> (buckets-of effect)
-                        (map (fn [b] (str "state[" (js b) "]=state[" (js b) "]||{};")))
-                        str/join)
-         coll-init (->> collections
-                        (map (fn [[name spec]]
-                               (str "initColl(state," (js name) ","
-                                    (js (or (get spec "idField") "id")) ","
-                                    (js (or (get spec "seed") [])) ");")))
-                        str/join)
-         clock-init (when clock-start (str "state.__now=state.__now||" (num-lit "clock start" clock-start) ";"))]
-     (str "function (request, state, logger) {"
-          prelude
-          "var seed=" (js (or seed {})) ";"
-          "var V={};"
-          "var __issuer=" (js (or issuer "")) ";"
-          buck-init
-          coll-init
-          clock-init
-          (effect-body-js effect)
-          "}"))))
+   `opts`: :seed (handshake seed arrays) and :collections ({name {idField seed}}),
+   embedded as literals so the function is self-contained; :clock-start, :issuer and
+   :random-seed. Every declared collection is seeded once into shared `state`
+   (idempotent), so all ops see the same data."
+  [op {:keys [seed collections clock-start issuer random-seed]}]
+  (let [effect    (get op "effect")
+        buck-init (->> (buckets-of effect)
+                       (map (fn [b] (str "state[" (js b) "]=state[" (js b) "]||{};")))
+                       str/join)
+        coll-init (->> collections
+                       (map (fn [[name spec]]
+                              (str "initColl(state," (js name) ","
+                                   (js (or (get spec "idField") "id")) ","
+                                   (js (or (get spec "seed") [])) ");")))
+                       str/join)
+        clock-init (when clock-start (str "state.__now=state.__now||" (num-lit "clock start" clock-start) ";"))
+        rng-init   (str "state.__rng=state.__rng||"
+                        (num-lit "state.randomSeed" (or random-seed default-random-seed)) ";")]
+    (str "function (request, state, logger) {"
+         prelude
+         "var seed=" (js (or seed {})) ";"
+         "var V={};"
+         "var __issuer=" (js (or issuer "")) ";"
+         buck-init
+         coll-init
+         clock-init
+         rng-init
+         (effect-body-js effect)
+         "}")))

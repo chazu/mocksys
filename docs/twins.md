@@ -222,7 +222,9 @@ deterministic state.
 
 ## Determinism: the virtual clock + rate limits
 
-A twin is deterministic: fixed seed, fresh state per run, no real network. Time is
+A twin is deterministic: fixed seed data, fresh state per run, no real network, and minted
+ids drawn from a seeded stream (`state.randomSeed`, see
+[effects.md](effects.md#state-buckets-and-mint)), so the same requests get the same ids. Time is
 deterministic too, via the **virtual clock** — a "now" that only moves when you advance it.
 So token expiry, session lifetimes, and rate-limit windows are reproducible:
 

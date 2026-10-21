@@ -238,7 +238,9 @@
                           "responses"
                           (if (inject/stateful? op)
                             ;; stateful op: a generated injection over the shared state
-                            [{"inject" (inject/gen op seed colls clock-start issuer)}]
+                            [{"inject" (inject/gen op {:seed seed :collections colls
+                                                       :clock-start clock-start :issuer issuer
+                                                       :random-seed (get-in contract ["state" "randomSeed"])})}]
                             (mapv #(-> % templatize (apply-fault fault))
                                   (operation-responses op)))}
                          (catch :default e

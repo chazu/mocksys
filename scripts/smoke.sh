@@ -60,6 +60,13 @@ check "malformed filter is Okta's E0000031" E0000031 \
 "$MS" conform okta/okta --corpus "$ROOT/examples/okta-corpus.json" >/dev/null
 check "conform golden corpus" 0 $?
 
+echo "# determinism"
+"$MS" stop okta/okta >/dev/null
+"$MS" run okta/okta >/dev/null
+id2=$(curl -s -X POST localhost:$PORT/api/v1/users -H 'Content-Type: application/json' \
+        -d '{"profile":{"login":"smoke@example.com","email":"smoke@example.com"}}' | json_field '.id')
+check "a fresh twin mints the same id for the same request" "$id" "$id2"
+
 echo "# imposter.json is never trusted"
 imp="$MOCKSYS_HOME/okta/okta/imposter.json"
 node -e '
