@@ -1,0 +1,96 @@
+# Hand-authored: a chat room served as server-sent events and as a WebSocket.
+# A message posted over HTTP, or said over the socket, is stored and published to the
+# room's channel, so every open SSE stream and socket on that room receives it.
+#   - sse       : GET /rooms/{room}/events streams a `joined` event, then the room
+#   - websocket : GET /rooms/{room}/socket says welcome, then carries the room
+#   - MESSAGE   : each message on the socket is a request, matched by its JSON `type`
+#   - publish   : one verb feeds both
+#
+# Stand it up:
+#   MOCKSYS_HOME=./.mocks mkdir -p .mocks/demo/chat
+#   cp examples/chat.yaml .mocks/demo/chat/contract.yaml
+#   MOCKSYS_HOME=./.mocks mocksys run demo/chat --port 9180
+# Drive it:
+#   curl -N localhost:9180/rooms/lobby/events                       # leave it open
+#   curl -X POST localhost:9180/rooms/lobby/messages -d '{"from":"ann","text":"hi"}'
+#   node -e 'const w=new WebSocket("ws://localhost:9180/rooms/lobby/socket");
+#            w.onmessage=e=>console.log(e.data);
+#            w.onopen=()=>w.send(JSON.stringify({type:"say",from:"bo",text:"hey"}))'
+#   MOCKSYS_HOME=./.mocks mocksys assert demo/chat --saw 'MESSAGE /rooms/lobby/socket'
+service: demo
+scenario: demo/chat
+origin: authored
+summary: a chat room whose messages reach SSE streams and WebSockets through one channel
+state:
+  collections:
+    messages: { idField: id }
+operations:
+  - id: post-message
+    summary: POST /rooms/{room}/messages — store a message and publish it to the room
+    request: { method: POST, path: "/rooms/{room}/messages" }
+    effect:
+      bind:
+        room: { pathRegex: "/rooms/([^/]+)/" }
+        from: { body: from }
+        text: { body: text }
+      mint:   { mid: { prefix: "msg_" } }
+      create:
+        collection: messages
+        body: { id: "{mid}", room: "{room}", from: "{from}", text: "{text}" }
+        as: msg
+      publish: { channel: "room-{room}", event: message, id: "{mid}", dataVar: msg }
+
+  - id: list-messages
+    summary: GET /rooms/{room}/messages — the room's history
+    request: { method: GET, path: "/rooms/{room}/messages" }
+    effect:
+      bind: { room: { pathRegex: "/rooms/([^/]+)/" } }
+      list: { collection: messages, filter: 'room eq "{room}"' }
+
+  - id: room-events
+    summary: GET /rooms/{room}/events — SSE, a joined event and then every message in the room
+    request: { method: GET, path: "/rooms/{room}/events" }
+    effect:
+      bind: { room: { pathRegex: "/rooms/([^/]+)/" } }
+      sse:
+        retry: 3000
+        events:
+          - { event: joined, data: { room: "{room}" } }
+        channel: "room-{room}"
+
+  - id: room-socket
+    summary: GET /rooms/{room}/socket — a WebSocket that says welcome and carries the room
+    request: { method: GET, path: "/rooms/{room}/socket" }
+    effect:
+      bind: { room: { pathRegex: "/rooms/([^/]+)/" } }
+      websocket:
+        messages:
+          - { data: { type: welcome, room: "{room}" } }
+        channel: "room-{room}"
+
+  - id: socket-say
+    summary: a {"type":"say"} message on the socket — stored, acknowledged, and published to the room
+    request:
+      method: MESSAGE
+      path: "/rooms/{room}/socket"
+      body: { "$.type": say }
+    effect:
+      bind:
+        room: { pathRegex: "/rooms/([^/]+)/" }
+        from: { body: from }
+        text: { body: text }
+      mint:   { mid: { prefix: "msg_" } }
+      create:
+        collection: messages
+        body: { id: "{mid}", room: "{room}", from: "{from}", text: "{text}" }
+        as: msg
+      publish: { channel: "room-{room}", event: message, id: "{mid}", dataVar: msg }
+
+  - id: socket-ping
+    summary: a {"type":"ping"} message on the socket — answered with a pong to the sender only
+    request:
+      method: MESSAGE
+      path: "/rooms/{room}/socket"
+      body: { "$.type": ping }
+    effect:
+      respond: { json: { type: pong } }
