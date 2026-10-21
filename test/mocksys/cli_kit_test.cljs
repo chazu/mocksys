@@ -7,6 +7,7 @@
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]
+            ["js-yaml" :as yaml]
             [mocksys.cli.util :as util]
             [mocksys.cli.twins :as twins]
             [mocksys.store :as store]))
@@ -138,7 +139,7 @@ contract:
     (testing "the compiled imposter names it relative to the scenario"
       (is (= ["lib/verbs.js"] (get (js->clj (js/JSON.parse (slurp (scenario-file home "imposter.json")))) "modules"))))
     (testing "kit says the scenario runs the module's JavaScript, as unpack does"
-      (is (str/includes? out "! hooks/hooks runs JavaScript from its modules (./lib/verbs.js) in the mocksys daemon")))))
+      (is (str/includes? out "! hooks/hooks runs JavaScript from its modules (lib/verbs.js) in the mocksys daemon")))))
 
 (deftest a-kit-module-must-stay-inside-the-kit-directory
   (testing "a path that climbs out"
@@ -212,3 +213,15 @@ contract:
       (is (str/includes? (str died) "lib/b.js"))
       (is (str/includes? (str died) "not a directory"))
       (is untouched? "neither the contract nor a.js was written"))))
+
+(deftest the-contract-names-where-the-modules-land
+  (doseq [[what module] [["a path through the kit's own name" (fn [_] "../hooks/a.js")]
+                         ["an absolute path inside the kit" (fn [home] (path/join home "kits" "hooks" "a.js"))]]]
+    (testing what
+      (let [home (store! {"hooks/a.js" verbs})]
+        (fs/writeFileSync (path/join home "kits" "hooks" "kit.yaml") (hooks-kit (module home)))
+        (let [{:keys [died]} (kit-in home ["hooks"] {})]
+          (is (nil? died))
+          (is (= verbs (slurp (scenario-file home "a.js"))))
+          (is (= ["a.js"] (get (js->clj (yaml/load (slurp (scenario-file home "contract.yaml")))) "modules")))
+          (is (= ["a.js"] (get (js->clj (js/JSON.parse (slurp (scenario-file home "imposter.json")))) "modules"))))))))

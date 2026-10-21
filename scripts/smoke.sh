@@ -172,7 +172,7 @@ cp -R "$ROOT/examples/kits/webhooks" "$MOCKSYS_HOME/kits/"
 check "kits marks a kit that ships modules" 1 "$("$MS" kits | grep -c 'webhooks .*ships modules: ./verbs.js')"
 out="$("$MS" kit webhooks --secret whsec_kit --port $P3 2>&1)"
 check "kit names the module code it copied" 1 \
-  "$(echo "$out" | grep -c 'webhooks/webhooks runs JavaScript from its modules (./verbs.js)')"
+  "$(echo "$out" | grep -c 'webhooks/webhooks runs JavaScript from its modules (verbs.js)')"
 "$MS" run webhooks/webhooks >/dev/null
 check "the kit's module checks a delivery signed with the kit's secret" 202 \
   "$(deliver $P3 "$(hmac whsec_kit "$body")" "$body")"

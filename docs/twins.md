@@ -124,8 +124,10 @@ $MOCKSYS_HOME/kits/webhooks/
 - The paths under the template's `modules:` are relative to the kit directory. Each must
   be a file inside it, after following symlinks.
 - `kit` copies each module into the scenario directory at the same relative path. A
-  module at `lib/verbs.js` in the kit lands at `<scenario>/lib/verbs.js`. The scenario
-  stays one directory, so `pack`, `publish` and `push` carry its modules.
+  module at `lib/verbs.js` in the kit lands at `<scenario>/lib/verbs.js`, and the
+  scenario's `contract.yaml` lists it as `lib/verbs.js`, however the kit spelled the
+  path. The scenario stays one directory, so `pack`, `publish` and `push` carry its
+  modules.
 - `kit` checks everything before it writes anything: the contract, each module path, and
   each place a module will be copied to. It refuses to write through a symlink that leads
   out of the scenario directory.

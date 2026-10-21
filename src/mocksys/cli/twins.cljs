@@ -175,10 +175,12 @@
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))
           kit-dir  (:dir kit)
           sdir     (store/scenario-dir scenario)
-          plan     (try (when kit-dir
-                          (modules/copy-plan kit-dir sdir
-                                             (modules/scenario-paths kit-dir (get built "modules") "kit directory")))
-                        (catch :default e (die (str "kit " kind ": " (.-message e) "; nothing was written"))))
+          [paths plan] (try (when kit-dir
+                              (let [ps (modules/scenario-paths kit-dir (get built "modules") "kit directory")]
+                                [ps (modules/copy-plan kit-dir sdir ps)]))
+                            (catch :default e (die (str "kit " kind ": " (.-message e) "; nothing was written"))))
+          ;; The copies land at the kit-relative paths, so the contract names those.
+          built    (cond-> built (seq paths) (assoc "modules" paths))
           _        (when-let [errs (seq (:errors (contract/validate built kit-dir)))]
                      (die (str "kit " kind " generated an invalid contract; nothing was written\n  "
                                (str/join "\n  " errs))))
