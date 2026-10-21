@@ -689,6 +689,32 @@
           {:kits builtin-kits :warnings []}
           files))
 
+(def ^:private numeric-flags #{:token-ttl :rate-limit :rate-window})
+
+(defn- flag-value
+  "Parse kit flag `k` from its command-line value `v`. --users and --signing-key
+   read a file. Otherwise the value takes the type of the flag's default."
+  [k v default slurp]
+  (let [file (fn [what parse]
+               (when-not (string? v) (throw (js/Error. (str "--" (name k) " needs a file"))))
+               (try (parse (slurp v))
+                    (catch :default _ (throw (js/Error. (str "could not read --" (name k) " as " what ": " v))))))]
+    (cond
+      (= k :users)         (file "a JSON array" #(js->clj (js/JSON.parse %)))
+      (= k :signing-key)   (file "a PEM file" identity)
+      (or (numeric-flags k) (number? default))
+      (let [n (js/Number v)]
+        (if (or (boolean? v) (js/isNaN n)) (throw (js/Error. (str "--" (name k) " needs a number, got " v))) n))
+      (boolean? default)   (if (string? v) (= v "true") v)
+      :else                v)))
+
+(defn parse-flags
+  "The kit flags in command-line `opts`, parsed. `slurp` reads a file's text.
+   Throws with a message naming the flag when a value does not parse."
+  [kit opts slurp]
+  (into {} (for [[k v] opts :when ((:flags kit) k)]
+             [k (flag-value k v (get-in kit [:defaults k]) slurp)])))
+
 (defn unsupported-flags
   "The options in `opts` that `kit` does not declare, in sorted order. `scenario`
    and `port` belong to the `kit` command itself."

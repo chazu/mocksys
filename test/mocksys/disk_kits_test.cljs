@@ -154,8 +154,10 @@ contract: { operations: [] }
 
 (deftest oauth2-is-a-yaml-kit
   (is (= "built-in" (:source oauth2)))
-  (is (= #{:provider :users :token-ttl} (:flags oauth2)))
-  (is (= "github" (get-in oauth2 [:defaults :provider])))
+  (is (= {:provider {:default "github" :type :string}
+          :users {:default nil :type :json}
+          :token-ttl {:default nil :type :number}}
+         (:flags oauth2)))
   (testing "its contract.yaml keeps the genes form"
     (is (seq (get ((:build oauth2) "oauth/github" {}) "genes")))))
 
