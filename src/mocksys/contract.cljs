@@ -301,6 +301,15 @@
     (cond-> (assoc resp "is" is')
       (seq copies) (update "behaviors" (fnil into []) copies))))
 
+(defn- reserved-var?
+  "A name that `V[name]=...` cannot safely bind: an Object.prototype key (assigning
+   __proto__ swaps the prototype; a lookup of an unbound `constructor` finds Object's)
+   or a __-prefixed name, which mocksys keeps for itself."
+  [n]
+  (or (str/starts-with? n "__")
+      (= "prototype" n)
+      (some #(= n %) (js/Object.getOwnPropertyNames (.-prototype js/Object)))))
+
 (defn- check-calls!
   "Throw unless every `call` in `op` is well formed. Whether its verb exists is left
    to the daemon, the only process that runs module code."
@@ -314,6 +323,8 @@
       (bad! (str "unknown key(s) " (str/join ", " (sort extra)) " (use verb, args, as)")))
     (when-not ((some-fn nil? map?) (get c "args")) (bad! "`args` must be an object"))
     (when-not ((some-fn nil? string?) (get c "as")) (bad! "`as` must be a variable name"))
+    (when (some-> (get c "as") reserved-var?)
+      (bad! (str "`as` cannot be '" (get c "as") "', a name JavaScript objects or mocksys reserve")))
     (when-not modules?
       (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`"))))))
 

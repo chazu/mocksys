@@ -624,9 +624,11 @@
    ;; ctx.respond brands its spec as a Respond, a class private to this injection, so
    ;; only a value it returned ends the request; a plain {respond} is just a value.
    "function Respond(s){this.spec=s;}"
+   ;; V also holds mocksys's own __-prefixed variables (__rl, a kit's __cli); keep them from verbs
+   "function pubVars(){var o={},k;for(k in V){if(k.slice(0,2)!=='__')o[k]=V[k];}return o;}"
    "function callVerb(n,args){var f=(typeof verbs!=='undefined'&&verbs)?verbs[n]:undefined;"
    "if(typeof f!=='function')throw new Error(\"verb '\"+n+\"' is not exported by the scenario's modules\");"
-   "var r;try{r=f({request:request,state:state,vars:Object.assign({},V),args:args,now:now(state),"
+   "var r;try{r=f({request:request,state:state,vars:pubVars(),args:args,now:now(state),"
    "respond:function(s){return new Respond(s);}});}"
    "catch(e){throw new Error(\"verb '\"+n+\"' threw: \"+(e&&e.message!==undefined?e.message:String(e)),{cause:e});}"
    ;; a rejected Promise nobody awaits would crash the daemon, so swallow it
