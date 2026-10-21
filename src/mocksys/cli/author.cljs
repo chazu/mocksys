@@ -75,7 +75,7 @@
   (let [scenario (first pos)]
     (when-not scenario (die "validate needs a scenario: validate <name>"))
     (let [c (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
-          {:keys [errors warnings]} (contract/validate c)]
+          {:keys [errors warnings]} (contract/validate c (store/scenario-dir scenario))]
       (println (str "# validate: " scenario))
       (doseq [w warnings] (println (str "  ⚠ " w)))
       (doseq [e errors]   (println (str "  ✗ " e)))

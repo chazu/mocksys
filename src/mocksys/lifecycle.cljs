@@ -17,7 +17,7 @@
   (let [contract* (store/read-contract scenario)
         port      (when (store/exists? scenario)
                     (try (get (store/read-imposter scenario) "port") (catch :default _ nil)))
-        imposter  (contract/lower contract* port)
+        imposter  (contract/lower contract* port (store/scenario-dir scenario))
         prof      (service/effective scenario)]
     (store/write-imposter! scenario imposter)
     (store/write-mock! scenario (merge (or (store/read-mock scenario) {})

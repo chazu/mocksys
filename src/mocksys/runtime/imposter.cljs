@@ -3,7 +3,8 @@
   of Mountebank's imposter format that mocksys emits, plus its live state.
 
   The inventory, and nothing else:
-    imposter   protocol http, port, name, recordRequests, stubs
+    imposter   protocol http, port, name, recordRequests, stubs, and modules (absolute
+               paths of CommonJS files whose `verbs` the injections can call)
     stub       predicates (see mocksys.runtime.match), responses
     response   exactly one of
                  is      {statusCode headers body _mode}
@@ -18,6 +19,8 @@
   caller passes in."
   (:require [clojure.string :as str]
             [promesa.core :as p]
+            ["node:path" :as path]
+            [mocksys.modules :as modules]
             [mocksys.runtime.match :as match]))
 
 ;; --- validation --------------------------------------------------------------
@@ -52,9 +55,11 @@
 
 (defn compile-injection
   "The function an injection source evaluates to. It runs in this process with
-   `require` in scope, the way Mountebank evaluated it."
-  [src]
-  ((js/Function. "require" (str "return (" src "\n);")) js/require))
+   `require` in scope, the way Mountebank evaluated it, and `verbs`, the custom verbs
+   of the imposter's modules."
+  ([src] (compile-injection src nil))
+  ([src verbs]
+   ((js/Function. "require" "verbs" (str "return (" src "\n);")) js/require verbs)))
 
 (defn proxy-target-error
   "Why `to` cannot be a proxy target, or nil; `field` names it in the message. The
@@ -132,7 +137,10 @@
 
 (defn- validate! [spec]
   (when-not (map? spec) (bad "" "an imposter must be a JSON object"))
-  (only-keys! "" spec #{"protocol" "port" "name" "recordRequests" "stubs"})
+  (only-keys! "" spec #{"protocol" "port" "name" "recordRequests" "stubs" "modules"})
+  (when-not ((some-fn nil? #(and (vector? %) (every? (fn [m] (and (string? m) (path/isAbsolute m))) %)))
+             (get spec "modules"))
+    (bad "" "modules must be absolute paths"))
   (when-not (= "http" (get spec "protocol"))
     (bad "" (str "unsupported protocol " (pr-str (get spec "protocol")) " (only http)")))
   (let [port (get spec "port")]
@@ -153,9 +161,16 @@
 
 ;; --- construction ------------------------------------------------------------
 
-(defn- injections-of [stubs]
+(defn- injections-of [stubs verbs]
   (into {} (for [s stubs, r (get s "responses") :let [src (get r "inject")] :when src]
-             [src (compile-injection src)])))
+             [src (compile-injection src verbs)])))
+
+(defn- verbs-of
+  "The custom verbs of the spec's modules, read from disk on every post so an edited
+   module takes effect when the scenario is run again."
+  [spec]
+  (try (modules/load-verbs (map vector (get spec "modules") (get spec "modules")))
+       (catch :default e (bad "" (ex-message e)))))
 
 (defn create
   "A live imposter (an atom) from a posted spec. Throws ex-info {:code \"bad data\"}
@@ -169,7 +184,7 @@
            :requests   []
            :count      0
            :state      #js {}
-           :injections (injections-of stubs)})))
+           :injections (injections-of stubs (verbs-of spec))})))
 
 ;; --- injection ---------------------------------------------------------------
 

@@ -14,6 +14,7 @@
     consume: {bucket key as miss}                      read+DELETE an entry (single-use)
     lookup:  {bucket key as miss}                      read an entry (no delete)
     resolve: {seed by eq as miss}                      find a seed-array item by field
+    call:    {verb args as}                            run a custom verb from the contract's modules
     respond: {status headers json|jsonVar|text}        the success response
 
   COLLECTION verbs (named, seedable sets of *objects* with CRUD+list — a REST
@@ -282,6 +283,23 @@
   (when-let [s (get effect "sign")]
     (if (map? s) [s] s)))
 
+;; --- call: a custom verb from the contract's modules (non-terminal) ---------
+
+(defn calls-of
+  "`call` is a single map or a list of maps, run in order; return the ordered seq."
+  [effect]
+  (when-let [c (get effect "call")]
+    (if (sequential? c) c [c])))
+
+(defn- call-js
+  "Run one verb (callVerb in the prelude). Its result binds to `as`, unless it is
+   {respond: {...}}, which ends the request with that response."
+  [c]
+  (str "{var _v=callVerb(" (js (get c "verb")) ",deepInterp(" (js (get c "args" {})) ",V));"
+       "if(_v&&typeof _v==='object'&&_v.respond){return verbResp(_v.respond);}"
+       (when-let [as (get c "as")] (str "V[" (js as) "]=_v;"))
+       "}"))
+
 ;; --- relation (membership) verbs: terminal, empty body (default 204) ---
 
 (defn- link-js
@@ -400,6 +418,8 @@
          ;; a signing op almost always has iat/exp reading the clock; force it on so
          ;; those claims aren't stamped at epoch 0 (1970) in a no-ttl build.
          (get e "sign")
+         ;; a verb's ctx.now reads the virtual clock
+         (get e "call")
          (some (fn [[_ spec]] (and (map? spec) (contains? spec "now"))) (get e "bind"))))))
 
 (defn contract-uses-clock?
@@ -441,7 +461,7 @@
 (defn- effect-body-js
   "The ordered statement list (a single JS string) for one operation's effects.
    Read-then-write order: bind inputs, consume/lookup/resolve to pull values out of
-   state+seed (early-returning on a miss), THEN mint fresh ids. An op ends EITHER in
+   state+seed (early-returning on a miss), run custom verbs, THEN mint fresh ids. An op ends EITHER in
    a terminal collection verb (CRUD) OR the store+respond path (a handshake)."
   [effect]
   (let [coll-verb (collection-verb effect)]
@@ -473,6 +493,8 @@
       ;; find: read-phase collection lookup(s) (miss -> early return). Non-terminal,
       ;; so it precedes mint and composes before either terminal path.
       (map find-js (finds-of effect))
+      ;; call: custom verbs, after every read and before mint, in list order
+      (map call-js (calls-of effect))
       ;; mint: random hex ids (after reads, so a minted id can't be clobbered)
       (for [[n spec] (get effect "mint")]
         (str "V[" (js n) "]=rnd(" (js (or (get spec "prefix") "")) ");"))
@@ -596,6 +618,20 @@
    ;; --- JWT signing (the one place an injection uses a Node built-in: crypto) ---
    "function b64url(x){var b=(typeof Buffer!=='undefined'&&Buffer.isBuffer(x))?x:Buffer.from(String(x));"
    "return b.toString('base64').replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}"
+   ;; --- custom verbs. `verbs` is a free variable that compile-injection binds. A verb
+   ;; runs synchronously, so one request's read-modify-write of `state` cannot
+   ;; interleave with another's.
+   "function callVerb(n,args){var f=(typeof verbs!=='undefined'&&verbs)?verbs[n]:undefined;"
+   "if(typeof f!=='function')throw new Error(\"verb '\"+n+\"' is not exported by the scenario's modules\");"
+   "var r;try{r=f({request:request,state:state,vars:Object.assign({},V),args:args,now:now(state)});}"
+   "catch(e){throw new Error(\"verb '\"+n+\"' threw: \"+(e&&e.message!==undefined?e.message:String(e)),{cause:e});}"
+   ;; a rejected Promise nobody awaits would crash the daemon, so swallow it
+   "if(r&&typeof r.then==='function'){if(typeof r.catch==='function')r.catch(function(){});"
+   "throw new Error(\"verb '\"+n+\"' returned a Promise; verbs must be synchronous\");}return r;}"
+   "function verbResp(r){var h=Object.assign({},r.headers||{}),json=('json' in r),ct=false,k;"
+   "for(k in h){if(k.toLowerCase()==='content-type')ct=true;}if(json&&!ct)h['Content-Type']='application/json';"
+   "return {statusCode:r.status||200,headers:withRl(h),"
+   "body:json?JSON.stringify(r.json):(r.body==null?'':typeof r.body==='string'?r.body:JSON.stringify(r.body))};}"
    "function signJwt(header,claims,pem){var enc=b64url(JSON.stringify(header))+'.'+b64url(JSON.stringify(claims));"
    "var sig=require('crypto').createSign('RSA-SHA256').update(enc).sign(pem);return enc+'.'+b64url(sig);}"))
 
