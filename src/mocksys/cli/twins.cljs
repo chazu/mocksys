@@ -132,8 +132,10 @@
 (defn cmd-kit
   "Generate a complete (often stateful) mock — a digital twin — from a recipe in one
    shot:
-     kit okta [--users FILE.json] [--scenario NAME] [--port N]
-     kit oauth2 [--provider github|codeberg] [--users FILE.json] [--scenario NAME] [--port N]"
+     kit okta [--users FILE.json] [--rate-limit N] [--rate-window S] [--token-ttl S]
+              [--issuer URL] [--signing-key FILE.pem] [--scenario NAME] [--port N]
+     kit oauth2 [--provider github|codeberg] [--users FILE.json] [--token-ttl S]
+                [--scenario NAME] [--port N]"
   [{:keys [pos opts]}]
   (let [kind (first pos)]
     (when-not kind
@@ -142,6 +144,9 @@
     (let [builder  (or (:build (get kits/kits kind))
                        (die (str "unknown kit '" kind "'. known: "
                                  (str/join ", " (sort (keys kits/kits))))))
+          _        (when-let [bad (seq (kits/unsupported-flags kind opts))]
+                     (die (str "kit " kind " does not support "
+                               (str/join ", " (map #(str "--" (name %)) bad)))))
           provider (when (string? (:provider opts)) (:provider opts))
           users    (when (string? (:users opts))
                      (try (js->clj (js/JSON.parse (store/slurp (:users opts))))

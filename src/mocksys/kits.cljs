@@ -362,8 +362,9 @@
 
 (defn oauth2
   "An OAuth2 provider twin: account picker, single-use codes, token table, userinfo.
-   Composed from the OIDC handshake gene."
-  [scenario provider users]
+   Composed from the OIDC handshake gene. With `token-ttl` (seconds), issued tokens
+   expire on the virtual clock."
+  [scenario provider users token-ttl]
   (let [users (or (seq users) (get default-users provider) (get default-users "github"))
         authz (str "/" provider "/login/oauth/authorize")
         token (str "/" provider "/login/oauth/access_token")]
@@ -374,7 +375,7 @@
       "summary"  (str provider " OAuth2 provider (mock) — picker, single-use codes, userinfo")
       "seed"     {"users" users}}
      (oidc-handshake {:authz authz :token token :userinfo (user-path provider)
-                      :seed-name "users" :users users})
+                      :seed-name "users" :users users :token-ttl token-ttl})
      {:operations
       [{"id"      "index"
         "summary" "account index"
@@ -532,14 +533,26 @@
 ;; --- registry -------------------------------------------------------------
 
 (def kits
-  "name -> {:doc :build}. Each builder takes [scenario opts] and returns a contract."
-  {"oauth2" {:doc "OAuth2 provider (picker, single-use codes, userinfo)"
-             :build (fn [scenario {:keys [provider users]}]
-                      (oauth2 scenario (or provider "github") users))}
+  "name -> {:doc :flags :build}. `:flags` are the `kit` options the builder honors.
+   Each builder takes [scenario opts] and returns a contract."
+  {"oauth2" {:doc "OAuth2 provider (picker, single-use codes, userinfo) [--token-ttl S]"
+             :flags #{:provider :users :token-ttl}
+             :build (fn [scenario {:keys [provider users token-ttl]}]
+                      (oauth2 scenario (or provider "github") users token-ttl))}
    "okta"   {:doc "Okta twin: users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + membership [--rate-limit N] [--token-ttl S] [--issuer URL] [--signing-key FILE.pem]"
+             :flags #{:users :rate-limit :rate-window :token-ttl :issuer :signing-key}
              :build (fn [scenario {:keys [users rate-limit token-ttl issuer signing-key]}]
                       (okta scenario users {:rate-limit rate-limit :token-ttl token-ttl
                                             :issuer issuer :signing-key signing-key}))}})
+
+(defn unsupported-flags
+  "The kit flags present in `opts` that kit `kind` would ignore, in sorted order."
+  [kind opts]
+  (let [all-flags (into #{} (mapcat :flags) (vals kits))]
+    (->> (keys opts)
+         (filter #(and (all-flags %) (not ((get-in kits [kind :flags]) %))))
+         sort
+         vec)))
 
 (def genes
   "The reusable behavioral genes a kit composes — shown by `mocksys genes`."

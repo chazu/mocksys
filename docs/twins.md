@@ -23,7 +23,7 @@ mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use 
 | Kit | Options | Produces |
 |---|---|---|
 | `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--issuer URL` `--signing-key FILE.pem` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo minting **signed RS256 JWTs** with published JWKS + discovery — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` sets the OIDC token lifetime on the virtual clock (default 3600 s), `--signing-key` pins the JWT key, `--issuer` sets the JWT `iss`/`aud` for requests that carry no `Host` header. |
-| `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
+| `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--token-ttl S` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
 
 The default scenario id is `oauth/<provider>` for `oauth2` and `okta/okta` for `okta`;
 override with `--scenario`. After generation, treat the twin like any scenario: `run`,
@@ -63,8 +63,9 @@ is the `:jwt` entry of `oidc-handshake`'s `:user-source`, `error-envelope` is th
 `okta-error` body helper, and `virtual-clock` is the contract's `state.clock` (or turns on
 implicitly, see [effects.md](effects.md#the-virtual-clock)). The `genes` list that `mocksys
 genes` prints is display-only. To extend mocksys with a new twin, write a builder that
-composes the genes it needs, register it in the `kits` map, and parse any new flags in
-`cmd-kit` (`src/mocksys/cli/twins.cljs`), which passes them to every builder. `oauth2` and
+composes the genes it needs and register it in the `kits` map with the `:flags` it honors.
+`kit` rejects a flag that a kit doesn't list. A brand-new flag also needs parsing in
+`cmd-kit` (`src/mocksys/cli/twins.cljs`), which passes the parsed flags to every builder. `oauth2` and
 `okta` are the worked examples.
 
 ### Anatomy of the `okta` twin

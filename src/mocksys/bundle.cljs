@@ -11,7 +11,7 @@
             [mocksys.service :as service]))
 
 (defn- member-paths
-  "Paths (relative to .mocks) to include for `scenario`: its dir + service yaml."
+  "Paths (relative to the store root) to include for `scenario`: its dir + service yaml."
   [scenario]
   (let [svc      (service/service-of scenario)
         svc-path (str "services/" svc ".yaml")]
@@ -34,7 +34,7 @@
       (throw (js/Error. (str "tar failed packing " scenario))))))
 
 (defn unpack!
-  "Extract a bundle into .mocks/. Returns the scenario id(s) it contained."
+  "Extract a bundle into the store. Returns the scenario id(s) it contained."
   [file]
   (when-not (fs/existsSync file) (throw (js/Error. (str "no such bundle: " file))))
   (fs/mkdirSync store/root #js {:recursive true})

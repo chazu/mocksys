@@ -26,7 +26,7 @@
   (let [file (first pos)]
     (when-not file (die "unpack needs a bundle: unpack <file.mock.tgz>"))
     (let [names (bundle/unpack! file)]
-      (println (str "▣ unpacked " (str/join ", " names) " into .mocks/"))
+      (println (str "▣ unpacked " (str/join ", " names) " into " store/root))
       (doseq [n names] (println (str "  run it with:  mocksys run " n))))))
 
 (defn cmd-home [_]

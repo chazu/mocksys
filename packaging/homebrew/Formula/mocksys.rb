@@ -50,7 +50,7 @@ class Mocksys < Formula
   end
 
   test do
-    assert_match "agent-native", shell_output("#{bin}/mocksys help")
+    assert_match "author reusable mock fixtures", shell_output("#{bin}/mocksys help")
     # contract -> compile path works fully offline (no daemon needed):
     ENV["MOCKSYS_HOME"] = testpath/"store"
     system bin/"mocksys", "add", "t/ping", "--request", "GET /ping", "--text", "pong"

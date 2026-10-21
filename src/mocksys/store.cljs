@@ -1,5 +1,5 @@
 (ns mocksys.store
-  "On-disk scenario layout under .mocks/ in the caller's cwd.
+  "On-disk scenario layout under the store `root` ($MOCKSYS_HOME, else ~/.mocksys).
 
   Our own metadata is YAML (agent- and human-readable); the Mountebank imposter
   is kept as JSON, its native format, so it round-trips with zero translation."
@@ -165,7 +165,7 @@
 ;; --- catalog --------------------------------------------------------------
 
 (defn list-scenarios
-  "Every frozen scenario, by walking .mocks/ for imposter.json. Scenario id is
+  "Every frozen scenario, by walking `root` for imposter.json. Scenario id is
    the directory relative to root (so nested 'github/create-issue' survives)."
   []
   (if-not (fs/existsSync root)

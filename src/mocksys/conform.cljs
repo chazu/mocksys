@@ -9,8 +9,8 @@
     [{\"method\":\"GET\",\"path\":\"/api/v1/users\",\"expect\":200},
      {\"method\":\"POST\",\"path\":\"/api/v1/users\",\"headers\":{...},\"body\":{...}}]
   `body` may be a JSON value (sent as JSON) or a string. `expect` (status) is used
-  only in the no-live golden mode. `ignore` (per request or global) masks volatile
-  JSON keys before the body diff."
+  only in the no-live golden mode. `--ignore` (global, comma-separated) masks
+  volatile JSON keys before the body diff."
   (:require [promesa.core :as p]
             [clojure.string :as str]))
 

@@ -14,7 +14,7 @@
   (let [name (first pos)]
     (when-not name (die (str "init needs a service: init <" (str/join "|" (sort (keys service/templates))) ">")))
     (let [tmpl (service/write-template! name)]
-      (println (str "✚ initialized service '" name "'  ->  .mocks/services/" name ".yaml"))
+      (println (str "✚ initialized service '" name "'  ->  " store/root "/services/" name ".yaml"))
       (println "  (a recording profile: redact/volatile headers + default target)")
       (when-let [t (:default_target tmpl)] (println (str "  default target: " t)))
       (println "  author a scenario:")

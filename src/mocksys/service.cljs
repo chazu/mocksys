@@ -62,7 +62,7 @@
     (first (str/split scenario #"/"))))
 
 (defn write-template!
-  "Materialize a built-in template under .mocks/services/. Throws on unknown."
+  "Materialize a built-in template under the store's services/. Throws on unknown."
   [name]
   (if-let [tmpl (templates name)]
     (do (store/write-service! name tmpl) tmpl)

@@ -110,7 +110,10 @@
     (when-not scenario (die "use needs a scenario: use <name> --op ID --example NAME"))
     (when-not (string? op)  (die "use needs --op ID  (see `examples <name>`)"))
     (when-not (string? ex)  (die "use needs --example NAME  (see `examples <name>`)"))
-    (let [c (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))]
+    (let [c   (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
+          ids (map #(get % "id") (get c "operations"))]
+      (when-not (some #{op} ids)
+        (die (str "no operation '" op "' in '" scenario "'. known: " (str/join ", " ids))))
       (when (empty? (contract/example-locations c op ex))
         (die (str "no example '" ex "' on operation '" op "' — see `examples " scenario "`")))
       (let [on?  (not (:off opts))

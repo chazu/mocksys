@@ -32,9 +32,9 @@
      "  state.collections: {users: {idField: id, seed: users}}   # in contract.yaml"
      "  effect: {bind: {...}, create|get|update|remove|list: {collection: users, ...}}"
      "Each operation keeps its schema plus *named examples* you select to serve:"
-     "  mocksys examples stripe/create-charge          # list examples, [x]=in play"
-     "  mocksys use stripe/create-charge --op createCharge --example card_declined --only"
-     "  mocksys validate stripe/create-charge          # schema/structure check"
+     "  mocksys examples stripe/createcharge          # list examples, [x]=in play"
+     "  mocksys use stripe/createcharge --op createcharge --example card_declined --only"
+     "  mocksys validate stripe/createcharge          # schema/structure check"
      ""
      "## Run it & wire a test/app to the mock"
      "  mocksys run acme/get-widget                    # host the mock (prints a port)"
@@ -94,7 +94,7 @@
   (println)
   (println "  TWINS (full behavioral clones in one command — see `mocksys genes`)")
   (println "  mocksys kit okta [--users F.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--scenario NAME] [--port N]")
-  (println "  mocksys kit oauth2 [--provider github|codeberg] [--users F.json] [--port N]   OAuth2 provider twin")
+  (println "  mocksys kit oauth2 [--provider github|codeberg] [--users F.json] [--token-ttl S] [--port N]   OAuth2 provider twin")
   (println "  mocksys genes                                   list the behavioral genes kits compose")
   (println "  mocksys conform <name> --corpus FILE [--against URL] [--ignore k1,k2]   replay+diff (exit 1 on drift)")
   (println "  mocksys clock <name> [advance <1h|30m|45s> | set <ts>]   read/move a twin's deterministic virtual clock")

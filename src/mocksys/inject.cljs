@@ -197,7 +197,7 @@
     (filter-guard
      (str "var _p=coll(state," coll ").list({filter:" filt ",after:" after ",limit:" limit "});"
           "var _h={};"
-          (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",{next:_p.next});}"))
+          (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",Object.assign({},V,{next:_p.next}));}"))
           "return collResp(" status ",_p.items,_h);")
      l)))
 

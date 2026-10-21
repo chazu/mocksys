@@ -91,8 +91,8 @@ Authoring variants is just (de)selecting examples — swap the happy path for an
 without editing bodies:
 
 ```sh
-mocksys examples stripe/createCharge                              # list, [x]=in play
-mocksys use stripe/createCharge --op createCharge --example card_declined --only
+mocksys examples stripe/createcharge                              # list, [x]=in play
+mocksys use stripe/createcharge --op createcharge --example card_declined --only
 ```
 
 `--only` clears the operation's other selections first (the happy↔error swap).
