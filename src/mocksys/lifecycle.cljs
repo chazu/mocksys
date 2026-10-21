@@ -8,6 +8,7 @@
             [mocksys.store :as store]
             [mocksys.service :as service]
             [mocksys.contract :as contract]
+            [mocksys.proto :as proto]
             [mocksys.inject :as inject]))
 
 (defn compile!
@@ -17,7 +18,7 @@
   (let [contract* (store/read-contract scenario)
         port      (when (store/exists? scenario)
                     (try (get (store/read-imposter scenario) "port") (catch :default _ nil)))
-        imposter  (contract/lower contract* port)
+        imposter  (proto/with-descriptor (contract/lower contract* port) contract* (store/scenario-dir scenario))
         prof      (service/effective scenario)]
     (store/write-imposter! scenario imposter)
     (store/write-mock! scenario (merge (or (store/read-mock scenario) {})
@@ -39,6 +40,25 @@
               c    (contract/lift (store/read-imposter scenario) scenario (:service prof))]
           (store/write-contract! scenario c)
           c))))
+
+(defn validate
+  "`contract/validate` for a scenario's contract, plus, for a grpc contract, the
+   checks that need its proto on disk. nil when the scenario has no contract."
+  [scenario]
+  (when-let [c (ensure-contract! scenario)]
+    (let [result (contract/validate c)]
+      (if (seq (contract/gene-errors c))
+        result
+        (update result :errors into
+                (proto/contract-errors c (get (contract/expand c) "operations") (store/scenario-dir scenario)))))))
+
+(defn address
+  "Where a consumer reaches `scenario` on `port`: a URL for HTTP, and host:port for
+   gRPC, which is the form gRPC clients take as a target."
+  [scenario port]
+  (if (proto/grpc? (store/read-contract scenario))
+    (str "localhost:" port)
+    (str "http://localhost:" port)))
 
 (defn ensure-compiled!
   "Rebuild imposter.json from the contract (lifting one first for a legacy

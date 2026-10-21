@@ -122,6 +122,37 @@
                 (callback nil value))))
           (p/catch (fn [e] (callback #js {:code (codes "INTERNAL") :details (ex-message e)})))))))
 
+;; --- the virtual clock ------------------------------------------------------------
+;; A twin with a virtual clock has a stub at POST /_mocksys/clock (see
+;; inject/clock-control-stub). No proto declares that path, so every grpc imposter
+;; also serves it as a raw method whose messages are JSON text, and `mocksys clock`
+;; calls it through `clock-call`.
+
+(def ^:private clock-path "/_mocksys/clock")
+(defn- text-in [^js buf] (.toString buf "utf8"))
+(defn- text-out [s] (js/Buffer.from (str s) "utf8"))
+
+(defn- clock-handler [imp]
+  (fn [^js call callback]
+    (-> (p/let [out (imposter/respond imp {"method" "POST" "path" clock-path "query" {} "headers" {}
+                                           "body" (.-request call)}
+                                      {:proxy! no-proxy})]
+          (callback nil (:body out)))
+        (p/catch (fn [e] (callback #js {:code (codes "INTERNAL") :details (ex-message e)}))))))
+
+(defn clock-call
+  "POST `body` to the clock of the grpc twin on `port`; resolves the parsed reply."
+  [port body]
+  (let [^js client (grpc/Client. (str "127.0.0.1:" port) (.createInsecure grpc/credentials))]
+    (js/Promise.
+     (fn [resolve reject]
+       (.makeUnaryRequest client clock-path text-out text-in (js/JSON.stringify (clj->js body))
+                          (fn [^js err reply]
+                            (.close client)
+                            (if err
+                              (reject (js/Error. (.-details err)))
+                              (resolve (try (js->clj (js/JSON.parse reply)) (catch :default _ nil))))))))))
+
 ;; --- servers -------------------------------------------------------------------
 
 (defn- package-definition [descriptor]
@@ -161,6 +192,7 @@
         stop         (fn [] (.forceShutdown server) (p/resolved nil))]
     (doseq [[svc impl] (services imp pkg-def)]
       (.addService server svc (clj->js impl)))
+    (.register server clock-path (clock-handler imp) text-out text-in "unary")
     (-> (p/let [_ (bind! server (str "127.0.0.1:" port))
                 _ (p/catch (bind! server (str "[::1]:" port)) (fn [_] nil))]
           [{:stop stop}])
