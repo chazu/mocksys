@@ -11,6 +11,7 @@
             [mocksys.runtime :as runtime]
             [mocksys.contract :as contract]
             [mocksys.proto :as proto]
+            [mocksys.runtime.grpc :as grpc]
             [mocksys.grpc-fixture :as fx]))
 
 (defn- free-port []
@@ -198,3 +199,18 @@
           (is (= {"key" "a" "value" "apple" "version" "3" "kind" "PLAIN"} (:ok got)) "create then get")
           (is (= [(codes "NOT_FOUND") "no item b"] [(:code miss) (:details miss)]) "a miss is NOT_FOUND")
           (is (= ["a"] (map #(get % "key") (get-in lst [:ok "items"]))) "list"))))))
+
+(deftest a-grpc-twins-virtual-clock-is-reachable
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (p/let [dir    (fx/kv-dir)
+                port   (free-port)
+                twin   (assoc-in kv-contract ["state" "clock"] {"start" 1000})
+                imp    (assoc (contract/lower twin port)
+                              "descriptor" (:descriptor (proto/read-proto (path/join dir "kv.proto"))))
+                _      (admin-call (str admin "/imposters") "POST" imp)
+                before (grpc/clock-call port {})
+                after  (grpc/clock-call port {"advance" 60})]
+          (is (= 1000 (get before "now")))
+          (is (= 1060 (get after "now"))))))))
