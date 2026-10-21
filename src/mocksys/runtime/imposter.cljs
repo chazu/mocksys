@@ -86,6 +86,22 @@
                    (bad path "unsupported jsonpath selector (plain paths only)"))))
       (bad path (str "unsupported behavior " (pr-str k))))))
 
+(defn- header-value? [v]
+  (or (string? v) (number? v) (boolean? v)
+      (and (vector? v) (every? #(or (string? %) (number? %)) v))))
+
+(defn- check-is! [path v]
+  (when-not (map? v) (bad path "is must be an object"))
+  (only-keys! path v #{"statusCode" "headers" "body" "_mode" "_proxyResponseTime"})
+  (when-some [code (get v "statusCode")]
+    (let [n (cond (integer? code) code (and (string? code) (re-matches #"\d+" code)) (js/parseInt code 10))]
+      (when-not (and n (<= 100 n 599)) (bad path (str "is.statusCode must be an HTTP status from 100 to 599, got " (pr-str code))))))
+  (when-some [hs (get v "headers")]
+    (when-not (map? hs) (bad path "is.headers must be an object"))
+    (doseq [[k hv] hs]
+      (when-not (header-value? hv)
+        (bad path (str "is.headers[" (pr-str k) "] must be a string, number or array of strings"))))))
+
 (defn- check-response! [path r]
   (when-not (map? r) (bad path "a response must be an object"))
   (let [types (filter response-types (keys r))]
@@ -94,11 +110,11 @@
     (only-keys! path r (conj response-types "behaviors"))
     (let [v (get r (first types))]
       (case (first types)
-        "is"     (do (when-not (map? v) (bad path "is must be an object"))
-                     (only-keys! path v #{"statusCode" "headers" "body" "_mode" "_proxyResponseTime"}))
+        "is"     (check-is! path v)
         "inject" (do (when-not (string? v) (bad path "inject must be a function source"))
-                     (try (compile-injection v)
-                          (catch :default e (bad path (str "injection does not compile: " (ex-message e))))))
+                     (let [f (try (compile-injection v)
+                                  (catch :default e (bad path (str "injection does not compile: " (ex-message e)))))]
+                       (when-not (fn? f) (bad path "inject must be a function"))))
         "proxy"  (do (when-not (map? v) (bad path "proxy must be an object"))
                      (only-keys! path v #{"to" "mode" "predicateGenerators"})
                      (when-let [e (proxy-target-error (get v "to"))] (bad path e))
