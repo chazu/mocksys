@@ -139,7 +139,12 @@ hmac() { node -e 'console.log("sha256="+require("crypto").createHmac("sha256",pr
 deliver() { # <port> <signature> <body>
   status_of -X POST "localhost:$1/webhooks" -H "X-Hub-Signature-256: $2" -H 'Content-Type: application/json' -d "$3"; }
 body='{"action":"opened","number":7}'
-check "validate loads the module and its verbs" 0 "$("$MS" validate demo/webhooks >/dev/null 2>&1 && echo 0 || echo 1)"
+out="$("$MS" validate demo/webhooks 2>&1)" && code=0 || code=$?
+check "validate passes without running the module" 0 "$code"
+check "and says when the verbs are checked" 1 "$(echo "$out" | grep -c 'verbs are checked when the scenario runs')"
+out="$(MOCKSYS_NO_INJECTION=1 "$MS" run demo/webhooks --port $P3 2>&1)" && code=0 || code=$?
+check "MOCKSYS_NO_INJECTION refuses a scenario with modules" 1 "$code"
+check "and names them" 1 "$(echo "$out" | grep -c 'runs JavaScript from its modules (./verbs.js)')"
 "$MS" run demo/webhooks --port $P3 >/dev/null
 check "a delivery signed with the secret is accepted" 202 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
 check "a forged signature is 401" 401 "$(deliver $P3 "$(hmac wrong "$body")" "$body")"
