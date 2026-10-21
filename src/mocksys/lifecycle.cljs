@@ -13,7 +13,8 @@
             [mocksys.contract :as contract]
             [mocksys.proto :as proto]
             [mocksys.inject :as inject]
-            [mocksys.modules :as modules]))
+            [mocksys.modules :as modules]
+            [mocksys.tls :as tls]))
 
 (defn compile!
   "Lower a scenario's contract to imposter.json and refresh mock.yaml. Returns the
@@ -57,12 +58,14 @@
                 (proto/contract-errors c (get (contract/expand c) "operations") (store/scenario-dir scenario)))))))
 
 (defn address
-  "Where a consumer reaches `scenario` on `port`: a URL for HTTP, and host:port for
-   gRPC, which is the form gRPC clients take as a target."
+  "Where a consumer reaches `scenario` on `port`: a URL for HTTP(S), and host:port
+   for gRPC, which is the form gRPC clients take as a target."
   [scenario port]
-  (if (proto/grpc? (store/read-contract scenario))
-    (str "localhost:" port)
-    (str "http://localhost:" port)))
+  (let [contract (store/read-contract scenario)]
+    (cond
+      (proto/grpc? contract)  (str "localhost:" port)
+      (get contract "tls")    (str "https://localhost:" port)
+      :else                   (str "http://localhost:" port))))
 
 (defn ensure-compiled!
   "Rebuild imposter.json from the contract (lifting one first for a legacy
@@ -82,7 +85,8 @@
    the already-running port > a port *pinned* on the contract > a fresh free port.
    An explicit --port is persisted onto the contract so it stays pinned. Always
    recompiles from the contract and (re)posts with recordRequests=true so
-   `requests`/`assert` have data."
+   `requests`/`assert` have data. A tls contract is posted with a certificate and
+   key that only the post carries."
   [scenario port-opt]
   ;; before compiling, so nothing of a refused scenario is built or posted
   (when-let [ms (and (no-injection?) (seq (get (store/read-contract scenario) "modules")))]
@@ -105,8 +109,10 @@
                        pinned   pinned
                        :else    (mb/free-port))]
       (mb/delete-imposter! port)
-      (let [imp (cond-> (assoc imposter "port" port "name" scenario "recordRequests" true)
-                  (get imposter "modules") (update "modules" #(modules/absolute (store/scenario-dir scenario) %)))]
+      (let [dir (store/scenario-dir scenario)
+            imp (cond-> (assoc imposter "port" port "name" scenario "recordRequests" true)
+                  (get imposter "modules") (update "modules" #(modules/absolute dir %))
+                  (get imposter "tls")     (update "tls" #(tls/credentials dir %)))]
         (p/let [_ (mb/post-imposter! imp)]
           (when (and port-opt contract (not= port pinned))
             (store/write-contract! scenario (assoc contract "port" port)))
