@@ -12,7 +12,8 @@
             ["node:fs" :as fs]
             ["node:net" :as net]
             ["node:path" :as path]
-            [mocksys.store :as store]))
+            [mocksys.store :as store]
+            [mocksys.version :refer [version]]))
 
 (def default-admin-port 2626)
 
@@ -48,20 +49,52 @@
 
 ;; --- Lifecycle ------------------------------------------------------------
 
+(declare list-imposters)
+
 (defn- daemon-status
-  "What answers on the admin port: :up (the mocksys daemon), :foreign (something
-   else), or :down (nothing)."
+  "What answers on the admin port: {:state :up :version :pid} for the mocksys
+   daemon, {:state :foreign} for something else, {:state :down} for nothing."
   []
   ;; a bad MOCKSYS_ADMIN_PORT must surface, not be read as "down" by the catch below
   (admin-port)
   (-> (fetch-json "GET" "/")
-      (p/then (fn [{:keys [body]}] (if (= "mocksys" (get body "name")) :up :foreign)))
-      (p/catch (fn [e] (if (instance? js/SyntaxError e) :foreign :down)))))
+      (p/then (fn [{:keys [body]}]
+                (if (and (map? body) (= "mocksys" (get body "name")))
+                  {:state :up :version (get body "version") :pid (get body "pid")}
+                  {:state :foreign})))
+      (p/catch (fn [e] {:state (if (instance? js/SyntaxError e) :foreign :down)}))))
 
 (defn up?
   "True if the mocksys daemon is answering on the admin port."
   []
-  (p/let [s (daemon-status)] (= :up s)))
+  (p/let [s (daemon-status)] (= :up (:state s))))
+
+(defn- foreign-error []
+  (js/Error. (str "port " (admin-port) " is taken by something that is not the mocksys "
+                  "daemon; free it or set MOCKSYS_ADMIN_PORT")))
+
+(defn- wait-down [deadline pid]
+  (p/let [running (up?)]
+    (cond
+      (not running)              true
+      (> (js/Date.now) deadline) (throw (js/Error. (str "the mocksys daemon (pid " pid ") did not stop; kill " pid)))
+      :else                      (p/do (p/delay 100) (wait-down deadline pid)))))
+
+(defn stop-daemon!
+  "Stop the daemon on the admin port. Resolves the mocks it was serving, as
+   [{:port :name}], or nil when no daemon was running."
+  []
+  (p/let [{:keys [state pid]} (daemon-status)]
+    (case state
+      :down    nil
+      :foreign (throw (foreign-error))
+      :up      (p/let [running          (list-imposters)
+                       {:keys [status]} (fetch-json "DELETE" "/")
+                       _                (when-not (= 200 status)
+                                          (throw (js/Error. (str "the mocksys daemon (pid " pid ") is too old to be "
+                                                                 "stopped this way; stop it with: kill " pid))))
+                       _                (wait-down (+ (js/Date.now) 10000) pid)]
+                 running))))
 
 (defn daemon-command
   "How to re-run mocksys as the daemon, as [cmd args], from the running process's
@@ -111,28 +144,42 @@
 (defn- wait-up [ended log deadline]
   (p/let [ok (up?)]
     (cond
-      ok                       true
-      (some-> ended deref)     (throw (startup-error @ended log))
+      ok                         true
+      (some-> ended deref)       (throw (startup-error @ended log))
       (> (js/Date.now) deadline) (throw (startup-error (str "did not come up on 127.0.0.1:" (admin-port)) log))
-      :else                    (p/do (p/delay 100) (wait-up ended log deadline)))))
+      :else                      (p/do (p/delay 100) (wait-up ended log deadline)))))
 
 (defn- start-daemon! [{:keys [spawn! log timeout-ms]}]
   (wait-up (spawn! log) log (+ (js/Date.now) timeout-ms)))
 
+(defn- restart-notice [old-version mocks]
+  (str "mocksys: replacing the daemon on 127.0.0.1:" (admin-port) " (it runs "
+       (if old-version (str "mocksys " old-version) "an older mocksys") ", this is " version "); "
+       (if (seq mocks)
+         (str "its " (count mocks) " running mock(s) stop: " (str/join ", " (keep :name mocks))
+              ". Run them again.")
+         "it had no running mocks.")))
+
 (defn ensure-up!
-  "Make sure the daemon is listening; start one if not. `opts` replaces how it is
-   started, for tests: :spawn! (fn [log] ended-atom-or-nil), :log and :timeout-ms."
+  "Make sure this mocksys version's daemon is listening. Start one if none is;
+   replace one from another version, saying so on stderr, since its mocks are lost.
+   `opts` replaces the effects, for tests: :spawn! (fn [log] ended-atom-or-nil),
+   :log, :timeout-ms and :warn! (fn [line])."
   ([] (ensure-up! {}))
   ([opts]
    (let [opts (merge {:log        (log-path)
                       :spawn!     #(spawn-daemon! (daemon-command (this-process)) %)
-                      :timeout-ms 10000}
+                      :timeout-ms 10000
+                      :warn!      #(binding [*print-fn* *print-err-fn*] (println %))}
                      opts)]
-     (p/let [s (daemon-status)]
-       (case s
-         :up      true
-         :foreign (throw (js/Error. (str "port " (admin-port) " is taken by something that is not the mocksys "
-                                          "daemon; free it or set MOCKSYS_ADMIN_PORT")))
+     (p/let [{:keys [state] :as s} (daemon-status)]
+       (case state
+         :up      (if (= version (:version s))
+                    true
+                    (p/let [mocks (stop-daemon!)]
+                      ((:warn! opts) (restart-notice (:version s) mocks))
+                      (start-daemon! opts)))
+         :foreign (throw (foreign-error))
          :down    (start-daemon! opts))))))
 
 (defn free-port

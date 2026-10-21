@@ -116,3 +116,97 @@
                                                                          ["-e" "console.log('listening soon'); setTimeout(() => {}, 3000)"]] %)}))]
           (is (str/includes? (str out) (str "the mocksys daemon did not come up on 127.0.0.1:" port)))
           (is (str/includes? (str out) "listening soon")))))))
+
+(def ^:private this-version (.-version (js/require "../package.json")))
+
+(defn- old-daemon
+  "A stand-in for a daemon from another mocksys version on `port`: it identifies
+   itself with `version`, lists one mock, and on DELETE / closes (unless
+   `stoppable?` is false, like a daemon from before DELETE / existed). Resolves
+   {:server :calls}."
+  [port version stoppable?]
+  (let [calls (atom [])
+        srv   (atom nil)]
+    (p/let [s (serve-on port
+                        (fn [^js req ^js res]
+                          (swap! calls conj [(.-method req) (.-url req)])
+                          (let [reply (fn [st body] (.writeHead res st #js {"Content-Type" "application/json"})
+                                        (.end res (js/JSON.stringify (clj->js body))))]
+                            (case [(.-method req) (.-url req)]
+                              ["GET" "/"]          (reply 200 (cond-> {"name" "mocksys" "pid" 4242}
+                                                                version (assoc "version" version)))
+                              ["GET" "/imposters"] (reply 200 {"imposters" [{"port" 9999 "name" "okta/okta"}]})
+                              ["DELETE" "/"]       (if stoppable?
+                                                     (do (.on res "finish" #(let [^js s @srv] (.close s) (.closeAllConnections s)))
+                                                         (reply 200 {"stopped" 1}))
+                                                     (reply 404 {}))
+                              (reply 404 {})))))]
+      (reset! srv s)
+      {:server s :calls calls})))
+
+(defn- in-process-spawn
+  "A spawn! that starts the real runtime in this process on the admin port, and
+   records the daemon so the test can stop it."
+  [daemons]
+  (fn [_]
+    (-> (runtime/start! {:host "127.0.0.1" :port (mb/admin-port)})
+        (p/then #(swap! daemons conj %)))
+    nil))
+
+(deftest a-daemon-from-another-version-is-replaced
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [daemons (atom [])
+                warned  (atom [])
+                old     (old-daemon port "0.0.0-old" true)
+                out     (outcome (mb/ensure-up! {:spawn! (in-process-spawn daemons) :log (tmp-log)
+                                                 :warn!  #(swap! warned conj %)}))
+                now     (mb/fetch-json "GET" "/")]
+          (is (= :resolved out))
+          (is (some #{["DELETE" "/"]} @(:calls old)) "the old daemon was asked to stop")
+          (is (= this-version (get-in now [:body "version"])) "a daemon of this version answers now")
+          (is (= 1 (count @warned)) "one line says so")
+          (is (str/includes? (first @warned) (str "replacing the daemon on 127.0.0.1:" port)))
+          (is (str/includes? (first @warned) (str "it runs mocksys 0.0.0-old, this is " this-version)))
+          (is (str/includes? (first @warned) "its 1 running mock(s) stop: okta/okta"))
+          (p/all (map #((:stop! %)) @daemons)))))))
+
+(deftest a-daemon-of-this-version-is-kept
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [d       (runtime/start! {:host "127.0.0.1" :port (js/Number port)})
+                spawned (atom 0)
+                warned  (atom [])
+                out     (outcome (mb/ensure-up! {:spawn! (fn [_] (swap! spawned inc) nil) :log (tmp-log)
+                                                 :warn!  #(swap! warned conj %)}))]
+          (is (= :resolved out))
+          (is (= [0 []] [@spawned @warned]) "nothing is restarted or printed")
+          ((:stop! d)))))))
+
+(deftest a-daemon-that-cannot-be-stopped-says-how
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [old (old-daemon port nil false)
+                out (outcome (mb/ensure-up! {:spawn! (fn [_] nil) :log (tmp-log) :warn! (fn [_])}))]
+          (.close (:server old))
+          (is (= "the mocksys daemon (pid 4242) is too old to be stopped this way; stop it with: kill 4242" out)))))))
+
+(deftest stop-daemon-stops-it-and-names-its-mocks
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [none (mb/stop-daemon!)
+                d    (runtime/start! {:host "127.0.0.1" :port (js/Number port)})
+                mock (free-port)
+                _    (mb/post-imposter! {"protocol" "http" "port" mock "name" "demo/hello" "stubs" []})
+                gone (mb/stop-daemon!)
+                up   (mb/up?)
+                wire (-> (js/fetch (str "http://127.0.0.1:" mock "/")) (p/then (constantly :served)) (p/catch (constantly :refused)))]
+          (is (nil? none) "nothing to stop is not an error")
+          (is (= [{:port mock :name "demo/hello"}] gone))
+          (is (false? up) "the admin API is gone")
+          (is (= :refused wire) "and so is the mock")
+          (is (some? d)))))))
