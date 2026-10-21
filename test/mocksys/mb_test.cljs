@@ -26,6 +26,15 @@
     (is (= ["/usr/bin/node" ["/src/mocksys/bin/mocksys" "daemon"]]
            (mb/daemon-command {:exec-path "/usr/bin/node" :script "/src/mocksys/bin/mocksys" :bun? false})))))
 
+;; --- the store -------------------------------------------------------------------
+
+(deftest a-relative-store-is-resolved
+  (is (= (path/join (js/process.cwd) ".mocks") (store/root-for "./.mocks"))
+      "a CLI run from a subdirectory finds the same store and token file")
+  (is (= (path/join (js/process.cwd) "a") (store/root-for "a/")))
+  (is (= store/default-root (store/root-for nil)))
+  (is (= store/default-root (store/root-for ""))))
+
 ;; --- ensure-up! on a private admin port ---------------------------------------
 
 (defn- free-port []

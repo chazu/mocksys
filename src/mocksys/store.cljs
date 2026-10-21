@@ -12,11 +12,17 @@
 
 ;; The store is a single shared library, not per-project: $MOCKSYS_HOME, else
 ;; ~/.mocksys. Set MOCKSYS_HOME=./.mocks in a project to scope mocks to it.
-(def root
-  (let [home (.-MOCKSYS_HOME js/process.env)]
-    (if (and home (not= home ""))
-      home
-      (path/join (os/homedir) ".mocksys"))))
+(def default-root (path/join (os/homedir) ".mocksys"))
+
+(defn root-for
+  "The store a MOCKSYS_HOME value names, as an absolute path, so a command run from
+   a subdirectory, and the daemon it starts, agree on the store and its token file."
+  [home]
+  (if (and home (not= home ""))
+    (path/resolve home)
+    default-root))
+
+(def root (root-for (.-MOCKSYS_HOME js/process.env)))
 
 (def services-dir (path/join root "services"))
 
