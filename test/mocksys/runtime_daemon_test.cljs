@@ -16,6 +16,28 @@
      (let [srv (.createServer net)]
        (.listen srv 0 (fn [] (let [port (.-port (.address srv))] (.close srv #(resolve port)))))))))
 
+(defn- ipv6-loopback?
+  "Whether this host can listen on ::1 (some CI containers have no IPv6)."
+  []
+  (js/Promise.
+   (fn [resolve]
+     (let [srv (.createServer net)]
+       (.once srv "error" (fn [_] (resolve false)))
+       (.listen srv 0 "::1" (fn [] (.close srv #(resolve true))))))))
+
+(defn- raw-exchange
+  "Send one HTTP/1.1 GET over a bare socket and resolve the bytes that came back
+   before the server closed it."
+  [port path]
+  (js/Promise.
+   (fn [resolve]
+     (let [^js sock (.connect net #js {:host "127.0.0.1" :port port})
+           chunks   #js []]
+       (.on sock "data" #(.push chunks %))
+       (.on sock "error" (fn [_]))
+       (.on sock "close" #(resolve (.toString (js/Buffer.concat chunks) "utf8")))
+       (.write sock (str "GET " path " HTTP/1.1\r\nHost: localhost\r\n\r\n"))))))
+
 (defn- call
   "An admin or imposter call; resolves {:status :headers :text :json}."
   ([url] (call url {}))
@@ -63,7 +85,8 @@
                 dup    (call (str admin "/imposters") {:method "POST" :body (imposter port [])})
                 listed (call (str admin "/imposters"))
                 v4     (call (str "http://127.0.0.1:" port "/hi?x=1"))
-                v6     (call (str "http://[::1]:" port "/hi"))
+                ipv6?  (ipv6-loopback?)
+                v6     (if ipv6? (call (str "http://[::1]:" port "/hi")) (call (str "http://127.0.0.1:" port "/hi")))
                 full   (call (str admin "/imposters/" port))
                 _      (call (str admin "/imposters/" port "/savedRequests") {:method "DELETE"})
                 after  (call (str admin "/imposters/" port))
@@ -83,7 +106,7 @@
             (is (= "resource conflict" (get-in dup [:json "errors" 0 "code"]))))
           (is (= [{"protocol" "http" "port" port "name" "t/one" "numberOfRequests" 0}]
                  (get-in listed [:json "imposters"])))
-          (testing "the imposter answers on both loopback addresses"
+          (testing "the imposter answers on both loopback addresses (::1 where the host has it)"
             (is (= "hello" (:text v4)))
             (is (= "hello" (:text v6))))
           (testing "recorded requests, then cleared"
@@ -131,13 +154,36 @@
                                        (p/catch (constantly :failed))))
                 reset   (outcome "/reset")
                 garbage (outcome "/garbage")
+                reset-bytes   (raw-exchange port "/reset")
+                garbage-bytes (raw-exchange port "/garbage")
                 t0      (js/Date.now)
                 slow    (outcome "/slow")
                 elapsed (- (js/Date.now) t0)]
           (is (= :failed reset) "the connection is cut with no response")
           (is (= :failed garbage) "bytes that are not HTTP, then a close")
+          (is (= "" reset-bytes) "a reset sends nothing before the close")
+          (is (= "Htijy%@tWXJ/hQ#[Q:7G@dH4\"gu[QaX&" garbage-bytes) "random data is Mountebank's fixed garbage")
           (is (= "late" slow))
           (is (>= elapsed 150) "the response waited"))))))
+
+(deftest injection-state-is-per-imposter-and-reset-by-a-repost
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (let [counter {"responses" [{"inject" "function (request, state) { state.n = (state.n || 0) + 1; return { body: String(state.n) }; }"}]}
+              post!   (fn [port] (call (str admin "/imposters") {:method "POST" :body (imposter port [counter])}))
+              hit     (fn [port] (p/let [r (call (str "http://127.0.0.1:" port "/"))] (:text r)))]
+          (p/let [a (free-port)
+                  _ (post! a)
+                  b (free-port)
+                  _ (post! b)
+                  a1 (hit a) a2 (hit a) b1 (hit b)
+                  _ (call (str admin "/imposters/" a) {:method "DELETE"})
+                  _ (post! a)
+                  a3 (hit a)]
+            (is (= ["1" "2"] [a1 a2]) "an imposter's state persists across its requests")
+            (is (= "1" b1) "a second imposter does not see the first one's state")
+            (is (= "1" a3) "a deleted and reposted imposter starts from empty state")))))))
 
 (deftest injection-errors-are-500s
   (async done
