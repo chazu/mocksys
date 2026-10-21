@@ -54,15 +54,28 @@
       (str (.-message e) (when frame (str " (at " frame ")"))))
     (str "it threw " (or (try (js/JSON.stringify e) (catch :default _ nil)) (str e)) ", not an Error")))
 
+(defn- compile-module
+  "The module's CommonJS function. The wrapper shares the module's first line so
+   stack lines match the file (bun's vm.compileFunction reports every line one too
+   high). A syntax error that runs into the wrapper's closing line is re-reported
+   from the bare source, whose own end of input is where the file ends."
+  [file]
+  (let [code (fs/readFileSync file "utf8")]
+    (try
+      (.runInThisContext
+       (vm/Script. (str "(function (exports, require, module, __filename, __dirname) {" code "\n})")
+                   #js {:filename file}))
+      (catch js/SyntaxError e
+        (vm/Script. code #js {:filename file})
+        (throw e)))))
+
 (defn- exports-of
   "Run one module afresh (never from the require cache) and return its exports.
    `require` inside it resolves relative to the module's own file."
   [label file]
   (try
     (let [module #js {:exports #js {}}
-          run    (vm/compileFunction (fs/readFileSync file "utf8")
-                                     #js ["exports" "require" "module" "__filename" "__dirname"]
-                                     #js {:filename file})]
+          run    (compile-module file)]
       (.call run (.-exports module) (.-exports module) (node-module/createRequire file) module file (path/dirname file))
       (.-exports module))
     (catch :default e
