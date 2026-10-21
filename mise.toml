@@ -1,0 +1,32 @@
+# Toolchain for hacking on mocksys. `mise install` provisions all of it.
+# Java is build-time only (shadow-cljs compiles to JS); nothing at runtime needs a JVM.
+[tools]
+node = "22"
+java = "temurin-21"
+bun = "1.4"
+
+[tasks.install]
+description = "Install npm dependencies"
+run = "npm ci"
+sources = ["package.json", "package-lock.json"]
+outputs = ["node_modules/.package-lock.json"]
+
+[tasks.test]
+description = "Compile and run the test suite"
+depends = ["install"]
+run = "npm test"
+
+[tasks.build]
+description = "Release-compile the CLI to out/mocksys.js"
+depends = ["install"]
+run = "npm run build"
+
+[tasks.watch]
+description = "Recompile out/mocksys.js on save"
+depends = ["install"]
+run = "npm run watch"
+
+[tasks.binary]
+description = "Build a standalone binary with bun (pass `all` for the release matrix)"
+depends = ["install"]
+run = "scripts/build-binary.sh"

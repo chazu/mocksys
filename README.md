@@ -69,22 +69,26 @@ uses `mb` on your `PATH`, falling back to `npx mb`).
 ## Develop / build
 
 `mocksys` is ClojureScript compiled with [shadow-cljs](https://github.com/thheller/shadow-cljs).
-Hacking on it needs **Node 18+** and a **JVM** (for shadow-cljs); installing it does not.
+The toolchain is pinned in `mise.toml` (Node, a JDK for shadow-cljs, bun), so
+[mise](https://mise.jdx.dev) installs all of it. The JDK is a build tool only: the
+shipped CLI is plain JavaScript and nothing at runtime needs a JVM.
 
 ```sh
 git clone https://github.com/chazu/mocksys.git
 cd mocksys
-npm install
-npm run watch               # recompiles out/mocksys.js on save (keep running)
+mise install                # node, java, bun
+mise run test               # unit tests (compiles with shadow-cljs, runs on node)
+mise run watch              # recompiles out/mocksys.js on save (keep running)
 ./bin/mocksys help          # node shim over the compiled output
 ```
 
-One-shot build: `npm run build`. A standalone binary (no Node/JVM at runtime, but it
-still drives Mountebank externally) is produced with [bun](https://bun.sh):
+`mise tasks` lists the rest. One-shot build: `mise run build`. A standalone binary (no
+Node/JVM at runtime, but it still drives Mountebank externally) is produced with
+[bun](https://bun.sh):
 
 ```sh
-npm run binary             # -> dist/mocksys (native)
-npm run binary all         # -> dist/mocksys-bun-{darwin,linux}-{arm64,x64}
+mise run binary            # -> dist/mocksys (native)
+mise run binary all        # -> dist/mocksys-bun-{darwin,linux}-{arm64,x64}
 ```
 
 Cut a release (build matrix + tarballs + checksums + patch the Homebrew formula):
