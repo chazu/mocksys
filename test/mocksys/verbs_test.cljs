@@ -146,6 +146,16 @@
     (is (= "verb 'gate': ctx.respond text must be a string" (err #js {:text 5})))
     (is (str/starts-with? (str (err #js {:json circular})) "verb 'gate': ctx.respond json does not serialize: "))))
 
+(deftest ctx-vars-hides-what-mocksys-keeps-for-itself
+  (let [vs (verbs {"keys" (fn [^js ctx] (js/Object.keys (.-vars ctx)))})
+        op {"id" "keys"
+            "request" {"method" "GET" "path" "/keys"}
+            "effect" {"bind" {"who" {"const" "alice"} "__mine" {"const" "x"}}
+                      "limit" {"bucket" "rl" "key" "{who}" "max" 5}
+                      "call" {"verb" "keys" "as" "ks"}
+                      "respond" {"status" 200 "jsonVar" "ks"}}}]
+    (is (= ["who"] (:json (h/run op {:path "/keys"} {:verbs vs}))) "no __-prefixed variable reaches a verb")))
+
 (deftest call-runs-after-reads-and-before-mint
   (let [vs (verbs {"first"  (fn [^js ctx] (str "row " (.. ctx -vars -user -id)
                                            (when (.. ctx -vars -token) " and a token")))
@@ -238,6 +248,13 @@
                         [{"verb" "upper" "as" 3} "shout: call: verb 'upper': `as` must be a variable name"]
                         [{"verb" "upper" "bogus" 1} "shout: call: verb 'upper': unknown key(s) bogus (use verb, args, as)"]]]
       (is (= [msg] (errors (with-call spec) dir)) (pr-str spec)))))
+
+(deftest a-call-cannot-bind-a-reserved-name
+  (let [dir (scenario-dir! {"verbs.js" upper-module})]
+    (doseq [as ["__proto__" "constructor" "prototype" "toString" "hasOwnProperty" "__x"]]
+      (is (= [(str "shout: call: verb 'upper': `as` cannot be '" as "', a name JavaScript objects or mocksys reserve")]
+             (errors (assoc-in (shout-contract ["./verbs.js"]) ["operations" 0 "effect" "call" "as"] as) dir))
+          as))))
 
 ;; --- the daemon ----------------------------------------------------------------
 
