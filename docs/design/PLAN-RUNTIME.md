@@ -121,14 +121,17 @@ operations:
 ```
 
 - A module exports `{ verbs: { name(ctx) { ... } } }` where
-  `ctx = { request, state, vars, args, now }`.
-- A verb returns a value, bound to `as`, or `{ respond: { status, headers, json | body } }`,
-  which ends the request with that response.
+  `ctx = { request, state, vars, args, now, respond }`.
+- A verb returns a value, bound to `as`, or `ctx.respond({ status, headers, json | text | body })`,
+  which ends the request with that response. A plain object with a `respond` key is a value.
 - `call` runs after `bind` and lookups and before minting or the terminal verb, matching
   the existing read-then-write order in `effect-body-js`.
-- Lowering records absolute module paths on the imposter. The daemon loads them on each
-  post, bypassing the require cache, and exposes them to the injection.
-- `validate` checks that each module exists and exports each verb it names.
+- Lowering records module paths relative to the scenario directory, and the verbs the
+  operations call, on the imposter. `run` makes the paths absolute before the post. The
+  daemon loads the modules on each post, bypassing the require cache, checks the called
+  verbs, and exposes them to the injection.
+- The CLI never runs module code. `validate` checks that each module is a file inside the
+  scenario directory and that each `call` is well formed. A missing verb fails `run`.
 
 ## Phase 5. gRPC (unary)
 

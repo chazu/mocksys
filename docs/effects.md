@@ -565,11 +565,11 @@ operations:
 const crypto = require("node:crypto");
 module.exports = {
   verbs: {
-    verifySignature({ request, args }) {
+    verifySignature({ request, args, respond }) {
       const expected = "sha256=" +
         crypto.createHmac("sha256", args.secret).update(request.body).digest("hex");
       if (args.signature !== expected) {
-        return { respond: { status: 401, json: { error: "signature does not match" } } };
+        return respond({ status: 401, json: { error: "signature does not match" } });
       }
       return JSON.parse(request.body);
     },
@@ -589,7 +589,7 @@ an earlier one bound.
 |---|---|
 | `verb` | Required. The name of a function in a module's `verbs`. |
 | `args` | Optional object, passed as `ctx.args`. It interpolates deeply like a `respond` json, so a `"{name}"` value arrives as a string. Numbers and booleans written in the contract stay as they are. |
-| `as` | Optional. The variable that receives the verb's return value. |
+| `as` | Optional. The variable that receives the verb's return value. It cannot start with `__` or be a key of `Object.prototype` (`constructor`, `toString`, `__proto__` and so on) or `prototype`. |
 
 ### The verb
 
@@ -599,18 +599,34 @@ A verb is a function that takes one argument, `ctx`:
 |---|---|
 | `request` | `{ method, path, query, headers, body }`. `body` is the raw request text, so a signature check hashes exactly the bytes the client sent. Header names keep the client's case. |
 | `state` | The imposter's shared state object. It lasts until the scenario is run again. Keep your own keys on it. Keys that start with `__` belong to mocksys. |
-| `vars` | A copy of the variables bound so far, with their types. A row bound by `find` is an object here, where `args` would have flattened it to a string. |
+| `vars` | A copy of the variables bound so far, with their types. A row bound by `find` is an object here, where `args` would have flattened it to a string. Variables that start with `__` belong to mocksys and are left out. |
 | `args` | The interpolated `args`. |
 | `now` | The [virtual clock](#the-virtual-clock), in epoch seconds. A contract that uses `call` has the clock on, so `mocksys clock` moves it. |
+| `respond` | A function that builds a response. Return what it returns to end the request. |
 
-A verb returns one of two things:
+A verb ends the request only by returning `ctx.respond(spec)`. Any other return value,
+including a plain object with a `respond` key, is bound to `as`, and the effect
+continues. Without `as`, the value is dropped. Because `call` runs before `mint` and
+the terminal verb, a request that a verb ends creates, updates and stores nothing.
 
-- **Any value.** It is bound to `as`, and the effect continues. Without `as`, the value
-  is dropped.
-- **`{ respond: { status, headers, json } }`** or **`{ respond: { status, headers, body } }`**.
-  The request ends with that response. `status` defaults to 200. A `json` value is
-  serialized and gets `Content-Type: application/json` unless `headers` names a content
-  type. A `body` is sent as text.
+The spec takes these keys:
+
+| Key | Meaning |
+|---|---|
+| `status` | Optional. An HTTP status code from 100 to 599. The default is 200. |
+| `headers` | Optional. An object of response headers. |
+| `json` | A value to send as JSON. It gets `Content-Type: application/json` unless `headers` names a content type. |
+| `text` | A string to send as it is, with no content type unless `headers` names one. |
+| `body` | A string to send as it is. Any other value is sent as JSON, with no content type. |
+
+Give at most one of `json`, `text` and `body`. With none, the body is empty. A spec that
+is not an object, has another key, sets `json` to `undefined`, has a status outside
+100 to 599, or has a `json` that does not serialize (a circular object) fails the
+request with a 500 that names the verb:
+
+```json
+{ "errors": [{ "code": "response error", "message": "verb 'verifySignature': ctx.respond got unknown key(s) jsn (use status, headers, json, text or body)" }] }
+```
 
 ### Synchronous verbs only
 
@@ -619,6 +635,19 @@ A verb must return its result directly. A verb that returns a Promise, including
 request's effect as one uninterrupted step, so no other request can read or write
 `state` partway through it. An awaited verb would break that guarantee. Node's
 `crypto`, `Buffer` and `URL` cover the usual signing and parsing work synchronously.
+
+A promise that a verb starts and does not return, or an exception thrown later from a
+timer, does not fail the request. The daemon writes it with its stack to
+`$MOCKSYS_HOME/daemon.log` and keeps serving. Look there when a verb seems to do
+nothing.
+
+### Deterministic verbs
+
+A twin mints the same ids for the same request sequence on every run, and its clock
+starts at a fixed time. A verb keeps that guarantee only if it reads time from
+`ctx.now`. `Date.now()`, `new Date()` and `Math.random()` read the machine, so a verb
+that calls them answers differently on each run. Derive any value that must vary from
+`ctx.now`, `ctx.args` or the request.
 
 ### When a verb fails
 
@@ -629,9 +658,8 @@ The request answers 500, and the message names the verb:
 ```
 
 The same 500 reports a verb that returned a Promise (`verb 'x' returned a Promise; verbs
-must be synchronous`) and a verb that no module exports (`verb 'x' is not exported by
-the scenario's modules`). Return a `respond` for an error your API defines, such as the
-401 above. Let a throw mean a bug in the verb.
+must be synchronous`) and an invalid `ctx.respond` spec. Return `ctx.respond(...)` for an
+error your API defines, such as the 401 above. Let a throw mean a bug in the verb.
 
 ### Modules
 
@@ -642,22 +670,30 @@ the scenario's modules`). Return a `respond` for an error your API defines, such
   symlinks. `validate` and `compile` reject a path outside it. The scenario directory is
   what `pack`, `publish` and `push` carry, so a module outside it would not travel with
   the scenario.
-- **Reloading.** mocksys reads and runs each module file again whenever it loads it: on
-  `validate`, on `compile`, and on every `run`, which posts the scenario to the daemon.
-  It never uses the require cache for that file, so an edited module applies on the next
-  `mocksys run`. Files that a module itself `require`s use Node's normal cache; after
-  editing one of those, restart the daemon with `mocksys daemon stop`. `run --watch`
-  reloads when `contract.yaml` changes, not when a module changes.
-- **Top-level code.** A module's top level runs each time it loads, in the CLI and in the
-  daemon. Keep it free of side effects.
-- **Checks.** `validate` and `compile` load every module and report a module that is
-  missing, does not load, exports no `verbs` object, or exports a verb that is not a
-  function. They also report two modules that export one verb name, and a `call` whose
-  verb no module exports.
+- **When module code runs.** Only the daemon runs a module, and only when `mocksys run`
+  posts the scenario to it. `validate`, `compile`, `pack`, `unpack` and the authoring
+  commands never load a module. The daemon reads and runs each module file again on
+  every post. It never uses the require cache for that file, so an edited module applies
+  on the next `mocksys run`. Files that a module itself `require`s use Node's normal
+  cache; after editing one of those, restart the daemon with `mocksys daemon stop`.
+  `run --watch` reloads when `contract.yaml` changes, not when a module changes.
+- **Top-level code.** A module's top level runs on every post. Keep it free of side
+  effects.
+- **Paths.** `imposter.json` records each module relative to the scenario directory,
+  and `run` resolves them just before it posts. Entries that name one file, such as
+  `./verbs.js` and `verbs.js`, are one module.
+- **Checks.** `validate` and `compile` check that each module is a file inside the
+  scenario directory and that each `call` is well formed. They print that verbs are
+  checked when the scenario runs. `run` then fails, before the mock serves anything,
+  with a 400 from the daemon that names the module or verb, if a module does not load,
+  exports no `verbs` object, or exports a verb that is not a function. It also fails if
+  two modules export one verb name, or if a `call` names a verb that no module exports.
+  A load error gives the file and line where the module failed.
 - **Trust.** A verb runs inside the daemon with your user's access, like the generated
-  injections. A scenario that lists modules is stateful, so `MOCKSYS_NO_INJECTION=1`
-  makes `run` refuse it. `unpack` names each unpacked scenario that lists modules. Read a
-  module from someone else before you run its scenario.
+  injections. `MOCKSYS_NO_INJECTION=1` makes `run` refuse a scenario that lists modules,
+  before it compiles or posts anything, so no module code runs. `unpack` names each
+  unpacked scenario that lists modules. Read a module from someone else before you run
+  its scenario.
 
 ## The generated injection (under the hood)
 

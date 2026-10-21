@@ -87,10 +87,12 @@ operations:
       respond: { status: 202, json: { received: "{event.action}" } }
 ```
 
-A verb gets `ctx = { request, state, vars, args, now }`. It returns a value, which is
-bound to `as`, or `{ respond: { status, json } }`, which ends the request. Verbs must be
-synchronous. A throw is a 500 that names the verb. `examples/webhooks/` is a runnable
-receiver.
+A verb gets `ctx = { request, state, vars, args, now, respond }`. It returns a value,
+which is bound to `as`, or `ctx.respond({ status, headers, json | text | body })`, which
+ends the request. Verbs must be synchronous. A throw is a 500 that names the verb. Read
+time from `ctx.now`: `Date.now()` and `Math.random()` make a twin differ between runs.
+Only the daemon runs module code, on `run`; `validate` checks paths and `call` specs, and
+`run` fails up front on a missing verb. `examples/webhooks/` is a runnable receiver.
 
 ```sh
 mocksys new acme/widgets                                   # scaffold a contract

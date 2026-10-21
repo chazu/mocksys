@@ -32,7 +32,7 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `lifecycle` | A scenario's lifecycle: `compile!` (contract → imposter.json), `ensure-contract!` (lift a legacy imposter), `ensure-running!` (recompile, then post to the daemon), watch mode, port pins. |
 | `contract` | The canonical contract format. `lower` compiles a contract → imposter; `lift` reverse-engineers a contract from a recorded imposter; plus validation, example selection, response templating, path/predicate compilation. |
 | `inject` | The **stateful** layer. Compiles a declarative `effect` into a generated, dependency-free response injection over a shared `state` object — handshake buckets and resource collections. The agent never writes JavaScript. |
-| `modules` | **Custom verbs.** Resolves a contract's `modules:` against the scenario directory (refusing paths outside it) and loads each CommonJS file afresh with `vm.compileFunction`, never from the require cache. Used by `contract/lower` to check each `call`, and by the daemon on every post. |
+| `modules` | **Custom verbs.** Resolves a contract's `modules:` against the scenario directory (refusing paths outside it) for `contract/lower`, which never runs them. The daemon loads each CommonJS file afresh with `vm.compileFunction` on every post, never from the require cache, and checks the verbs the imposter calls. |
 | `kits` | **Kits** and composable **genes**. A gene is a parameterized contract fragment (an OIDC handshake, a CRUD resource, an error envelope); a kit composes genes into a full twin. Ships `oauth2` and `okta`. A contract can list genes under `genes:`, and a kit can be a YAML template, built in or in `$MOCKSYS_HOME/kits`. |
 | `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff status and canonical bodies (`--ignore` keys masked; volatile headers dropped when headers are compared). |
 | `mb` | The admin-API client and daemon lifecycle (spawn `mocksys daemon` when none answers, free-port allocation, imposter CRUD, replayable pull). The name predates the native runtime. |
@@ -61,9 +61,10 @@ contract.yaml ──lower──▶ imposter.json ──POST /imposters──▶ 
 - **Stateful operation** (`effect` present) → a single `{inject "<generated JS>"}`
   response. `inject/gen` embeds the seed and collection declarations as literals and
   emits a self-contained function over `(request, state, logger)`.
-- **Modules.** When the contract lists `modules:`, `lower` resolves them against the
-  scenario directory, loads them to check that every `call` names an exported verb, and
-  records their absolute paths as the imposter's `modules`.
+- **Modules.** When the contract lists `modules:`, `lower` checks that each is a file
+  inside the scenario directory and records it, relative to that directory, as the
+  imposter's `modules`. It records the verbs the operations `call` as `calls`. It never
+  runs a module. `ensure-running!` makes the paths absolute just before the post.
 
 Predicate compilation: `method`+`path` by default; a templated path (`/a/{id}`) compiles
 to a `matches` regex (`^/a/[^/]+$`), an exact path to `deepEquals`. Optional
@@ -120,7 +121,7 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 
 | Part | Supported |
 |---|---|
-| Imposter | `protocol: http`, `port`, `name`, `recordRequests`, `stubs`, `modules` (absolute paths) |
+| Imposter | `protocol: http`, `port`, `name`, `recordRequests`, `stubs`, `modules` (absolute paths), `calls` (verb names) |
 | Predicates | `equals`, `deepEquals`, `matches`, `exists` over method, path, query, headers; `jsonpath` (plain paths) over the body. Case-insensitive, as in Mountebank. |
 | Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `inject` (source that evaluates to a function), `proxy` (`proxyOnce` with `predicateGenerators`; `to` is an origin with no path, query or fragment), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
 | Behaviors | `wait`, `copy` (regex or jsonpath) |
@@ -129,14 +130,20 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 **Injection.** Injections run in the daemon's process, called as
 `f(request, state, logger)` with `require` in scope. `state` is one object per
 imposter, shared by its stubs. Set `MOCKSYS_NO_INJECTION=1` to make `run` refuse
-stateful scenarios.
+stateful scenarios and, before compiling anything, scenarios that list modules.
 
-**Custom verbs.** On each post, the daemon loads the imposter's `modules` from disk with
-`modules/load-verbs` and compiles the injections with the resulting `verbs` object in
-scope. A module that fails to load makes the post a 400 naming the module. A verb runs
+**Custom verbs.** The daemon is the only process that runs module code. On each post, it
+loads the imposter's `modules` from disk with `modules/load-verbs`, checks that each
+verb in `calls` is exported, and compiles the injections with the resulting `verbs`
+object in scope. A module that fails to load, a bad export, two modules exporting one
+verb, or a missing verb makes the post a 400 that names the module or verb. A verb runs
 synchronously inside the injection, so the request's effect stays one uninterrupted step
-over `state`. A verb that throws, returns a Promise, or is not exported makes that
-request a 500 naming the verb.
+over `state`. A verb that throws, returns a Promise, or returns an invalid
+`ctx.respond` spec makes that request a 500 naming the verb. The daemon process handles
+`unhandledRejection` and `uncaughtException` by logging the error and its stack to
+`daemon.log`, so a module's stray promise or timer cannot stop the other mocks.
+`GET /imposters/:port` returns `modules` and `calls`, so a replayable imposter posts back
+as it was.
 
 **Trust boundary.** An injection runs with full Node access inside the daemon, so mocksys
 only ever posts injections it generated itself, plus the modules a contract lists:
@@ -157,7 +164,8 @@ only ever posts injections it generated itself, plus the modules a contract list
   evaluates plain paths only.
 - A module is code the author wrote, and it runs with the same access. It must live
   inside the scenario directory, so `pack`, `publish` and `push` share it with the
-  contract that calls it rather than leaving it behind. `unpack` names each unpacked
+  contract that calls it rather than leaving it behind. The CLI never runs a module:
+  only the daemon does, when `run` posts the scenario. `unpack` names each unpacked
   scenario that lists modules, so the reader knows the scenario runs code from the
   bundle.
 
