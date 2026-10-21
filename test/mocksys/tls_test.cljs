@@ -118,6 +118,73 @@
           (finally (fs/chmodSync key 8r600)))
         (is (str/includes? (fs/readFileSync key "utf8") "PRIVATE KEY") "the key is still there")))))
 
+;; --- two CLIs replacing the CA at once ------------------------------------------
+;; ensure-ca! is synchronous, so another CLI's step is played inside the fs call it
+;; would race with.
+
+(defn- racing
+  "Run `body` with fs's `fname` replaced, for its first call that `match?` its
+   arguments, by `race`, which gets the real function and the arguments."
+  [fname match? race body]
+  (let [real (aget fs fname)
+        hit  (atom false)]
+    (aset fs fname (fn [& args]
+                     (if (and (not @hit) (apply match? args))
+                       (do (reset! hit true) (apply race real args))
+                       (apply real args))))
+    (try (body) (finally (aset fs fname real)))))
+
+(defn- temp-dirs [home] (filterv #(str/starts-with? % "tls.new-") (fs/readdirSync home)))
+
+(deftest concurrent-replacements-converge
+  (testing "another CLI renamed its new CA into place first: this one reads that CA"
+    (let [home  (fresh-home)
+          other (in-store (fresh-home) tls/ensure-ca!)]
+      (in-store home
+        (fn []
+          (let [ca (racing "renameSync" (fn [from _] (str/includes? from "tls.new-"))
+                           (fn [real from to]
+                             (fs/mkdirSync to)
+                             (fs/writeFileSync (path/join to "ca.pem") (:cert other))
+                             (fs/writeFileSync (path/join to "ca.key") (:key other))
+                             (real from to))
+                           tls/ensure-ca!)]
+            (is (= (:cert other) (:cert ca)))
+            (is (= (:cert other) (fs/readFileSync (tls/ca-file) "utf8")))
+            (is (= [] (temp-dirs home)) "the losing CA's directory is cleaned up"))))))
+  (testing "another CLI moved the new CA aside before it was tightened: this one makes the next"
+    (let [home (fresh-home)]
+      (in-store home
+        (fn []
+          (let [ca (racing "chmodSync" (fn [f _] (= f (tls/ca-dir)))
+                           (fn [real f m]
+                             (fs/renameSync f (str f ".bak-other"))
+                             (real f m))
+                           tls/ensure-ca!)]
+            (is (= (fs/readFileSync (tls/ca-file) "utf8") (:cert ca)) "the CA returned is the one in place"))))))
+  (testing "another CLI moved the expiring CA aside first"
+    (let [home (fresh-home)]
+      (in-store home
+        (fn []
+          (let [old (tls/ensure-ca!)
+                ca  (racing "renameSync" (fn [from _] (= from (tls/ca-dir)))
+                            (fn [real from to]
+                              (fs/renameSync from (str from ".bak-other"))
+                              (real from to))
+                            #(tls/ensure-ca! {:now (+ (js/Date.now) (* 3640 day))}))]
+            (is (not= (:cert old) (:cert ca)))
+            (is (= (:cert ca) (fs/readFileSync (tls/ca-file) "utf8")))
+            (is (= (:cert old) (fs/readFileSync (path/join home "tls.bak-other" "ca.pem") "utf8"))))))))
+  (testing "a rename that fails for another reason is an error, not a race"
+    (let [home (fresh-home)]
+      (in-store home
+        (fn []
+          (let [msg (racing "renameSync" (fn [from _] (str/includes? from "tls.new-"))
+                            (fn [_ _ _] (throw (doto (js/Error. "EACCES: permission denied, rename") (aset "code" "EACCES"))))
+                            #(thrown tls/ensure-ca!))]
+            (is (str/includes? (str msg) "EACCES"))
+            (is (= [] (temp-dirs home)))))))))
+
 (deftest a-mock-certificate-verifies-against-the-ca
   (let [home (fresh-home)]
     (in-store home

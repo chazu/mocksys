@@ -97,56 +97,73 @@
           {:problem (str "it expires " (.toISOString ends))}
           {:ca ca})))))
 
-(defn- tighten! []
-  (fs/chmodSync (ca-dir) 8r700)
-  (fs/chmodSync (key-file) 8r600))
+(defn- gone? [e] (= "ENOENT" (.-code e)))
+
+(defn- tighten!
+  "Re-tighten the CA's modes. False when the CA has gone meanwhile, moved aside by
+   another CLI replacing it."
+  []
+  (try (fs/chmodSync (ca-dir) 8r700)
+       (fs/chmodSync (key-file) 8r600)
+       true
+       (catch :default e (if (gone? e) false (throw e)))))
 
 (defn- move-aside!
-  "Rename ca-dir to tls.bak-<time> beside it, keeping the old CA. Returns the new name."
+  "Rename ca-dir to tls.bak-<time> beside it, keeping the old CA. Returns the new
+   name, or nil when another CLI replacing it too moved it first."
   []
   (let [bak (str (ca-dir) ".bak-" (str/replace (.toISOString (js/Date.)) #"[-:.]" ""))]
-    (fs/renameSync (ca-dir) bak)
-    bak))
+    (try (fs/renameSync (ca-dir) bak)
+         bak
+         (catch :default e (when-not (gone? e) (throw e))))))
 
-(defn- create!
+(defn- install!
   "Write a new CA into a private directory beside ca-dir, then rename it into
-   place, so a crash leaves no half-made CA and two CLIs starting at once end up
-   sharing whichever CA was renamed first."
+   place, so a crash leaves no half-made CA. When another CLI renamed its own into
+   place first, this one is dropped and both go on with that one."
   [now]
   (let [dir (ca-dir)
         tmp (str dir ".new-" (.toString (crypto/randomBytes 4) "hex"))
         {:keys [cert key]} (new-ca now)]
     (fs/mkdirSync store/root #js {:recursive true})
     (fs/mkdirSync tmp #js {:mode 8r700})
-    ;; git honours a nested .gitignore, so neither `publish` nor a project repo
-    ;; holding MOCKSYS_HOME commits the CA's key
-    (fs/writeFileSync (path/join tmp ".gitignore") "# mocksys's local CA: its key must stay on this machine\n*\n")
-    (fs/writeFileSync (path/join tmp "ca.key") key #js {:mode 8r600})
-    (fs/writeFileSync (path/join tmp "ca.pem") cert)
-    (try (fs/renameSync tmp dir)
-         (catch :default _ (fs/rmSync tmp #js {:recursive true :force true})))
-    (tighten!)
-    (read-ca)))
+    (try
+      ;; git honours a nested .gitignore, so neither `publish` nor a project repo
+      ;; holding MOCKSYS_HOME commits the CA's key
+      (fs/writeFileSync (path/join tmp ".gitignore") "# mocksys's local CA: its key must stay on this machine\n*\n")
+      (fs/writeFileSync (path/join tmp "ca.key") key #js {:mode 8r600})
+      (fs/writeFileSync (path/join tmp "ca.pem") cert)
+      (fs/renameSync tmp dir)
+      (catch :default e
+        (fs/rmSync tmp #js {:recursive true :force true})
+        (when-not (#{"ENOTEMPTY" "EEXIST"} (.-code e)) (throw e))))))
 
 (defn ensure-ca!
   "The local CA, created on first use: {:cert :key} PEM, plus the parsed forms
    `issue` signs with. A CA that is missing a file, or expires within 30 days, is
    moved aside to tls.bak-<time> and replaced; :replaced then says why, and stderr
    says that clients must trust the new one and mocks must be run again. A CA that
-   is there but cannot be read or parsed is an error that names the file."
+   is there but cannot be read or parsed is an error that names the file.
+
+   Each pass rereads what is on disk, so CLIs creating or replacing the CA at once
+   all end up with whichever CA was renamed into place last."
   ([] (ensure-ca! {}))
   ([{:keys [now] :or {now (js/Date.now)}}]
-   (if-not (fs/existsSync (ca-dir))
-     (create! now)
-     (let [{:keys [ca problem]} (load-ca now)]
-       (if ca
-         (do (tighten!) ca)
-         (let [bak (move-aside!)]
-           (.write js/process.stderr
-                   (str "mocksys: replaced the local CA in " (ca-dir) " (" problem "); the old one is now " bak
-                        ". Clients that trusted the old ca.pem must trust the new one, and a mock running"
-                        " with a certificate from the old CA keeps it until you `mocksys run` it again\n"))
-           (assoc (create! now) :replaced problem)))))))
+   (loop [tries 5 replaced nil]
+     (when (zero? tries)
+       (throw (js/Error. (str "tls: the local CA in " (ca-dir) " kept changing while mocksys read it; run the command again"))))
+     (let [{:keys [ca problem]} (when (fs/existsSync (ca-dir)) (load-ca now))]
+       (cond
+         (and ca (tighten!)) (cond-> ca replaced (assoc :replaced replaced))
+         ca (recur (dec tries) replaced)
+         :else
+         (do (when-let [bak (and problem (move-aside!))]
+               (.write js/process.stderr
+                       (str "mocksys: replaced the local CA in " (ca-dir) " (" problem "); the old one is now " bak
+                            ". Clients that trusted the old ca.pem must trust the new one, and a mock running"
+                            " with a certificate from the old CA keeps it until you `mocksys run` it again\n")))
+             (install! now)
+             (recur (dec tries) (or problem replaced))))))))
 
 (defn issue
   "A certificate for localhost, 127.0.0.1 and ::1 with a new key, signed by `ca`
