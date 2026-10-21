@@ -313,9 +313,11 @@
 (defn- check-effect!
   "Throw the first problem with `op`'s effect, which runs over `settings`. Whether a
    called verb exists is left to the daemon, the only process that runs module code."
-  [op settings modules?]
+  [op settings modules? protocol]
   (when-let [e (first (concat (effect/errors (get op "effect")) (effect/collection-errors (get op "effect") settings)))]
     (throw (js/Error. e)))
+  (when-let [verb (and (not= "http" protocol) (effect/stream-verb (get op "effect")))]
+    (throw (js/Error. (str verb " needs protocol http"))))
   (when-let [verb (and (not modules?) (get (first (effect/calls-of (get op "effect"))) "verb"))]
     (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`")))))
 
@@ -360,7 +362,7 @@
                          {"predicates" (predicates-for (http-request (get op "request")))
                           "responses"
                           (if (effect/stateful? op)
-                            (do (check-effect! op settings (seq mods))
+                            (do (check-effect! op settings (seq mods) (get contract "protocol" "http"))
                                 [{"effect" (get op "effect")}])
                             (mapv #(-> % templatize (apply-fault fault))
                                   (operation-responses op)))}

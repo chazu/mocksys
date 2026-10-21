@@ -3,6 +3,7 @@
    runs them: what a stream answer carries, Last-Event-ID, and who a publish reaches."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
+            [mocksys.contract :as contract]
             [mocksys.effect :as effect]
             [mocksys.harness :as h]))
 
@@ -119,6 +120,12 @@
       (stop-a)
       (is (= ["c"] (vec (js/Object.keys channels))) "a stale unsubscribe leaves a newer subscriber alone")
       (stop-c))))
+
+(deftest a-contract-streams-over-http-only
+  (let [op (fn [req] {"id" "feed" "request" req "effect" {"sse" {"channel" "c"}}})]
+    (is (= [] (:errors (contract/validate {"operations" [(op {"method" "GET" "path" "/feed"})]}))))
+    (is (thrown-with-msg? js/Error #"^feed: sse needs protocol http"
+                          (contract/lower {"protocol" "grpc" "operations" [(op {"rpc" "a.B/Feed"})]})))))
 
 (deftest a-failing-subscriber-does-not-fail-the-publisher
   (let [channels (effect/new-channels)
