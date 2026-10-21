@@ -7,6 +7,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MS="${MOCKSYS_BIN:-$ROOT/bin/mocksys}"
+# the checks run from a temp dir, so MOCKSYS_BIN=dist/mocksys must resolve from here
+case "$MS" in /*) ;; *) MS="$PWD/$MS" ;; esac
 PORT="${SMOKE_PORT:-9471}"
 
 free_port() { node -e 'const s=require("net").createServer().listen(0,()=>{console.log(s.address().port);s.close()})'; }
