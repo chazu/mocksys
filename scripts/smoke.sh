@@ -110,7 +110,8 @@ check "conform golden corpus" 0 $?
 
 echo "# determinism"
 "$MS" stop okta/okta >/dev/null
-"$MS" run okta/okta >/dev/null
+MOCKSYS_NO_INJECTION=1 "$MS" run okta/okta >/dev/null && code=0 || code=$?
+check "MOCKSYS_NO_INJECTION still runs a stateful twin" 0 "$code"
 id2=$(curl -s -X POST localhost:$PORT/api/v1/users -H 'Content-Type: application/json' \
         -d '{"profile":{"login":"smoke@example.com","email":"smoke@example.com"}}' | json_field '.id')
 check "a fresh twin mints the same id for the same request" "$id" "$id2"
@@ -263,6 +264,9 @@ node -e '
 "$MS" run okta/okta >/dev/null
 check "a planted injection is not served" "" "$(curl -s localhost:$PORT/pwned)"
 check "imposter.json was rebuilt from the contract" 0 "$(grep -c pwned "$imp" || true)"
+out="$(curl -s -X POST "$ADMIN/imposters" -H 'Content-Type: application/json' \
+         -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -d "{\"protocol\":\"http\",\"port\":$((PORT + 3)),\"stubs\":[{\"responses\":[{\"inject\":\"function(){}\"}]}]}")"
+check "the daemon refuses a posted injection" "stubs[0].responses[0]: unsupported field(s) inject" "$(echo "$out" | json_field '.errors[0].message')"
 
 echo "# grpc"
 GP=$((PORT + 2))

@@ -141,16 +141,24 @@ Effects compile to JavaScript source strings (`inject.cljs`), which the daemon
 evaluates. Mountebank needed that form. It is now gone, so the daemon can evaluate
 effect maps directly.
 
-- Stubs carry the operation's effect map, and the contract settings it needs (state,
-  collections, the clock, signing keys), instead of an `inject` string. The daemon
-  validates effects when an imposter is posted. Bad effects get 400, naming the stub and
-  the field.
-- One interpreter namespace evaluates effects over the per-imposter state. Custom verbs
-  run from it directly.
+- Stubs carry the operation's effect map, `{effect: {...}}`, instead of an `inject`
+  string. The settings every effect shares (seeds, collections, the clock's start, the
+  id stream's seed, the fallback issuer) go once into the imposter's `state`, not into
+  each stub. Signing keys stay in the `sign` verb's spec, where the contract has them.
+  The clock control stub answers with `{clock: true}`. The daemon validates effects when
+  an imposter is posted. Bad effects get 400, naming the stub and the field.
+- One interpreter namespace (`mocksys.effect`) evaluates effects over the per-imposter
+  state, from a table of verbs that also holds each verb's field checks. Custom verbs
+  run from it directly. The verbs a module must export are read off the effects, so the
+  imposter's `calls` field goes away.
+- `MOCKSYS_NO_INJECTION` refuses modules only. An effect is data, so a stateful
+  scenario without modules runs no code from the scenario.
 - **Proof before deletion.** While both exist, run every effect case in the unit suite
   through codegen and through the interpreter, and compare the responses and the
   resulting state. Run `conform` from a daemon built at the base commit to the new
   one over `examples/okta-corpus.json`. Both must show 0 differences.
+  `scripts/conform-builds.sh <base-ref>` reruns the second, plus a byte-for-byte replay
+  of the corpus and of stateful sequences.
 - Then delete the codegen, the `inject` response type and `compile-injection`. A
   planted `inject` in an imposter.json is then refused as an unknown field.
 - The Okta twin's responses do not change.

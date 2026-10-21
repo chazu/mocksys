@@ -5,8 +5,8 @@
             [mocksys.mb :as mb]
             [mocksys.store :as store]
             [mocksys.service :as service]
-            [mocksys.inject :as inject]
             [mocksys.contract :as contract]
+            [mocksys.effect :as effect]
             [mocksys.proto :as proto]
             [mocksys.runtime.grpc :as grpc]
             [mocksys.conform :as conform]
@@ -203,7 +203,7 @@
         (println (str "  replaced " p ", which differed from the kit's copy")))
       (when-let [ms (seq (get built "modules"))]
         (println (modules-notice scenario ms)))
-      (when (inject/contract-stateful? expanded)
+      (when (effect/contract-stateful? expanded)
         (println "  (stateful: served by the mocksys daemon, started automatically by `run`)"))
       (doseq [op (get expanded "operations")]
         (println (str "  · " (get-in op ["request" "method"]) " " (get-in op ["request" "path"]))))

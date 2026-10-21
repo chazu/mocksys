@@ -18,7 +18,7 @@ that builds a digital twin of Okta and explains every part as it goes.
 | [walkthrough.md](walkthrough.md) | **Start here.** A narrated tour: stand up an Okta twin (CRUD, filtering, OIDC, rate limits, expiring tokens) and understand each piece. |
 | [architecture.md](architecture.md) | The system: modules, the contract→imposter→daemon pipeline, the on-disk store, the runtime, stateless vs stateful. |
 | [contracts.md](contracts.md) | The `contract.yaml` format: operations, request matching, responses, named examples, response templating, transport faults, validation. |
-| [effects.md](effects.md) | The declarative **stateful** layer — the `effect` language. State buckets and resource **collections**, every verb, the SCIM filter grammar, pagination, the **virtual clock** + TTL, **rate limiting**, and the generated-injection model. |
+| [effects.md](effects.md) | The declarative **stateful** layer — the `effect` language. State buckets and resource **collections**, every verb, the SCIM filter grammar, pagination, the **virtual clock** + TTL, **rate limiting**, and how the daemon runs an effect. |
 | [twins.md](twins.md) | Building **digital twins**: kits, composable **genes**, the `okta` twin anatomy, and the `conform` fidelity loop. |
 | [cli.md](cli.md) | Full command reference, grouped, with every flag. |
 
@@ -37,8 +37,8 @@ A **scenario** (named `service/name`) is described by a `contract.yaml` — the 
 source of truth. mocksys *compiles* it to an `imposter.json` (a build
 artifact) and serves it. A contract operation is either **static** (a status + headers
 + a selected example body, optionally templated from the request) or **stateful** (a
-declarative `effect` that mocksys compiles to a generated JavaScript injection running
-over a persistent per-imposter `state` object — an auth handshake, or a CRUD resource
+declarative `effect` that the daemon evaluates over a persistent per-imposter `state`
+object — an auth handshake, or a CRUD resource
 collection). A **kit** composes reusable **genes** into a whole twin in one command;
 **conform** replays a request corpus at the twin and the live service and diffs them,
 driving the twin toward zero observable delta. Everything lives in one git-backed store

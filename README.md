@@ -49,11 +49,12 @@ share — not a one-off blob:
   (`Date`, `ETag`, request-ids) **in memory** before writing anything.
 - **One shared library.** Every scenario lives in a git-backed store at `~/.mocksys`
   that's the same from every project, and shareable with a remote.
-- **Shared mocks can't smuggle in code.** Stateful mocks run generated JavaScript inside
-  the daemon, so mocksys only posts what it compiled from a contract. It rebuilds a
-  pulled or unpacked `imposter.json` before use, and contract values reach the
-  generated code only as escaped literals. The daemon listens on loopback addresses
-  only, and its admin API refuses browser requests and any call without the token it
+- **Shared mocks can't smuggle in code.** Stateful mocks are data: the daemon evaluates
+  each `effect` and refuses any response form that carries code. The only code a
+  scenario can bring is the `modules` it lists, which `unpack` names and
+  `MOCKSYS_NO_INJECTION=1` refuses. mocksys rebuilds a pulled or unpacked
+  `imposter.json` before use. The daemon listens on loopback addresses only, and its
+  admin API refuses browser requests and any call without the token it
   writes for its own user.
 
 ## Install
@@ -332,11 +333,11 @@ Node script (`out/mocksys.js`), shipped as prebuilt JS over npm and as a
 `bun build --compile` binary via Homebrew. Focused
 modules: `core` (entry point + command table), `cli.*` (one namespace per command
 group), `lifecycle` (compile/run a scenario), `mb` (admin-API client + daemon lifecycle), `runtime` (the daemon: admin API,
-imposter servers, predicate matching, injection), `store` (disk layout), `scrub`
+imposter servers, predicate matching, effects), `store` (disk layout), `scrub`
 (redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
-(the canonical source format — compile/lift/validate/example selection), `inject` (the
-declarative stateful layer — handshakes + resource collections, compiled to generated
-injections), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
+(the canonical source format — compile/lift/validate/example selection), `effect` (the
+declarative stateful layer — handshakes + resource collections, checked and evaluated
+by the daemon), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
 (differential fidelity vs reality), `openapi` (spec import, via
 `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle` (pack/unpack), `git` (the
 shared store). Design notes and plans live in [`docs/design/`](docs/design/).

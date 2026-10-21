@@ -164,35 +164,37 @@
           (is (= "late" slow))
           (is (>= elapsed 150) "the response waited"))))))
 
-(deftest injection-state-is-per-imposter-and-reset-by-a-repost
+(deftest effect-state-is-per-imposter-and-reset-by-a-repost
   (async done
     (with-daemon done
       (fn [admin]
-        (let [counter {"responses" [{"inject" "function (request, state) { state.n = (state.n || 0) + 1; return { body: String(state.n) }; }"}]}
-              post!   (fn [port] (call (str admin "/imposters") {:method "POST" :body (imposter port [counter])}))
-              hit     (fn [port] (p/let [r (call (str "http://127.0.0.1:" port "/"))] (:text r)))]
+        (let [stubs [{"predicates" [{"equals" {"method" "POST"}}]
+                      "responses"  [{"effect" {"store" {"bucket" "b" "key" "k" "value" "kept"} "respond" {"status" 201}}}]}
+                     {"responses" [{"effect" {"lookup" {"bucket" "b" "key" "k" "as" "v" "miss" {"status" 404}}
+                                              "respond" {"text" "{v}"}}}]}]
+              post!  (fn [port] (call (str admin "/imposters") {:method "POST" :body (imposter port stubs)}))
+              hit    (fn [port & [method]] (p/let [r (call (str "http://127.0.0.1:" port "/") {:method (or method "GET")})] (:status r)))]
           (p/let [a (free-port)
                   _ (post! a)
                   b (free-port)
                   _ (post! b)
-                  a1 (hit a) a2 (hit a) b1 (hit b)
+                  a1 (hit a) _ (hit a "POST") a2 (hit a) b1 (hit b)
                   _ (call (str admin "/imposters/" a) {:method "DELETE"})
                   _ (post! a)
                   a3 (hit a)]
-            (is (= ["1" "2"] [a1 a2]) "an imposter's state persists across its requests")
-            (is (= "1" b1) "a second imposter does not see the first one's state")
-            (is (= "1" a3) "a deleted and reposted imposter starts from empty state")))))))
+            (is (= [404 200] [a1 a2]) "an imposter's state persists across its requests")
+            (is (= 404 b1) "a second imposter does not see the first one's state")
+            (is (= 404 a3) "a deleted and reposted imposter starts from empty state")))))))
 
-(deftest injection-errors-are-500s
+(deftest a-planted-inject-is-refused
   (async done
     (with-daemon done
       (fn [admin]
         (p/let [port (free-port)
-                _    (call (str admin "/imposters")
-                           {:method "POST" :body (imposter port [{"responses" [{"inject" "function () { throw new Error('boom'); }"}]}])})
-                r    (call (str "http://127.0.0.1:" port "/"))]
-          (is (= 500 (:status r)))
-          (is (str/includes? (get-in r [:json "errors" 0 "message"]) "boom")))))))
+                r    (call (str admin "/imposters")
+                           {:method "POST" :body (imposter port [{"responses" [{"inject" "function () { return {statusCode: 299}; }"}]}])})]
+          (is (= 400 (:status r)))
+          (is (= "stubs[0].responses[0]: unsupported field(s) inject" (get-in r [:json "errors" 0 "message"]))))))))
 
 (deftest proxy-once-against-a-live-upstream
   (async done

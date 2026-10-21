@@ -1,7 +1,6 @@
-(ns mocksys.inject-test
-  "Harness sanity + regression base: exercise the *compiled* injection for effect
-   verbs that already exist, so we know the harness runs real generated JS before
-   any new-verb TDD lands on top of it."
+(ns mocksys.harness-test
+  "Harness sanity: a read verb's hit and miss, and a handshake whose steps share one
+   state, run the way the daemon runs them."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
             [mocksys.harness :as h]))

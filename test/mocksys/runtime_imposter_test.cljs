@@ -1,6 +1,6 @@
 (ns mocksys.runtime-imposter-test
   "One request through a native imposter: validation of the posted spec, stub
-   selection, `is`/`inject`/`proxy`/`fault` responses, behaviors, request recording
+   selection, `is`/`effect`/`clock`/`proxy`/`fault` responses, behaviors, request recording
    and proxyOnce recording. Asserts the outcome the server would write."
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
@@ -55,7 +55,6 @@
   (is (str/includes? (rejects (spec [{"responses" [{"is" {} "behaviors" [{"decorate" "x"}]}]}])) "decorate"))
   (is (str/includes? (rejects (spec [{"responses" [{"is" {} "repeat" 2}]}])) "repeat"))
   (is (str/includes? (rejects (spec [{"responses" [{"fault" "SLOW_LORIS"}]}])) "fault"))
-  (is (str/includes? (rejects (spec [{"responses" [{"inject" "function ( {"}]}])) "injection"))
   (is (str/includes? (rejects (spec [{"responses" [{"proxy" {"to" "https://x" "mode" "proxyAlways"}}]}])) "proxyOnce")))
 
 (deftest an-is-response-that-cannot-be-written-is-rejected
@@ -72,10 +71,24 @@
       (is (nil? (is-of {"statusCode" 201})))
       (is (nil? (is-of {"statusCode" "404"}))))))
 
-(deftest an-injection-must-be-a-function
-  (is (str/includes? (rejects (spec [{"responses" [{"inject" "42"}]}])) "stubs[0].responses[0]: inject must be a function"))
-  (is (str/includes? (rejects (spec [{"responses" [{"inject" "{statusCode: 200}"}]}])) "inject must be a function"))
-  (is (nil? (rejects (spec [{"responses" [{"inject" "(request) => ({statusCode: 200})"}]}])))))
+(deftest a-planted-inject-is-an-unknown-field
+  (is (= "stubs[0].responses[0]: unsupported field(s) inject"
+         (rejects (spec [{"responses" [{"inject" "function () { return {statusCode: 299}; }"}]}]))))
+  (is (= "stubs[1].responses[0]: unsupported field(s) inject"
+         (rejects (spec [{"responses" [{"is" {}}]} {"responses" [{"is" {} "inject" "function () {}"}]}])))))
+
+(deftest an-effect-is-checked-on-post
+  (is (str/includes? (rejects (spec [{"responses" [{"is" {}}]} {"responses" [{"effect" {"respond" {"status" "200;x()"}}}]}]))
+                     "stubs[1].responses[0].effect: respond.status must be an HTTP status"))
+  (is (str/includes? (rejects (spec [{"responses" [{"effect" {"respond" {"status" 200} "teleport" {}}}]}]))
+                     "stubs[0].responses[0].effect"))
+  (is (= "stubs[0].responses[0]: a clock response needs the imposter's state.clock"
+         (rejects (spec [{"responses" [{"clock" true}]}]))))
+  (is (nil? (rejects (spec [{"responses" [{"effect" {"respond" {"status" 201}}}]}]))))
+  (is (= "stubs[0].responses[0].effect: create.collection names users, which state.collections does not declare"
+         (rejects (spec [{"responses" [{"effect" {"create" {"collection" "users"}}}]}]))))
+  (is (nil? (rejects (spec [{"responses" [{"effect" {"create" {"collection" "users"}}}]}]
+                           "state" {"collections" {"users" {}}})))))
 
 (deftest a-proxy-target-is-a-bare-origin
   (let [proxy-to (fn [to] (rejects (spec [{"responses" [{"proxy" {"to" to "mode" "proxyOnce"}}]}])))]
@@ -155,35 +168,24 @@
         (p/let [o (imp/respond i (req) {})]
           (is (= {:fault "CONNECTION_RESET_BY_PEER"} o)))))))
 
-;; --- injection ---------------------------------------------------------------
+;; --- effects -----------------------------------------------------------------
 
-(deftest injection-state-is-shared-and-persists
+(def ^:private remember
+  {"predicates" [{"deepEquals" {"path" "/a"}}]
+   "responses"  [{"effect" {"bind" {"v" {"query" "v"}} "store" {"bucket" "b" "key" "k" "value" "{v}"} "respond" {"status" 201}}}]})
+
+(def ^:private recall
+  {"predicates" [{"deepEquals" {"path" "/b"}}]
+   "responses"  [{"effect" {"lookup" {"bucket" "b" "key" "k" "as" "v" "miss" {"status" 404}} "respond" {"text" "{v}"}}}]})
+
+(deftest effect-state-is-shared-and-persists
   (async done
-    (let [counter "function (request, state, logger) { state.n = (state.n || 0) + 1;
-                     return { statusCode: 200, headers: {}, body: request.method + ' ' + request.path + ' ' + state.n }; }"
-          i (imp/create (spec [{"predicates" [{"deepEquals" {"path" "/a"}}] "responses" [{"inject" counter}]}
-                               {"predicates" [{"deepEquals" {"path" "/b"}}] "responses" [{"inject" counter}]}]))]
+    (let [i (imp/create (spec [remember recall]))]
       (done-after done
-        (p/let [os (run-all i [(req "path" "/a") (req "path" "/b") (req "path" "/a" "method" "POST")] {})]
-          (is (= ["GET /a 1" "GET /b 2" "POST /a 3"] (mapv :body os))))))))
-
-(deftest injection-sees-the-request-and-can-require
-  (async done
-    (let [src "function (request, state) {
-                 var h = require('crypto').createHash('sha256').update(request.body).digest('hex');
-                 return { statusCode: 200, headers: {}, body: [request.query.q, request.headers['X-A'], h.slice(0, 8)].join(',') }; }"
-          i (imp/create (spec [{"responses" [{"inject" src}]}]))]
-      (done-after done
-        (p/let [o (imp/respond i (req "query" {"q" "1"} "headers" {"X-A" "v"} "body" "abc") {})]
-          (is (= "1,v,ba7816bf" (:body o))))))))
-
-(deftest a-throwing-injection-rejects
-  (async done
-    (let [i (imp/create (spec [{"responses" [{"inject" "function () { throw new Error('boom'); }"}]}]))]
-      (-> (imp/respond i (req) {})
-          (p/then (fn [_] (is false "expected a rejection")))
-          (p/catch (fn [e] (is (str/includes? (ex-message e) "boom"))))
-          (p/finally (fn [] (done)))))))
+        (p/let [os (run-all i [(req "path" "/b") (req "path" "/a" "query" {"v" "1"}) (req "path" "/b")
+                               (req "path" "/a" "query" {"v" "2"}) (req "path" "/b")] {})]
+          (is (= [404 201 200 201 200] (mapv :status os)))
+          (is (= ["1" "2"] [(:body (nth os 2)) (:body (nth os 4))]) "one stub reads what another wrote"))))))
 
 ;; --- request recording -------------------------------------------------------
 

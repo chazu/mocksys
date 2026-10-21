@@ -19,7 +19,7 @@ requests. To change that, set `MOCKSYS_MAX_RECORDED_REQUESTS` to a whole number 
 on the command that starts the daemon (run `mocksys daemon stop` first); the daemon reads
 it only when it starts, and does not start on 0 or a value that is not a whole number.
 `MOCKSYS_NO_INJECTION=1` refuses
-stateful scenarios and scenarios that list `modules`.
+scenarios that list `modules`, the only code a scenario can run.
 
 ## Twins — full clones in one command
 

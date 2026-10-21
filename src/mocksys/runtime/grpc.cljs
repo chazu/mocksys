@@ -2,7 +2,7 @@
   "gRPC imposters: a grpc-js server per imposter, built from the descriptor the
   imposter carries. Every unary method of the proto is registered; a call becomes
   the request the stubs already match on (POST /pkg.Service/Method, metadata as
-  headers, the decoded message as a JSON body), so matching, injection and state
+  headers, the decoded message as a JSON body), so matching, effects and state
   are the HTTP imposter's. Streaming methods, and methods the proto does not
   declare, answer UNIMPLEMENTED. An imposter with `tls` serves gRPC over TLS.
 
@@ -171,7 +171,7 @@
 
 ;; --- the virtual clock ------------------------------------------------------------
 ;; A twin with a virtual clock has a stub at POST /_mocksys/clock (see
-;; inject/clock-control-stub). No proto declares that path, so every grpc imposter
+;; effect/clock-control-stub). No proto declares that path, so every grpc imposter
 ;; also serves it as a raw method whose messages are JSON text, and `mocksys clock`
 ;; calls it through `clock-call`.
 
