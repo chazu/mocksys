@@ -73,7 +73,7 @@
   [url]
   (js/Promise.
    (fn [resolve reject]
-     (let [ws       (js/WebSocket. url)
+     (let [ws       (WebSocket. url)
            messages (atom [])
            closed   (atom nil)]
        (set! (.-onmessage ws) #(swap! messages conj (.-data %)))
