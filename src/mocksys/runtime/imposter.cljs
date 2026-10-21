@@ -56,6 +56,18 @@
   [src]
   ((js/Function. "require" (str "return (" src "\n);")) js/require))
 
+(defn proxy-target-error
+  "Why `to` cannot be a proxy target, or nil. The proxy forwards each request's own
+   path and query to the target's origin, so a path, query or fragment on the target
+   would be silently dropped."
+  [to]
+  (let [url (when (and (string? to) (re-find #"^https?://" to)) (try (js/URL. to) (catch :default _ nil)))]
+    (cond
+      (nil? url)                     "proxy.to must be an http(s) URL"
+      (not= "/" (.-pathname url))    (str "proxy.to must not contain a path " (pr-str (.-pathname url)))
+      (seq (.-search url))           (str "proxy.to must not contain a query " (pr-str (.-search url)))
+      (str/includes? to "#")         "proxy.to must not contain a fragment")))
+
 (defn- check-behavior! [path b]
   (when-not (and (map? b) (= 1 (count b))) (bad path "a behavior must be an object with one key"))
   (let [[k v] (first b)]
@@ -89,8 +101,7 @@
                           (catch :default e (bad path (str "injection does not compile: " (ex-message e))))))
         "proxy"  (do (when-not (map? v) (bad path "proxy must be an object"))
                      (only-keys! path v #{"to" "mode" "predicateGenerators"})
-                     (when-not (and (string? (get v "to")) (re-find #"^https?://" (get v "to")))
-                       (bad path "proxy.to must be an http(s) URL"))
+                     (when-let [e (proxy-target-error (get v "to"))] (bad path e))
                      (when-not (contains? #{nil "proxyOnce"} (get v "mode"))
                        (bad path "only proxyOnce proxies are supported"))
                      (doseq [g (get v "predicateGenerators")]
