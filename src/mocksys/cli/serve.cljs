@@ -186,7 +186,7 @@
               (println (str "  " (inc i) ". " (get r "method") " " (get r "path")
                             (when (seq q) (str " ?" (str/join "&" (map (fn [[k v]] (str k "=" v)) q))))))))))) ))
 
-(defn- glob->re
+(defn glob->re
   "METHOD-PATH glob: `*` matches any run of chars; everything else is literal."
   [g]
   (re-pattern (str "^" (-> g
