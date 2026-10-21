@@ -14,6 +14,7 @@
     consume: {bucket key as miss}                      read+DELETE an entry (single-use)
     lookup:  {bucket key as miss}                      read an entry (no delete)
     resolve: {seed by eq as miss}                      find a seed-array item by field
+    call:    {verb args as}                            run a custom verb from the contract's modules
     respond: {status headers json|jsonVar|text}        the success response
 
   COLLECTION verbs (named, seedable sets of *objects* with CRUD+list — a REST
@@ -282,6 +283,23 @@
   (when-let [s (get effect "sign")]
     (if (map? s) [s] s)))
 
+;; --- call: a custom verb from the contract's modules (non-terminal) ---------
+
+(defn calls-of
+  "`call` is a single map or a list of maps, run in order; return the ordered seq."
+  [effect]
+  (when-let [c (get effect "call")]
+    (if (sequential? c) c [c])))
+
+(defn- call-js
+  "Run one verb (callVerb in the prelude). Its result binds to `as`, unless it is what
+   ctx.respond returned, which ends the request with that response."
+  [c]
+  (str "{var _v=callVerb(" (js (get c "verb")) ",deepInterp(" (js (get c "args" {})) ",V));"
+       "if(_v instanceof Respond){return verbResp(" (js (get c "verb")) ",_v.spec);}"
+       (when-let [as (get c "as")] (str "V[" (js as) "]=_v;"))
+       "}"))
+
 ;; --- relation (membership) verbs: terminal, empty body (default 204) ---
 
 (defn- link-js
@@ -400,6 +418,8 @@
          ;; a signing op almost always has iat/exp reading the clock; force it on so
          ;; those claims aren't stamped at epoch 0 (1970) in a no-ttl build.
          (get e "sign")
+         ;; a verb's ctx.now reads the virtual clock
+         (get e "call")
          (some (fn [[_ spec]] (and (map? spec) (contains? spec "now"))) (get e "bind"))))))
 
 (defn contract-uses-clock?
@@ -441,7 +461,7 @@
 (defn- effect-body-js
   "The ordered statement list (a single JS string) for one operation's effects.
    Read-then-write order: bind inputs, consume/lookup/resolve to pull values out of
-   state+seed (early-returning on a miss), THEN mint fresh ids. An op ends EITHER in
+   state+seed (early-returning on a miss), run custom verbs, THEN mint fresh ids. An op ends EITHER in
    a terminal collection verb (CRUD) OR the store+respond path (a handshake)."
   [effect]
   (let [coll-verb (collection-verb effect)]
@@ -473,6 +493,8 @@
       ;; find: read-phase collection lookup(s) (miss -> early return). Non-terminal,
       ;; so it precedes mint and composes before either terminal path.
       (map find-js (finds-of effect))
+      ;; call: custom verbs, after every read and before mint, in list order
+      (map call-js (calls-of effect))
       ;; mint: random hex ids (after reads, so a minted id can't be clobbered)
       (for [[n spec] (get effect "mint")]
         (str "V[" (js n) "]=rnd(" (js (or (get spec "prefix") "")) ");"))
@@ -596,6 +618,38 @@
    ;; --- JWT signing (the one place an injection uses a Node built-in: crypto) ---
    "function b64url(x){var b=(typeof Buffer!=='undefined'&&Buffer.isBuffer(x))?x:Buffer.from(String(x));"
    "return b.toString('base64').replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}"
+   ;; --- custom verbs. `verbs` is a free variable that compile-injection binds. A verb
+   ;; runs synchronously, so one request's read-modify-write of `state` cannot
+   ;; interleave with another's.
+   ;; ctx.respond brands its spec as a Respond, a class private to this injection, so
+   ;; only a value it returned ends the request; a plain {respond} is just a value.
+   "function Respond(s){this.spec=s;}"
+   ;; V also holds mocksys's own __-prefixed variables (__rl, a kit's __cli); keep them from verbs
+   "function pubVars(){var o={},k;for(k in V){if(k.slice(0,2)!=='__')o[k]=V[k];}return o;}"
+   "function callVerb(n,args){var f=(typeof verbs!=='undefined'&&verbs)?verbs[n]:undefined;"
+   "if(typeof f!=='function')throw new Error(\"verb '\"+n+\"' is not exported by the scenario's modules\");"
+   "var r;try{r=f({request:request,state:state,vars:pubVars(),args:args,now:now(state),"
+   "respond:function(s){return new Respond(s);}});}"
+   "catch(e){throw new Error(\"verb '\"+n+\"' threw: \"+(e&&e.message!==undefined?e.message:String(e)),{cause:e});}"
+   ;; a rejected Promise nobody awaits would crash the daemon, so swallow it
+   "if(r&&typeof r.then==='function'){if(typeof r.catch==='function')r.catch(function(){});"
+   "throw new Error(\"verb '\"+n+\"' returned a Promise; verbs must be synchronous\");}return r;}"
+   "function verbResp(n,r){function bad(m){throw new Error(\"verb '\"+n+\"': ctx.respond \"+m);}"
+   "if(!r||typeof r!=='object'||Array.isArray(r))bad('takes an object {status, headers, json | text | body}');"
+   "var ks=Object.keys(r),extra=ks.filter(function(k){return ['status','headers','json','text','body'].indexOf(k)<0;});"
+   "if(extra.length)bad('got unknown key(s) '+extra.sort().join(', ')+' (use status, headers, json, text or body)');"
+   "var kind=ks.filter(function(k){return k==='json'||k==='text'||k==='body';});"
+   "if(kind.length>1)bad('takes one of json, text or body');kind=kind[0];"
+   "if(kind==='json'&&r.json===undefined)bad('json is undefined');"
+   "if(r.status!==undefined&&!(Number.isInteger(r.status)&&r.status>=100&&r.status<=599))bad('status must be an HTTP status code');"
+   "if(r.headers!==undefined&&(!r.headers||typeof r.headers!=='object'||Array.isArray(r.headers)))bad('headers must be an object');"
+   "if(kind==='text'&&typeof r.text!=='string')bad('text must be a string');"
+   "var body='';if(kind==='text'||(kind==='body'&&typeof r.body==='string'))body=r[kind];"
+   "else if(kind&&r[kind]!=null){try{body=JSON.stringify(r[kind]);}catch(e){bad(kind+' does not serialize: '+e.message);}"
+   "if(body===undefined)bad(kind+' does not serialize: it is a '+typeof r[kind]);}"
+   "var h=Object.assign({},r.headers),ct=false,k;"
+   "for(k in h){if(k.toLowerCase()==='content-type')ct=true;}if(kind==='json'&&!ct)h['Content-Type']='application/json';"
+   "return {statusCode:r.status||200,headers:withRl(h),body:body};}"
    "function signJwt(header,claims,pem){var enc=b64url(JSON.stringify(header))+'.'+b64url(JSON.stringify(claims));"
    "var sig=require('crypto').createSign('RSA-SHA256').update(enc).sign(pem);return enc+'.'+b64url(sig);}"))
 

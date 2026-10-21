@@ -22,6 +22,7 @@
   (:require [clojure.string :as str]
             [mocksys.inject :as inject]
             [mocksys.kits :as kits]
+            [mocksys.modules :as modules]
             ["openapi-sampler" :as sampler]))
 
 ;; --- path templating ------------------------------------------------------
@@ -300,12 +301,46 @@
     (cond-> (assoc resp "is" is')
       (seq copies) (update "behaviors" (fnil into []) copies))))
 
+(defn- reserved-var?
+  "A name that `V[name]=...` cannot safely bind: an Object.prototype key (assigning
+   __proto__ swaps the prototype; a lookup of an unbound `constructor` finds Object's)
+   or a __-prefixed name, which mocksys keeps for itself."
+  [n]
+  (or (str/starts-with? n "__")
+      (= "prototype" n)
+      (some #(= n %) (js/Object.getOwnPropertyNames (.-prototype js/Object)))))
+
+(defn- check-calls!
+  "Throw unless every `call` in `op` is well formed. Whether its verb exists is left
+   to the daemon, the only process that runs module code."
+  [op modules?]
+  (doseq [c (inject/calls-of (get op "effect"))
+          :let [verb (when (map? c) (get c "verb"))
+                bad! #(throw (js/Error. (str "call: verb '" verb "': " %)))]]
+    (when-not (and (string? verb) (seq verb))
+      (throw (js/Error. "call needs a `verb` name")))
+    (when-let [extra (seq (remove #{"verb" "args" "as"} (keys c)))]
+      (bad! (str "unknown key(s) " (str/join ", " (sort extra)) " (use verb, args, as)")))
+    (when-not ((some-fn nil? map?) (get c "args")) (bad! "`args` must be an object"))
+    (when-not ((some-fn nil? string?) (get c "as")) (bad! "`as` must be a variable name"))
+    (when (some-> (get c "as") reserved-var?)
+      (bad! (str "`as` cannot be '" (get c "as") "', a name JavaScript objects or mocksys reserve")))
+    (when-not modules?
+      (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`"))))))
+
 (defn lower
   "Compile a contract into an imposter for the mocksys daemon. `port` is carried through if a
-   prior artifact had one (ensure-running! reassigns at run time regardless)."
-  ([contract] (lower contract nil))
-  ([contract port]
+   prior artifact had one (ensure-running! reassigns at run time regardless). `dir` is the
+   scenario directory that `modules` paths resolve against; the imposter records them
+   relative to it, with `calls`, the verbs its operations name. Lowering never runs a
+   module: the daemon loads them and checks `calls` when the imposter is posted."
+  ([contract] (lower contract nil nil))
+  ([contract port] (lower contract port nil))
+  ([contract port dir]
    (let [contract (expand contract)
+         mods     (modules/scenario-paths dir (get contract "modules"))
+         calls    (into [] (comp (mapcat #(inject/calls-of (get % "effect"))) (keep #(get % "verb")) (distinct))
+                        (get contract "operations"))
          fault (get contract "fault")
          seed  (get contract "seed")
          ;; collection declarations ({name {idField, seed}}) — resolve each `seed`
@@ -318,6 +353,7 @@
          issuer      (get contract "issuer")
          stubs (mapv (fn [op]
                        (try
+                         (check-calls! op (seq mods))
                          {"predicates" (predicates-for (get op "request"))
                           "responses"
                           (if (inject/stateful? op)
@@ -334,7 +370,9 @@
          stubs (cond-> stubs
                  clock? (conj (inject/clock-control-stub clock-start)))]
      (cond-> {"protocol" "http" "stubs" stubs "name" (get contract "scenario")}
-       port (assoc "port" port)))))
+       port        (assoc "port" port)
+       (seq mods)  (assoc "modules" mods)
+       (seq calls) (assoc "calls" calls)))))
 
 ;; --- lift: recorded imposter -> contract ----------------------------------
 
@@ -532,7 +570,7 @@
       :else [])))
 
 (defn- validate-expanded
-  [contract]
+  [contract dir]
   (let [ops (get contract "operations")
         errs (atom []) warns (atom [])
         err! #(swap! errs conj %) warn! #(swap! warns conj %)]
@@ -558,7 +596,7 @@
                                "link" "unlink" "listJoin" "render"])))
           (err! (str id ": effect has no `respond` or collection action "
                      "(create/get/update/remove/list/link/unlink/listJoin/render)")))
-        (try (lower (assoc contract "operations" [op]))
+        (try (lower (assoc contract "operations" [op]) nil dir)
              (catch :default e (err! (.-message e))))
         (when (and (not effect) (empty? responses)) (err! (str id ": no responses")))
         (doseq [r responses]
@@ -574,15 +612,18 @@
                 :when (and (get ex "select") (get r "bodySchema") (contains? ex "body"))
                 v (schema-violations (get r "bodySchema") (get ex "body") (str id "/" nm))]
           (warn! v))))
-    {:errors @errs :warnings @warns}))
+    ;; a module problem surfaces once per operation lowered; report it once
+    {:errors (vec (distinct @errs)) :warnings @warns}))
 
 (defn validate
   "Returns {:errors [...] :warnings [...]}. Errors block compile; warnings (e.g. an
    example diverging from its schema) are advisory. Checks `genes:` first, then the
-   expanded operations and the collections the genes declare."
-  [contract]
-  (let [gerrs (gene-errors contract)]
-    (if (seq gerrs)
-      {:errors gerrs :warnings []}
-      (update (validate-expanded (expand contract)) :errors
-              into (collection-clashes (get contract "genes"))))))
+   expanded operations and the collections the genes declare. `dir` is the scenario
+   directory, which `modules` resolve against."
+  ([contract] (validate contract nil))
+  ([contract dir]
+   (let [gerrs (gene-errors contract)]
+     (if (seq gerrs)
+       {:errors gerrs :warnings []}
+       (update (validate-expanded (expand contract) dir) :errors
+               into (collection-clashes (get contract "genes")))))))

@@ -19,6 +19,7 @@ fault:    {}                     # optional transport fault overlay (see Faults)
 issuer:   "http://..."           # optional origin for baseUrl/JWT iss when a request has no Host header
 seed:     {}                     # named arrays for effects to read (see effects.md)
 state:    {}                     # collections, clock, randomSeed (see effects.md)
+modules:  [./verbs.js]           # optional: JS files in the scenario directory whose verbs effects can `call` (see effects.md)
 genes:                           # optional: reusable fragments that expand into operations (see Genes)
   - crud-collection: { coll: users, base: /api/v1/users, seed-name: users }
 operations:
@@ -203,7 +204,11 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
   `method` or an absolute `path`; an `effect` with no `respond` and no collection verb; a response `status` that
   isn't a number; an operation with nothing to serve (no selected example, no
   `bodySchema`, no effect); an operation that fails to compile (for example a JSONPath
-  selector that isn't a plain path, or a non-numeric status, `ttl` or `window`).
+  selector that isn't a plain path, or a non-numeric status, `ttl` or `window`); a
+  module that is outside the scenario directory or missing; a `call` with no `verb`, an
+  unknown key, non-object `args`, or a reserved `as`; a `call` in a contract with no
+  `modules`. `validate` never runs a module, so whether each verb exists is checked
+  when the scenario runs (see effects.md).
 - **Warnings** (advisory): a selected example whose body diverges from its response
   `bodySchema` (lightweight, ajv-free: top-level type, required object props, one-level
   recurse).

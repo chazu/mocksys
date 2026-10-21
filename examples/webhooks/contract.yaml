@@ -1,0 +1,31 @@
+# A webhook receiver that checks each delivery's HMAC signature with a custom verb.
+# Copy this directory (contract.yaml and verbs.js) into the store as one scenario:
+#
+#   mkdir -p $MOCKSYS_HOME/demo/webhooks && cp examples/webhooks/* $MOCKSYS_HOME/demo/webhooks/
+#   mocksys run demo/webhooks --port 9150
+#
+# A delivery signed with the secret is stored and answered 202. A missing or forged
+# signature is 401, and nothing is stored. GET /deliveries lists what was accepted.
+service: webhooks
+scenario: demo/webhooks
+origin: authored
+modules: [./verbs.js]
+state:
+  collections:
+    deliveries: { idField: id }
+operations:
+  - id: receive
+    request: { method: POST, path: /webhooks }
+    effect:
+      bind: { signature: { header: X-Hub-Signature-256 } }
+      call:
+        verb: verifySignature
+        args: { signature: "{signature}", secret: whsec_test }
+        as: event
+      mint: { delivery: { prefix: dlv_ } }
+      create: { collection: deliveries, merge: [event], body: { id: "{delivery}" }, status: 202 }
+
+  - id: list-deliveries
+    request: { method: GET, path: /deliveries }
+    effect:
+      list: { collection: deliveries }

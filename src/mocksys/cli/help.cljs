@@ -34,6 +34,8 @@
      "Stateful resources (a REST collection) are declarative — no JavaScript:"
      "  state.collections: {users: {idField: id, seed: users}}   # in contract.yaml"
      "  effect: {bind: {...}, create|get|update|remove|list: {collection: users, ...}}"
+     "Logic no verb expresses (an HMAC check) is a custom verb in a JS file beside the contract:"
+     "  modules: [./verbs.js]   effect: {call: {verb: verifySignature, args: {sig: \"{sig}\"}, as: event}}"
      "Each operation keeps its schema plus *named examples* you select to serve:"
      "  mocksys examples stripe/createcharge          # list examples, [x]=in play"
      "  mocksys use stripe/createcharge --op createcharge --example card_declined --only"

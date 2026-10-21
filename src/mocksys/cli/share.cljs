@@ -27,7 +27,11 @@
     (when-not file (die "unpack needs a bundle: unpack <file.mock.tgz>"))
     (let [names (bundle/unpack! file)]
       (println (str "▣ unpacked " (str/join ", " names) " into " store/root))
-      (doseq [n names] (println (str "  run it with:  mocksys run " n))))))
+      (doseq [n names]
+        (println (str "  run it with:  mocksys run " n))
+        (when-let [ms (seq (get (try (store/read-contract n) (catch :default _ nil)) "modules"))]
+          (println (str "  ! " n " runs JavaScript from its modules (" (str/join ", " ms)
+                        ") in the mocksys daemon when you `run` it; read them first")))))))
 
 (defn cmd-home [_]
   (let [{:keys [root repo? branch remote dirty?]} (git/info)]

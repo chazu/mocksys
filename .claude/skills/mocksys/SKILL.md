@@ -72,6 +72,28 @@ genes:
 
 `use` and `parameterize` refuse gene operations; change the gene's params instead.
 
+When a rule needs logic no verb expresses (an HMAC signature, a SigV4 check), write a
+**custom verb**. Put a CommonJS file in the scenario directory, list it under
+`modules:`, and run its verb with `call`:
+
+```yaml
+modules: [./verbs.js]        # module.exports = { verbs: { verifySignature(ctx) { ... } } }
+operations:
+  - id: receive
+    request: { method: POST, path: /webhooks }
+    effect:
+      bind: { sig: { header: X-Hub-Signature-256 } }
+      call: { verb: verifySignature, args: { sig: "{sig}" }, as: event }
+      respond: { status: 202, json: { received: "{event.action}" } }
+```
+
+A verb gets `ctx = { request, state, vars, args, now, respond }`. It returns a value,
+which is bound to `as`, or `ctx.respond({ status, headers, json | text | body })`, which
+ends the request. Verbs must be synchronous. A throw is a 500 that names the verb. Read
+time from `ctx.now`: `Date.now()` and `Math.random()` make a twin differ between runs.
+Only the daemon runs module code, on `run`; `validate` checks paths and `call` specs, and
+`run` fails up front on a missing verb. `examples/webhooks/` is a runnable receiver.
+
 ```sh
 mocksys new acme/widgets                                   # scaffold a contract
 mocksys add acme/widgets --request 'GET /widgets/1' --status 200 --text ok

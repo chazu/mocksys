@@ -3,12 +3,14 @@
   artifact. `compile!` lowers one to the other; `ensure-contract!` lifts a
   legacy/recorded imposter into a contract on demand; `ensure-running!` posts it
   to the mocksys daemon."
-  (:require [promesa.core :as p]
+  (:require [clojure.string :as str]
+            [promesa.core :as p]
             [mocksys.mb :as mb]
             [mocksys.store :as store]
             [mocksys.service :as service]
             [mocksys.contract :as contract]
-            [mocksys.inject :as inject]))
+            [mocksys.inject :as inject]
+            [mocksys.modules :as modules]))
 
 (defn compile!
   "Lower a scenario's contract to imposter.json and refresh mock.yaml. Returns the
@@ -17,7 +19,7 @@
   (let [contract* (store/read-contract scenario)
         port      (when (store/exists? scenario)
                     (try (get (store/read-imposter scenario) "port") (catch :default _ nil)))
-        imposter  (contract/lower contract* port)
+        imposter  (contract/lower contract* port (store/scenario-dir scenario))
         prof      (service/effective scenario)]
     (store/write-imposter! scenario imposter)
     (store/write-mock! scenario (merge (or (store/read-mock scenario) {})
@@ -50,6 +52,9 @@
   (when (ensure-contract! scenario)
     (compile! scenario)))
 
+(defn- no-injection? []
+  (let [v (.-MOCKSYS_NO_INJECTION js/process.env)] (and v (not= v ""))))
+
 (defn ensure-running!
   "Make `scenario` live and return its port. Resolution order: explicit --port >
    the already-running port > a port *pinned* on the contract > a fresh free port.
@@ -57,12 +62,16 @@
    recompiles from the contract and (re)posts with recordRequests=true so
    `requests`/`assert` have data."
   [scenario port-opt]
+  ;; before compiling, so nothing of a refused scenario is built or posted
+  (when-let [ms (and (no-injection?) (seq (get (store/read-contract scenario) "modules")))]
+    (throw (js/Error. (str "'" scenario "' runs JavaScript from its modules (" (str/join ", " ms) "), but "
+                           "MOCKSYS_NO_INJECTION is set. Unset it to run this scenario."))))
   (let [imposter  (or (ensure-compiled! scenario)
                       (throw (js/Error. (str "no scenario '" scenario "' in " store/root))))
         contract  (store/read-contract scenario)
         pinned    (get contract "port")
         stateful? (inject/imposter-stateful? imposter)]
-    (when (and stateful? (let [v (.-MOCKSYS_NO_INJECTION js/process.env)] (and v (not= v ""))))
+    (when (and stateful? (no-injection?))
       (throw (js/Error. (str "'" scenario "' is a stateful mock (it runs generated injections), but "
                                 "MOCKSYS_NO_INJECTION is set. Unset it to run stateful scenarios."))))
     (p/let [_        (mb/ensure-up!)
@@ -74,7 +83,8 @@
                        pinned   pinned
                        :else    (mb/free-port))]
       (mb/delete-imposter! port)
-      (let [imp (assoc imposter "port" port "name" scenario "recordRequests" true)]
+      (let [imp (cond-> (assoc imposter "port" port "name" scenario "recordRequests" true)
+                  (get imposter "modules") (update "modules" #(modules/absolute (store/scenario-dir scenario) %)))]
         (p/let [_ (mb/post-imposter! imp)]
           (when (and port-opt contract (not= port pinned))
             (store/write-contract! scenario (assoc contract "port" port)))

@@ -3,7 +3,9 @@
   of Mountebank's imposter format that mocksys emits, plus its live state.
 
   The inventory, and nothing else:
-    imposter   protocol http, port, name, recordRequests, stubs
+    imposter   protocol http, port, name, recordRequests, stubs, modules (absolute
+               paths of CommonJS files whose `verbs` the injections can call) and
+               calls (the verb names the injections call, checked on create)
     stub       predicates (see mocksys.runtime.match), responses
     response   exactly one of
                  is      {statusCode headers body _mode}
@@ -18,6 +20,8 @@
   caller passes in."
   (:require [clojure.string :as str]
             [promesa.core :as p]
+            ["node:path" :as path]
+            [mocksys.modules :as modules]
             [mocksys.runtime.match :as match]))
 
 ;; --- validation --------------------------------------------------------------
@@ -52,9 +56,11 @@
 
 (defn compile-injection
   "The function an injection source evaluates to. It runs in this process with
-   `require` in scope, the way Mountebank evaluated it."
-  [src]
-  ((js/Function. "require" (str "return (" src "\n);")) js/require))
+   `require` in scope, the way Mountebank evaluated it, and `verbs`, the custom verbs
+   of the imposter's modules."
+  ([src] (compile-injection src nil))
+  ([src verbs]
+   ((js/Function. "require" "verbs" (str "return (" src "\n);")) js/require verbs)))
 
 (defn proxy-target-error
   "Why `to` cannot be a proxy target, or nil; `field` names it in the message. The
@@ -132,7 +138,12 @@
 
 (defn- validate! [spec]
   (when-not (map? spec) (bad "" "an imposter must be a JSON object"))
-  (only-keys! "" spec #{"protocol" "port" "name" "recordRequests" "stubs"})
+  (only-keys! "" spec #{"protocol" "port" "name" "recordRequests" "stubs" "modules" "calls"})
+  (when-not ((some-fn nil? #(and (vector? %) (every? (fn [m] (and (string? m) (path/isAbsolute m))) %)))
+             (get spec "modules"))
+    (bad "" "modules must be absolute paths"))
+  (when-not ((some-fn nil? #(and (vector? %) (every? string? %))) (get spec "calls"))
+    (bad "" "calls must be an array of verb names"))
   (when-not (= "http" (get spec "protocol"))
     (bad "" (str "unsupported protocol " (pr-str (get spec "protocol")) " (only http)")))
   (let [port (get spec "port")]
@@ -153,9 +164,17 @@
 
 ;; --- construction ------------------------------------------------------------
 
-(defn- injections-of [stubs]
+(defn- injections-of [stubs verbs]
   (into {} (for [s stubs, r (get s "responses") :let [src (get r "inject")] :when src]
-             [src (compile-injection src)])))
+             [src (compile-injection src verbs)])))
+
+(defn- verbs-of
+  "The custom verbs of the spec's modules, read from disk on every post so an edited
+   module takes effect when the scenario is run again. A verb in `calls` that no
+   module exports fails the post."
+  [spec]
+  (try (modules/load-verbs (map vector (get spec "modules") (get spec "modules")) (get spec "calls"))
+       (catch :default e (bad "" (ex-message e)))))
 
 (defn create
   "A live imposter (an atom) from a posted spec. Throws ex-info {:code \"bad data\"}
@@ -169,7 +188,7 @@
            :requests   []
            :count      0
            :state      #js {}
-           :injections (injections-of stubs)})))
+           :injections (injections-of stubs (verbs-of spec))})))
 
 ;; --- injection ---------------------------------------------------------------
 
@@ -342,10 +361,11 @@
 (defn to-json
   "The imposter as the admin API shows it. `:list?` is the summary row;
    `:replayable?` drops requests and proxy timings; `:remove-proxies?` drops proxy
-   responses and any stub left with none."
+   responses and any stub left with none. Every form but the summary keeps `modules`
+   and `calls`, so a replayable imposter posts back as it was."
   [imp {:keys [list? replayable? remove-proxies?]}]
   (let [{:keys [spec stubs requests] n :count} @imp
-        header (cond-> (select-keys spec ["protocol" "port" "name"])
+        header (cond-> (select-keys spec ["protocol" "port" "name" "modules" "calls"])
                  (not replayable?) (assoc "numberOfRequests" n))
         strip  (fn [r] (cond-> r (contains? r "is") (update "is" dissoc "_proxyResponseTime")))
         proxy? (fn [r] (contains? r "proxy"))
@@ -354,7 +374,7 @@
                  remove-proxies? (mapv #(update % "responses" (partial filterv (complement proxy?))))
                  remove-proxies? (filterv #(seq (get % "responses"))))]
     (cond
-      list?       header
+      list?       (dissoc header "modules" "calls")
       replayable? (assoc header "recordRequests" (boolean (get spec "recordRequests")) "stubs" stubs)
       :else       (assoc header "recordRequests" (boolean (get spec "recordRequests"))
                          "requests" requests "stubs" stubs))))

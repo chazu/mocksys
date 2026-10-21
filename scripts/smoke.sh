@@ -130,6 +130,80 @@ cp "$ROOT/examples/kits/directory.yaml" "$MOCKSYS_HOME/kits/"
 check "a user kit's flag shapes the twin" 200 "$(status_of localhost:$P2/scim/v2/Users)"
 "$MS" stop directory/directory >/dev/null
 
+echo "# custom verbs"
+P3=$((PORT + 2))
+WH="$MOCKSYS_HOME/demo/webhooks"
+mkdir -p "$WH"
+cp "$ROOT/examples/webhooks/"* "$WH/"
+hmac() { node -e 'console.log("sha256="+require("crypto").createHmac("sha256",process.argv[1]).update(process.argv[2]).digest("hex"))' "$@"; }
+deliver() { # <port> <signature> <body>
+  status_of -X POST "localhost:$1/webhooks" -H "X-Hub-Signature-256: $2" -H 'Content-Type: application/json' -d "$3"; }
+body='{"action":"opened","number":7}'
+out="$("$MS" validate demo/webhooks 2>&1)" && code=0 || code=$?
+check "validate passes without running the module" 0 "$code"
+check "and says when the verbs are checked" 1 "$(echo "$out" | grep -c 'verbs are checked when the scenario runs')"
+out="$(MOCKSYS_NO_INJECTION=1 "$MS" run demo/webhooks --port $P3 2>&1)" && code=0 || code=$?
+check "MOCKSYS_NO_INJECTION refuses a scenario with modules" 1 "$code"
+check "and names them" 1 "$(echo "$out" | grep -c 'runs JavaScript from its modules (./verbs.js)')"
+"$MS" run demo/webhooks --port $P3 >/dev/null
+check "a delivery signed with the secret is accepted" 202 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
+check "a forged signature is 401" 401 "$(deliver $P3 "$(hmac wrong "$body")" "$body")"
+check "only the signed delivery was stored" '[7]' "$(curl -s localhost:$P3/deliveries | json_field '.map(d=>d.number)')"
+sed -i.bak 's/signature does not match/edited/' "$WH/verbs.js"
+"$MS" run demo/webhooks >/dev/null
+check "an edited module applies on the next run" edited \
+  "$(curl -s -X POST localhost:$P3/webhooks -H 'X-Hub-Signature-256: sha256=00' -d "$body" | json_field '.error')"
+"$MS" stop demo/webhooks >/dev/null
+"$MS" pack demo/webhooks --out "$WORK/webhooks.mock.tgz" >/dev/null
+mv "$WH/verbs.js" "$MOCKSYS_HOME/outside.js"
+out="$(MOCKSYS_HOME="$WORK/store2" "$MS" unpack "$WORK/webhooks.mock.tgz" 2>&1)"
+check "unpack names the module code it brought" 1 \
+  "$(echo "$out" | grep -c 'demo/webhooks runs JavaScript from its modules (./verbs.js)')"
+MOCKSYS_HOME="$WORK/store2" "$MS" run demo/webhooks --port $P3 >/dev/null
+check "a bundle carries the module" 202 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
+MOCKSYS_HOME="$WORK/store2" "$MS" stop demo/webhooks >/dev/null
+sed -i.bak 's#\./verbs\.js#../../outside.js#' "$WH/contract.yaml"
+out="$("$MS" validate demo/webhooks 2>&1)" && code=0 || code=$?
+check "a module outside the scenario directory is refused" 1 "$code"
+check "and named" 1 "$(echo "$out" | grep -c 'modules: ../../outside.js is outside the scenario directory')"
+
+echo "# async failures in module code"
+P4=$((PORT + 3))
+AF="$MOCKSYS_HOME/demo/async"
+mkdir -p "$AF"
+cat > "$AF/verbs.js" <<'JS'
+Promise.reject(new Error("rejected at load"));
+module.exports = { verbs: {
+  fire() { Promise.reject(new Error("rejected by fire")); return "fired"; },
+  later() { setTimeout(() => { throw new Error("thrown later by later"); }, 0); return "scheduled"; },
+} };
+JS
+cat > "$AF/contract.yaml" <<'YAML'
+service: async
+scenario: demo/async
+origin: authored
+modules: [./verbs.js]
+operations:
+  - id: fire
+    request: { method: GET, path: /fire }
+    effect: { call: { verb: fire, as: r }, respond: { status: 200, text: "{r}" } }
+  - id: later
+    request: { method: GET, path: /later }
+    effect: { call: { verb: later, as: r }, respond: { status: 200, text: "{r}" } }
+YAML
+"$MS" run demo/async --port $P4 >/dev/null 2>&1 || true
+check "a verb that leaves a rejection unhandled answers" 200 "$(status_of localhost:$P4/fire)"
+check "a verb whose timer throws answers" 200 "$(status_of localhost:$P4/later)"
+sleep 0.2
+check "the daemon keeps serving the mock" 200 "$(status_of localhost:$P4/fire)"
+check "and the admin API" 200 "$(status_of "$ADMIN/")"
+logged() { grep -q -- "$1" "$MOCKSYS_HOME/daemon.log" && echo yes || echo no; }
+check "the log names the rejection at load" yes "$(logged 'unhandled rejection.*rejected at load')"
+check "with the module's line" yes "$(logged "$AF/verbs.js:1")"
+check "the log names the verb's rejection" yes "$(logged 'unhandled rejection.*rejected by fire')"
+check "and the timer's throw" yes "$(logged 'uncaught exception.*thrown later by later')"
+"$MS" stop demo/async >/dev/null 2>&1 || true
+
 echo "# record"
 out="$("$MS" record demo/rec --target https://api.example.com/v1 2>&1)" && code=0 || code=$?
 check "a --target with a path fails up front" 1 "$code"

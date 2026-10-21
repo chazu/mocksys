@@ -14,9 +14,9 @@
 (defn compile-fn
   "Eval the generated injection source for `op` into a callable JS function.
    `opts` may carry :seed, :collections, :clock-start, :issuer and :random-seed
-   (all optional)."
+   (all optional), and :verbs, the JS object of custom verbs a `call` reaches."
   [op opts]
-  (imposter/compile-injection (inject/gen op opts)))
+  (imposter/compile-injection (inject/gen op opts) (:verbs opts)))
 
 (defn fresh-state
   "A blank per-imposter state object. Pass the SAME one across several `run` calls
