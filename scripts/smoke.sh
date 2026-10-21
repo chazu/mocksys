@@ -103,7 +103,7 @@ check "a fresh twin mints the same id for the same request" "$id" "$id2"
 echo "# record"
 out="$("$MS" record demo/rec --target https://api.example.com/v1 2>&1)" && code=0 || code=$?
 check "a --target with a path fails up front" 1 "$code"
-check "and says why" 1 "$(echo "$out" | grep -c 'record --target "https://api.example.com/v1": proxy.to must not contain a path "/v1"')"
+check "and says why" 1 "$(echo "$out" | grep -c -- '--target must not contain a path "/v1" (got https://api.example.com/v1)')"
 
 echo "# imposter.json is never trusted"
 imp="$MOCKSYS_HOME/okta/okta/imposter.json"
