@@ -38,7 +38,7 @@
   (let [sentinel "\u0000"]
     (str "^" (-> t
                  (str/replace #"\{[^}]+\}" sentinel)
-                 (str/replace #"[.+?^${}()|\[\]\\]" "\\\\$&")
+                 (str/replace #"[.+?^${}()|\[\]\\]" "\\$&")
                  (str/replace sentinel "[^/]+"))
          "$")))
 
