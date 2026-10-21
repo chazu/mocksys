@@ -14,12 +14,24 @@
             [mocksys.version :refer [version]]
             [mocksys.cli.util :refer [die env-vars-for running-imposter]]))
 
+(defn- keep-serving!
+  "Log a failure that no request owns, such as a module's top-level Promise.reject or
+   a throw from a verb's timer, with its stack, instead of letting it end the daemon
+   and every mock it serves. The daemon's stderr is its log."
+  []
+  (doseq [[event kind] [["unhandledRejection" "unhandled rejection"] ["uncaughtException" "uncaught exception"]]]
+    (.on js/process event
+         (fn [^js e]
+           (js/console.error (str (.toISOString (js/Date.)) " mocksys daemon: " kind ", still serving: "
+                                  (if (instance? js/Error e) (.-stack e) (pr-str e))))))))
+
 (defn cmd-daemon
   "`daemon` runs the runtime in the foreground (`mb/ensure-up!` spawns it detached);
    `daemon stop` stops it, and every mock it serves."
   [{:keys [pos]}]
   (case (first pos)
-    nil    (p/let [{:keys [port]} (runtime/start! {:host    "127.0.0.1"
+    nil    (p/let [_              (keep-serving!)
+                   {:keys [port]} (runtime/start! {:host    "127.0.0.1"
                                                    :port    (mb/admin-port)
                                                    :on-stop #(js/process.exit 0)})]
              (println (str "mocksys " version " daemon on http://127.0.0.1:" port " (pid " (.-pid js/process) ")")))
