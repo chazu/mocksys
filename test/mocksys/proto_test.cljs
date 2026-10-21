@@ -12,7 +12,7 @@
 
 (deftest loads-a-proto-with-its-imports
   (let [dir (fx/kv-dir)
-        {:keys [descriptor files methods]} (proto/load-file (path/join dir "kv.proto"))]
+        {:keys [descriptor files methods]} (proto/read-proto (path/join dir "kv.proto"))]
     (testing "every rpc, with whether it is unary"
       (is (= {"kv.Store/Put"   {:unary? true  :kind "unary"}
               "kv.Store/Get"   {:unary? true  :kind "unary"}
@@ -29,7 +29,7 @@
                                               service S { rpc M (B) returns (C); }"
                              "sub/b.proto"   "syntax = \"proto3\"; package a; import \"common.proto\"; message B { C c = 1; }"
                              "common.proto"  "syntax = \"proto3\"; package a; message C { string display_name = 1; }"})
-        {:keys [descriptor files]} (proto/load-file (path/join dir "api.proto"))]
+        {:keys [descriptor files]} (proto/read-proto (path/join dir "api.proto"))]
     (is (= 3 (count files)) "sub/b.proto's import of common.proto resolves against the root's directory")
     (is (contains? (get-in descriptor ["nested" "a" "nested" "C" "fields"]) "display_name")
         "field names are kept as written")))
@@ -38,14 +38,14 @@
   (let [dir (fx/write-tree! {"bad.proto"     "syntax = \"proto3\";\nmessage M {\n  string x = ;\n}"
                              "orphan.proto"  "syntax = \"proto3\"; import \"nowhere.proto\"; message M {}"})]
     (testing "a missing file"
-      (is (str/includes? (str (thrown-message #(proto/load-file (path/join dir "none.proto"))))
+      (is (str/includes? (str (thrown-message #(proto/read-proto (path/join dir "none.proto"))))
                          (str "cannot read proto " (path/join dir "none.proto")))))
     (testing "a syntax error names the file and line"
-      (let [m (str (thrown-message #(proto/load-file (path/join dir "bad.proto"))))]
+      (let [m (str (thrown-message #(proto/read-proto (path/join dir "bad.proto"))))]
         (is (str/includes? m "bad.proto") m)
         (is (str/includes? m "line 3") m)))
     (testing "a missing import"
-      (is (str/includes? (str (thrown-message #(proto/load-file (path/join dir "orphan.proto"))))
+      (is (str/includes? (str (thrown-message #(proto/read-proto (path/join dir "orphan.proto"))))
                          "nowhere.proto")))))
 
 (defn- grpc-contract [ops]
