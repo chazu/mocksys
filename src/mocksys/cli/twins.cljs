@@ -164,6 +164,9 @@
                        (default-scenario-for kind (or (:provider flags) (get-in kit [:flags :provider :default]))))
           built    (cond-> ((:build kit) scenario flags)
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))
+          _        (when-let [errs (seq (:errors (contract/validate built)))]
+                     (die (str "kit " kind " generated an invalid contract; nothing was written\n  "
+                               (str/join "\n  " errs))))
           expanded (contract/expand built)]
       (store/write-contract! scenario built)
       (lifecycle/compile! scenario)
