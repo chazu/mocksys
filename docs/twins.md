@@ -41,29 +41,48 @@ eval "$(mocksys env okta/okta)"           # exports BASE_URL=http://localhost:92
 
 ### Writing a kit
 
-A kit is a YAML file: a contract template plus the flags it accepts, each with a default.
+A kit is a YAML file: a contract template plus the flags it accepts, each with a default
+and a type.
 
 ```yaml
 name: directory
 doc: users, groups and memberships composed from genes
-flags:                     # flag -> default; `kit directory --<flag> VALUE` overrides it
+flags:                     # `kit directory --<flag> VALUE` overrides a default
   users-base: /api/v1/users
   rate-limit: 100
+  window: { type: number }   # no default; a number when given
 contract:                  # any contract; usually a list of genes
   seed:
     users: [ { id: u1, status: ACTIVE, profile: { login: alice@example.com } } ]
   genes:
     - crud-collection: { coll: users, base: "{users-base}", seed-name: users,
-                         rate-limit: { max: "{rate-limit}" } }
+                         rate-limit: { max: "{rate-limit}", window: "{window}" } }
 ```
 
 - A string that is **exactly** `"{flag}"` becomes the flag's value with its type, so
   `"{rate-limit}"` above becomes the number `100`. A flag inside a longer string, such as
   `"/v2{users-base}"`, is left as written, and so is a template that names no flag, such
   as an effect's `"{token}"`.
-- A command-line value takes the type of the flag's default. A number default parses the
-  value as a number, and a `true`/`false` default as a boolean. `--users` and
-  `--signing-key` always read a file (a JSON array, a PEM).
+- Each flag is a bare default, such as `rate-limit: 100`, or a map
+  `{default: VALUE, type: TYPE}` in which either key may be left out. A bare default
+  cannot be a map; write `{default: {...}, type: json}` instead.
+- A flag's type is its declared `type`. Without one, the type comes from the default: a
+  number is `number`, `true` or `false` is `boolean`, a list is `json`, and a string or
+  `null` (or no default) is `string`. A declared default must fit its type.
+- `kit` parses each command-line value by the flag's type:
+
+  | Type | `--flag VALUE` becomes |
+  |---|---|
+  | `string` | VALUE as written |
+  | `number` | VALUE as a number; anything else is an error |
+  | `boolean` | `true` or `false`; a bare `--flag` with no value is `true` |
+  | `file` | the text of the file at path VALUE, such as a PEM key |
+  | `json` | the parsed JSON in the file at path VALUE, such as a list of users |
+
+  A flag of any type other than `boolean` needs a value, so a bare `--provider` is an
+  error. The built-in kits declare their types: `okta` and `oauth2` read `--users` as
+  `json`, `okta` reads `--signing-key` as `file`, and `--token-ttl`, `--rate-limit` and
+  `--rate-window` are `number`. `mocksys kits` shows each flag's type.
 - `kit` sets `service`, `scenario` and `origin: kit` on the generated contract. Without a
   `summary` in the template, the kit's `doc` is used. `contract.yaml` keeps the template's
   `genes:` form.

@@ -1,7 +1,7 @@
 # A user kit. Copy it to $MOCKSYS_HOME/kits/ and `mocksys kit directory` generates a
 # users, groups and memberships twin from genes. Each flag below is a default that
-# `--<flag> VALUE` overrides; a value takes the type of its default, so
-# `--rate-limit 5` is the number 5.
+# `--<flag> VALUE` overrides; a bare default also sets the flag's type, so
+# `--rate-limit 5` is the number 5 (see docs/twins.md for declaring a type).
 #
 #   export MOCKSYS_HOME=./.mocks
 #   mkdir -p .mocks/kits && cp examples/kits/directory.yaml .mocks/kits/

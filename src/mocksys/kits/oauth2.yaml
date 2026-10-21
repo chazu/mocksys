@@ -5,8 +5,8 @@ name: oauth2
 doc: OAuth2 provider (picker, single-use codes, userinfo)
 flags:
   provider: github   # github | codeberg; another name gets /<name>/... paths and GitHub's accounts
-  users: null        # --users FILE.json replaces the provider's default accounts
-  token-ttl: null    # seconds until a token expires on the virtual clock; unset never expires
+  users: { type: json }        # --users FILE.json replaces the provider's default accounts
+  token-ttl: { type: number }  # seconds until a token expires on the virtual clock; unset never expires
 contract:
   genes:
     - oauth2-provider: { provider: "{provider}", users: "{users}", token-ttl: "{token-ttl}" }

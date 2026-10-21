@@ -616,45 +616,85 @@
     (vector? x) (mapv #(substitute % vals) x)
     :else       x))
 
+(def flag-types
+  "type -> [default-ok? parse]: the types a kit flag can declare. `parse` turns a
+   command-line string into the value, reading a path with `slurp`; it returns
+   ::bad when the string does not parse."
+  {:string  [string? (fn [v _] v)]
+   :number  [number? (fn [v _] (let [n (js/Number v)] (if (or (str/blank? v) (js/isNaN n)) ::bad n)))]
+   :boolean [boolean? (fn [v _] (case v "true" true "false" false ::bad))]
+   :file    [string? (fn [v slurp] (try (slurp v) (catch :default _ ::bad)))]
+   :json    [any? (fn [v slurp] (try (js->clj (js/JSON.parse (slurp v))) (catch :default _ ::bad)))]})
+
+(defn- inferred-type [default]
+  (cond (number? default) :number (boolean? default) :boolean (sequential? default) :json :else :string))
+
+(defn- flag-decl
+  "A kit's `flags` entry -> {:default :type}. `spec` is a bare default, or a map
+   with `default` and/or `type`. Throws when it is malformed."
+  [k spec]
+  (let [bad #(throw (js/Error. (str "kit flag '" (name k) "': " %)))]
+    (if-not (map? spec)
+      (do (when-not (or (nil? spec) (string? spec) (number? spec) (boolean? spec) (sequential? spec))
+            (bad (str "unsupported default " (pr-str spec))))
+          {:default spec :type (inferred-type spec)})
+      (let [extra   (remove #{"default" "type"} (keys spec))
+            default (get spec "default")
+            t       (if (contains? spec "type") (keyword (str (get spec "type"))) (inferred-type default))
+            [ok?]   (get flag-types t)]
+        (cond
+          (seq extra) (bad (str "unknown key '" (first extra) "' (a declaration has only default and type)"))
+          (not ok?)   (bad (str "unknown type '" (name t) "' (types: "
+                                (str/join ", " (map name (keys flag-types))) ")"))
+          (and (some? default) (not (ok? default)))
+          (bad (str "default " (pr-str default) " is not a " (name t)))
+          :else {:default default :type t})))))
+
 (defn parse-kit
-  "A kit from YAML `text`: `name` (else `default-name`), `doc`, `flags` (flag ->
-   default) and a `contract` template. `source` records where it came from.
-   Throws when the shape is wrong."
+  "A kit from YAML `text`: `name` (else `default-name`), `doc`, `flags` and a
+   `contract` template. Each flag is a bare default, whose type it takes, or
+   {default, type}. `source` records where the kit came from. Throws when the
+   shape is wrong."
   [text source default-name]
   (let [m        (js->clj (yaml/load text))
         flags    (get m "flags")
         template (get m "contract")]
     (when-not (map? m) (throw (js/Error. "a kit is a YAML map with name, doc, flags and contract")))
-    (when-not (or (nil? flags) (map? flags)) (throw (js/Error. "kit `flags` must map each flag to its default")))
+    (when-not (or (nil? flags) (map? flags)) (throw (js/Error. "kit `flags` must map each flag to a default or {default, type}")))
     (when-not (map? template) (throw (js/Error. "a kit needs a `contract` map (the contract template)")))
-    (let [defaults (update-keys (or flags {}) keyword)
+    (let [decls    (into {} (for [[k spec] flags :let [k (keyword k)]] [k (flag-decl k spec)]))
+          defaults (update-vals decls :default)
           doc      (str (get m "doc" ""))]
-      {:name     (str (get m "name" default-name))
-       :doc      doc
-       :source   source
-       :flags    (set (keys defaults))
-       :defaults defaults
-       :build    (fn [scenario opts]
-                   (let [given (into {} (filter (comp some? val)) (select-keys opts (keys defaults)))]
-                     (-> (substitute template (merge defaults given))
-                         (assoc "service" (first (str/split scenario #"/"))
-                                "scenario" scenario
-                                "origin" "kit")
-                         (update "summary" #(or % doc)))))})))
+      {:name   (str (get m "name" default-name))
+       :doc    doc
+       :source source
+       :flags  decls
+       :build  (fn [scenario opts]
+                 (let [given (into {} (filter (comp some? val)) (select-keys opts (keys decls)))]
+                   (-> (substitute template (merge defaults given))
+                       (assoc "service" (first (str/split scenario #"/"))
+                              "scenario" scenario
+                              "origin" "kit")
+                       (update "summary" #(or % doc)))))})))
 
 (def ^:private builtin-yaml
   "Built-in YAML kits, inlined at build time: the bun binary cannot read repo files."
   {"oauth2" (rc/inline "./kits/oauth2.yaml")})
 
 (def builtin-kits
-  "name -> kit. A kit is {:name :doc :source :flags :build}, plus :defaults for a
-   YAML kit. `:flags` are the `kit` options it honors; `:build` takes [scenario
-   opts] and returns the contract to write."
+  "name -> kit. A kit is {:name :doc :source :flags :build}. `:flags` maps each
+   `kit` option it honors to {:default :type}, the type a key of `flag-types`;
+   `:build` takes [scenario parsed-flags] and returns the contract to write."
   (merge
    {"okta" {:name   "okta"
             :doc    "Okta twin: users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + membership"
             :source "built-in"
-            :flags  #{:users :rate-limit :rate-window :token-ttl :issuer :signing-key}
+            :flags  {:users       {:default nil :type :json}
+                     :rate-limit  {:default nil :type :number}
+                     :rate-window {:default nil :type :number}
+                     :token-ttl   {:default nil :type :number}
+                     :issuer      {:default nil :type :string}
+                     :signing-key {:default nil :type :file}}
             :build  (fn [scenario {:keys [users rate-limit rate-window token-ttl issuer signing-key]}]
                       (okta scenario users {:rate-limit (when rate-limit
                                                           (cond-> {"max" rate-limit}
@@ -689,38 +729,35 @@
           {:kits builtin-kits :warnings []}
           files))
 
-(def ^:private numeric-flags #{:token-ttl :rate-limit :rate-window})
-
-(defn- flag-value
-  "Parse kit flag `k` from its command-line value `v`. --users and --signing-key
-   read a file. Otherwise the value takes the type of the flag's default."
-  [k v default slurp]
-  (let [file (fn [what parse]
-               (when-not (string? v) (throw (js/Error. (str "--" (name k) " needs a file"))))
-               (try (parse (slurp v))
-                    (catch :default _ (throw (js/Error. (str "could not read --" (name k) " as " what ": " v))))))]
-    (cond
-      (= k :users)         (file "a JSON array" #(js->clj (js/JSON.parse %)))
-      (= k :signing-key)   (file "a PEM file" identity)
-      (or (numeric-flags k) (number? default))
-      (let [n (js/Number v)]
-        (if (or (boolean? v) (js/isNaN n)) (throw (js/Error. (str "--" (name k) " needs a number, got " v))) n))
-      (boolean? default)   (if (string? v) (= v "true") v)
-      :else                v)))
-
 (defn parse-flags
-  "The kit flags in command-line `opts`, parsed. `slurp` reads a file's text.
-   Throws with a message naming the flag when a value does not parse."
+  "The kit flags in command-line `opts` (a string, or true for a bare `--flag`),
+   parsed by each flag's declared type. `slurp` reads a file's text. Throws with a
+   message naming the flag when a value is missing or does not parse."
   [kit opts slurp]
-  (into {} (for [[k v] opts :when ((:flags kit) k)]
-             [k (flag-value k v (get-in kit [:defaults k]) slurp)])))
+  (into {}
+        (for [[k v] opts
+              :let [t (get-in kit [:flags k :type])]
+              :when t]
+          (let [flag  (str "--" (name k))
+                fail  #(throw (js/Error. %))
+                value (cond
+                        (and (true? v) (= t :boolean)) true
+                        (true? v)                      (fail (str flag " needs a value"))
+                        :else ((second (get flag-types t)) v slurp))]
+            (if (= ::bad value)
+              (fail (case t
+                      :boolean (str flag " needs true or false, got " v)
+                      :number  (str flag " needs a number, got " v)
+                      :file    (str "could not read " flag " as a file: " v)
+                      :json    (str "could not read " flag " as a JSON file: " v)))
+              [k value])))))
 
 (defn unsupported-flags
   "The options in `opts` that `kit` does not declare, in sorted order. `scenario`
    and `port` belong to the `kit` command itself."
   [kit opts]
   (->> (keys opts)
-       (remove (:flags kit))
+       (remove #(contains? (:flags kit) %))
        (remove #{:scenario :port})
        sort
        vec))

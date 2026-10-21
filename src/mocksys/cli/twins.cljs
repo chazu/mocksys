@@ -138,25 +138,6 @@
       (doseq [w warnings] (println (str "warning: " w))))
     kits))
 
-(def ^:private numeric-flags #{:token-ttl :rate-limit :rate-window})
-
-(defn- flag-value
-  "Parse kit flag `k` from its command-line value `v`. --users and --signing-key
-   read a file. Otherwise the value takes the type of the flag's default."
-  [k v default]
-  (let [file (fn [what parse]
-               (when-not (string? v) (die (str "--" (name k) " needs a file")))
-               (try (parse (store/slurp v))
-                    (catch :default _ (die (str "could not read --" (name k) " as " what ": " v)))))]
-    (cond
-      (= k :users)         (file "a JSON array" #(js->clj (js/JSON.parse %)))
-      (= k :signing-key)   (file "a PEM file" identity)
-      (or (numeric-flags k) (number? default))
-      (let [n (js/Number v)]
-        (if (or (boolean? v) (js/isNaN n)) (die (str "--" (name k) " needs a number, got " v)) n))
-      (boolean? default)   (if (string? v) (= v "true") v)
-      :else                v)))
-
 (defn cmd-kit
   "Generate a complete (often stateful) mock — a digital twin — from a kit in one
    shot. Kits are built in or YAML files in $MOCKSYS_HOME/kits (see `mocksys kits`):
@@ -177,10 +158,10 @@
           _        (when-let [bad (seq (kits/unsupported-flags kit opts))]
                      (die (str "kit " kind " does not support "
                                (str/join ", " (map #(str "--" (name %)) bad)))))
-          flags    (into {} (for [[k v] opts :when ((:flags kit) k)]
-                              [k (flag-value k v (get-in kit [:defaults k]))]))
+          flags    (try (kits/parse-flags kit opts store/slurp)
+                        (catch :default e (die (.-message e))))
           scenario (or (when (string? (:scenario opts)) (:scenario opts))
-                       (default-scenario-for kind (or (:provider flags) (get-in kit [:defaults :provider]))))
+                       (default-scenario-for kind (or (:provider flags) (get-in kit [:flags :provider :default]))))
           built    (cond-> ((:build kit) scenario flags)
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))
           expanded (contract/expand built)]
@@ -198,17 +179,17 @@
 
 (defn cmd-kits
   "List every kit `kit` can generate, built in or from $MOCKSYS_HOME/kits, with its
-   flags and their defaults:  kits"
+   flags, their types and their defaults:  kits"
   [_]
   (let [registry (load-kits)]
     (println (str "# kits (mocksys kit <name> [--flag VALUE ...]); yours go in " store/kits-dir "/*.yaml"))
-    (doseq [[kname {:keys [doc source flags defaults]}] (sort registry)]
+    (doseq [[kname {:keys [doc source flags]}] (sort registry)]
       (println (str "  · " kname "  " doc "  [" source "]"))
       (println (str "      " (if (empty? flags)
                                  "(no flags)"
-                                 (str/join "  " (for [f (sort flags)
-                                                      :let [d (get defaults f)]]
-                                                  (str "--" (name f) (when (some? d) (str " (default " d ")")))))))))
+                                 (str/join "  " (for [[f {:keys [default type]}] (sort flags)]
+                                                  (str "--" (name f) " <" (name type) ">"
+                                                       (when (some? default) (str " (default " default ")")))))))))
     (println)
     (println "  e.g.  mocksys kit okta            # a digital twin of Okta")))
 
