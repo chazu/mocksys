@@ -15,6 +15,7 @@
             [promesa.core :as p]
             ["@grpc/grpc-js" :as grpc]
             ["@grpc/proto-loader" :as loader]
+            ["protobufjs" :as protobuf]
             [mocksys.runtime.imposter :as imposter]))
 
 (def ^:private codes (js->clj (.-status grpc)))
@@ -101,18 +102,18 @@
                                 :else                 (str "HTTP " status))}}))))
 
 (defn- repeated-field
-  "The name of the reply type's only repeated field, or nil."
-  [^js md]
-  (let [^js reply (.. md -responseType -type)
-        fields    (filter #(= "LABEL_REPEATED" (.-label ^js %)) (array-seq (.-field reply)))]
+  "The name of the reply type's only repeated field, or nil. A map field is not
+   one, though the descriptor marks it repeated."
+  [^js reply-type]
+  (let [fields (filter #(and (.-repeated ^js %) (not (.-map ^js %))) (.-fieldsArray reply-type))]
     (when (= 1 (count fields)) (.-name ^js (first fields)))))
 
 (defn- no-proxy [_ _]
   (p/rejected (js/Error. "proxy responses are not served over grpc")))
 
-(defn- handler [imp ^js md]
+(defn- handler [imp ^js md ^js reply-type]
   (let [path     (.-path md)
-        repeated (repeated-field md)]
+        repeated (repeated-field reply-type)]
     (fn [^js call callback]
       (-> (p/let [out (imposter/respond imp (request-of call path) {:proxy! no-proxy})
                   _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
@@ -156,21 +157,27 @@
 
 ;; --- servers -------------------------------------------------------------------
 
-(defn- package-definition [descriptor]
-  (try (.fromJSON loader (clj->js descriptor) loader-options)
+(defn- package-definition
+  "The descriptor read by proto-loader, which grpc-js serves from, and by
+   protobufjs, which knows the types: [pkg-def root]."
+  [descriptor]
+  (try [(.fromJSON loader (clj->js descriptor) loader-options)
+        (.resolveAll (.fromJSON protobuf/Root (clj->js descriptor)))]
        (catch :default e (bad (str "descriptor: " (ex-message e))))))
 
 (defn- services
   "[[service-definition {method handler}]] for each service; only unary methods get
-   a handler, so grpc-js answers the rest UNIMPLEMENTED."
-  [imp pkg-def]
+   a handler, so grpc-js answers the rest UNIMPLEMENTED. `root` is the protobufjs
+   reading of the same descriptor, which knows each reply's type."
+  [imp pkg-def ^js root]
   (for [k (js-keys pkg-def)
         :let [^js svc (aget pkg-def k)]
         :when (nil? (.-format svc))]
     [svc (into {} (for [m (js-keys svc)
-                        :let [^js md (aget svc m)]
+                        :let [^js md  (aget svc m)
+                              ^js rpc (aget (.-methods (.lookupService root k)) m)]
                         :when (not (or (.-requestStream md) (.-responseStream md)))]
-                    [m (handler imp md)]))]))
+                    [m (handler imp md (.-resolvedResponseType rpc))]))]))
 
 (defn- bind! [^js server addr]
   (js/Promise.
@@ -187,11 +194,11 @@
    [{:stop f}], where `f` closes the server and resolves when it has."
   [imp]
   (check-stubs! imp)
-  (let [pkg-def      (package-definition (get-in @imp [:spec "descriptor"]))
-        ^js server   (grpc/Server.)
-        port         (imposter/port imp)
-        stop         (fn [] (.forceShutdown server) (p/resolved nil))]
-    (doseq [[svc impl] (services imp pkg-def)]
+  (let [[pkg-def root] (package-definition (get-in @imp [:spec "descriptor"]))
+        ^js server     (grpc/Server.)
+        port           (imposter/port imp)
+        stop           (fn [] (.forceShutdown server) (p/resolved nil))]
+    (doseq [[svc impl] (services imp pkg-def root)]
       (.addService server svc (clj->js impl)))
     (.register server clock-path (clock-handler imp) text-out text-in "unary")
     (-> (p/let [_ (bind! server (str "127.0.0.1:" port))
