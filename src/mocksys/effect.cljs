@@ -602,10 +602,24 @@
 (defn- status? [v] (and (integer? v) (<= 100 v 599)))
 (defn- scalar? [v] (or (string? v) (number? v) (boolean? v)))
 
+(def ^:private reserved-names
+  "Names a state bucket, collection, id field or variable cannot take: JavaScript
+   gives them meaning on every object."
+  #{"__proto__" "constructor" "prototype"})
+
+(def ^:private not-reserved "other than __proto__, constructor and prototype")
+
+(defn- reserved-errors
+  "Problems with the keys of `m` at `at` that name a `what`."
+  [at what m]
+  (for [k (sort (keys m)) :when (reserved-names k)]
+    (str at "." k ": a " what " cannot be named " k " (use a name " not-reserved ")")))
+
 (def ^:private kinds
   "field kind -> [test, what the error says it must be]"
   {:string   [string? "a string"]
    :template [scalar? "a string"]
+   :name     [#(and (string? %) (not (reserved-names %))) (str "a string " not-reserved)]
    :number   [finite? "a number"]
    :status   [status? "an HTTP status from 100 to 599"]
    :object   [map? "an object"]
@@ -655,28 +669,31 @@
 (defn- bind-errors [at binds]
   (if-not (map? binds)
     [(str at " must be an object of variable -> source")]
-    (mapcat
-     (fn [[n spec]]
-       (let [at (str at "." n)]
-         (cond
-           (not (map? spec))
-           [(str at " must be an object")]
-           (not-any? #(contains? spec %) bind-sources)
-           [(str at " needs one of " (str/join ", " bind-sources))]
-           :else
-           (concat
-            (shape-errors at spec {"const" :any "query" :string "body" :string "bodyJson" :any "pathRegex" :string
-                                   "header" :string "bearer" :boolean "baseUrl" :any "now" :any} #{})
-            (when-let [re (get spec "pathRegex")]
-              (when (string? re)
-                (try (js/RegExp. re) nil (catch :default _ [(str at ".pathRegex is not a valid regex " (pr-str re))]))))
-            (when (contains? spec "now") (now-errors (str at ".now") (get spec "now")))))))
-     binds)))
+    (concat
+     (reserved-errors at "variable" binds)
+     (mapcat
+      (fn [[n spec]]
+        (let [at (str at "." n)]
+          (cond
+            (not (map? spec))
+            [(str at " must be an object")]
+            (not-any? #(contains? spec %) bind-sources)
+            [(str at " needs one of " (str/join ", " bind-sources))]
+            :else
+            (concat
+             (shape-errors at spec {"const" :any "query" :string "body" :string "bodyJson" :any "pathRegex" :string
+                                    "header" :string "bearer" :boolean "baseUrl" :any "now" :any} #{})
+             (when-let [re (get spec "pathRegex")]
+               (when (string? re)
+                 (try (js/RegExp. re) nil (catch :default _ [(str at ".pathRegex is not a valid regex " (pr-str re))]))))
+             (when (contains? spec "now") (now-errors (str at ".now") (get spec "now")))))))
+      binds))))
 
 (defn- mint-errors [at mints]
   (if-not (map? mints)
     [(str at " must be an object of variable -> {prefix}")]
-    (mapcat (fn [[n spec]] (when (some? spec) (shape-errors (str at "." n) spec {"prefix" :template} #{}))) mints)))
+    (concat (reserved-errors at "variable" mints)
+            (mapcat (fn [[n spec]] (when (some? spec) (shape-errors (str at "." n) spec {"prefix" :template} #{}))) mints))))
 
 (defn- claim-errors [at claims]
   (if-not (map? claims)
@@ -711,7 +728,7 @@
   ([fields required more]
    (fn [at m] (let [es (shape-errors at m fields required)] (if (seq es) es (more at m))))))
 
-(def ^:private keyed {"collection" :string "key" :template "as" :string "status" :status "miss" response-fields})
+(def ^:private keyed {"collection" :name "key" :template "as" :name "status" :status "miss" response-fields})
 (def ^:private paged {"after" :template "limit" :template "link" :template})
 
 (def verbs
@@ -720,13 +737,13 @@
    an effect has exactly one, or `store` then `respond`."
   [{:verb "bind"    :run run-bind    :check bind-errors}
    {:verb "limit"   :run run-limit
-    :check (fields-check {"bucket" :string "key" :template "max" :number "window" :number "miss" response-fields} #{"bucket"})}
+    :check (fields-check {"bucket" :name "key" :template "max" :number "window" :number "miss" response-fields} #{"bucket"})}
    {:verb "consume" :run (bucket-reader true)
-    :check (fields-check {"bucket" :string "key" :template "as" :string "miss" response-fields} #{"bucket" "key"})}
+    :check (fields-check {"bucket" :name "key" :template "as" :name "miss" response-fields} #{"bucket" "key"})}
    {:verb "lookup"  :run (bucket-reader false)
-    :check (fields-check {"bucket" :string "key" :template "as" :string "miss" response-fields} #{"bucket" "key"})}
+    :check (fields-check {"bucket" :name "key" :template "as" :name "miss" response-fields} #{"bucket" "key"})}
    {:verb "resolve" :run run-resolve
-    :check (fields-check {"seed" :string "by" :string "eq" :template "as" :string "miss" response-fields} #{"seed" "by"})}
+    :check (fields-check {"seed" :string "by" :string "eq" :template "as" :name "miss" response-fields} #{"seed" "by"})}
    {:verb "find"    :run run-find
     :check (fn [at x]
              (each-errors at x (fields-check (assoc (dissoc keyed "status") "field" :string "eq" :template "pick" :string
@@ -737,32 +754,32 @@
    {:verb "call"    :run run-call    :check (fn [at x] (each-errors at x call-errors))}
    {:verb "mint"    :run run-mint    :check mint-errors}
    {:verb "sign"    :run run-sign
-    :check (fn [at x] (each-errors at x (fields-check {"as" :string "key" :string "header" :object "claims" :any}
+    :check (fn [at x] (each-errors at x (fields-check {"as" :name "key" :string "header" :object "claims" :any}
                                                       #{"as" "key"}
                                                       (fn [at s] (claim-errors (str at ".claims") (get s "claims" {}))))))}
    {:verb "create"   :terminal :collection :run run-create
-    :check (fields-check {"collection" :string "merge" :names "body" :object "as" :string "status" :status} #{"collection"})}
+    :check (fields-check {"collection" :name "merge" :names "body" :object "as" :name "status" :status} #{"collection"})}
    {:verb "get"      :terminal :collection :run run-get    :check (fields-check keyed #{"collection" "key"})}
    {:verb "update"   :terminal :collection :run run-update
     :check (fields-check (assoc keyed "mergeVar" :string "patch" :object) #{"collection" "key"})}
    {:verb "remove"   :terminal :collection :run run-remove :check (fields-check (dissoc keyed "as") #{"collection" "key"})}
    {:verb "list"     :terminal :collection :run run-list
-    :check (fields-check (merge paged {"collection" :string "filter" :template "status" :status "invalid" response-fields})
+    :check (fields-check (merge paged {"collection" :name "filter" :template "status" :status "invalid" response-fields})
                          #{"collection"})}
    {:verb "link"     :terminal :collection :run run-link
-    :check (fields-check {"collection" :string "id" :template "row" :object "status" :status} #{"collection" "id"})}
+    :check (fields-check {"collection" :name "id" :template "row" :object "status" :status} #{"collection" "id"})}
    {:verb "unlink"   :terminal :collection :run run-unlink
-    :check (fields-check {"collection" :string "id" :template "status" :status} #{"collection" "id"})}
+    :check (fields-check {"collection" :name "id" :template "status" :status} #{"collection" "id"})}
    {:verb "listJoin" :terminal :collection :run run-list-join
-    :check (fields-check (merge paged {"via" :string "byField" :string "byValue" :template "hydrate" :string
+    :check (fields-check (merge paged {"via" :name "byField" :string "byValue" :template "hydrate" :name
                                        "hydrateVia" :string "status" :status})
                          #{"via" "byField" "byValue" "hydrate" "hydrateVia"})}
    {:verb "render"   :terminal :collection :run run-render
-    :check (fields-check {"collection" :string "filter" :template "row" :string "wrap" :string "status" :status
+    :check (fields-check {"collection" :name "filter" :template "row" :string "wrap" :string "status" :status
                           "invalid" response-fields}
                          #{"collection"})}
    {:verb "store"    :terminal :handshake
-    :check (fields-check {"bucket" :string "key" :template "value" :template "valueVar" :string "ttl" :number}
+    :check (fields-check {"bucket" :name "key" :template "value" :template "valueVar" :string "ttl" :number}
                          #{"bucket" "key"})}
    {:verb "respond"  :terminal :handshake :check (fields-check response-fields #{})}])
 
@@ -896,9 +913,11 @@
      (when (map? (get s "seed"))
        (for [[k v] (get s "seed") :when (not (sequential? v))] (str "state.seed." k " must be a list")))
      (when (map? (get s "collections"))
-       (mapcat (fn [[k c]]
-                 (let [at (str "state.collections." k)]
-                   (concat (shape-errors at c {"idField" :string "seed" :any} #{})
-                           (when (and (map? c) (some? (get c "seed")) (not (sequential? (get c "seed"))))
-                             [(str at ".seed must be a list of rows")]))))
-               (get s "collections"))))))
+       (concat
+        (reserved-errors "state.collections" "collection" (get s "collections"))
+        (mapcat (fn [[k c]]
+                  (let [at (str "state.collections." k)]
+                    (concat (shape-errors at c {"idField" :name "seed" :any} #{})
+                            (when (and (map? c) (some? (get c "seed")) (not (sequential? (get c "seed"))))
+                              [(str at ".seed must be a list of rows")]))))
+                (get s "collections")))))))

@@ -2,7 +2,9 @@
   "Names from an effect, the imposter's settings or a request are only keys: none of
    them reaches Object.prototype, so one imposter cannot change what another answers."
   (:require [clojure.test :refer [deftest testing is async]]
+            [clojure.string :as str]
             [promesa.core :as p]
+            [mocksys.contract :as contract]
             [mocksys.effect :as effect]
             [mocksys.runtime.imposter :as imp]))
 
@@ -90,3 +92,44 @@
                       (is (= 200 (:status o)) "a real id still answers"))))
           (p/catch (fn [e] (is (nil? e) (ex-message e))))
           (p/finally done)))))
+
+(deftest reserved-names-are-refused
+  (let [refused? (fn [effect field]
+                   (some #(and (str/starts-with? % field) (str/includes? % "__proto__, constructor and prototype"))
+                         (effect/errors effect)))]
+    (doseq [n ["__proto__" "constructor" "prototype"]]
+      (testing n
+        (is (refused? {"store" {"bucket" n "key" "k"} "respond" {}} "store.bucket"))
+        (is (refused? {"limit" {"bucket" n} "respond" {}} "limit.bucket"))
+        (is (refused? {"consume" {"bucket" "b" "key" "k" "as" n} "respond" {}} "consume.as"))
+        (is (refused? {"lookup" {"bucket" n "key" "k"} "respond" {}} "lookup.bucket"))
+        (is (refused? {"resolve" {"seed" "s" "by" "id" "as" n} "respond" {}} "resolve.as"))
+        (is (refused? {"find" {"collection" n "key" "k"} "respond" {}} "find.collection"))
+        (is (refused? {"find" [{"collection" "users" "key" "k" "as" n}] "respond" {}} "find[0].as"))
+        (is (refused? {"sign" {"as" n "key" "pem"} "respond" {}} "sign.as"))
+        (is (refused? {"create" {"collection" "users" "as" n}} "create.as"))
+        (is (refused? {"get" {"collection" n "key" "k"}} "get.collection"))
+        (is (refused? {"link" {"collection" n "id" "k"}} "link.collection"))
+        (is (refused? {"listJoin" {"via" "m" "byField" "g" "byValue" "1" "hydrate" n "hydrateVia" "u"}} "listJoin.hydrate"))
+        (is (refused? {"bind" {n {"query" "q"}} "respond" {}} (str "bind." n)))
+        (is (refused? {"mint" {n {}} "respond" {}} (str "mint." n)))
+        (is (some #(str/includes? % "__proto__, constructor and prototype")
+                  (effect/settings-errors {"collections" {n {"seed" []}}}))
+            "a collection name")
+        (is (some #(str/includes? % "__proto__, constructor and prototype")
+                  (effect/settings-errors {"collections" {"users" {"idField" n}}}))
+            "an idField")))))
+
+(deftest the-daemon-refuses-a-reserved-name-on-post
+  (is (str/includes? (try (imp/create (spec [{"responses" [{"effect" {"store" {"bucket" "__proto__" "key" "k"} "respond" {}}}]}]))
+                          nil (catch :default e (ex-message e)))
+                     "stubs[0].responses[0].effect: store.bucket must be a string other than __proto__, constructor and prototype"))
+  (is (str/includes? (try (imp/create (spec [] "state" {"collections" {"constructor" {"seed" []}}}))
+                          nil (catch :default e (ex-message e)))
+                     "state.collections.constructor")))
+
+(deftest the-cli-refuses-a-reserved-name
+  (let [errors #(:errors (contract/validate {"operations" [{"id" "op" "request" {"method" "GET" "path" "/x"} "effect" %}]
+                                             "state" {"collections" {"constructor" {}}}}))]
+    (is (some #(str/includes? % "op: bind.__proto__") (errors {"bind" {"__proto__" {"query" "q"}} "respond" {}})))
+    (is (some #(str/includes? % "state.collections.constructor") (errors {"respond" {}})))))

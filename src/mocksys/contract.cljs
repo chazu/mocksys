@@ -365,7 +365,10 @@
      (cond-> {"protocol" (get contract "protocol" "http") "stubs" stubs "name" (get contract "scenario")}
        port       (assoc "port" port)
        (seq mods) (assoc "modules" mods)
-       (or clock? (effect/contract-stateful? contract)) (assoc "state" (effect-settings contract clock?))))))
+       (or clock? (effect/contract-stateful? contract))
+       (assoc "state" (let [s (effect-settings contract clock?)]
+                        (when-let [e (first (effect/settings-errors s))] (throw (js/Error. e)))
+                        s))))))
 
 ;; --- lift: recorded imposter -> contract ----------------------------------
 
