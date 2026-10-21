@@ -59,27 +59,92 @@
            (:json r))
         "state is the imposter's shared state, so it persists across requests")))
 
-(deftest a-verb-can-end-the-request
-  (let [vs (verbs {"gate" (fn [^js ctx]
-                            (case (.. ctx -args -sig)
-                              "good" true
-                              "teapot" #js {:respond #js {:status 418 :headers #js {"X-Why" "tea"} :body "short and stout"}}
-                              #js {:respond #js {:status 401 :json #js {:error "bad signature"}}}))})
-        op {"id" "hook"
-            "request" {"method" "POST" "path" "/hook"}
-            "effect" {"bind" {"sig" {"header" "x-sig"}}
-                      "call" {"verb" "gate" "args" {"sig" "{sig}"}}
-                      "respond" {"status" 202 "json" {"ok" true}}}}
-        run #(h/run op {:method "POST" :path "/hook" :headers {"x-sig" %}} {:verbs vs})]
-    (testing "a plain value falls through to the rest of the effect"
-      (is (= [202 {"ok" true}] ((juxt :status :json) (run "good")))))
-    (testing "{respond: {json}} ends the request as JSON"
+(defn- respond-with
+  "Verbs whose `gate` answers ctx.respond(spec) for the request's x-sig: `good`
+   passes, any other value looks up the spec in `specs`."
+  [specs]
+  (verbs {"gate" (fn [^js ctx]
+                   (let [sig (.. ctx -args -sig)]
+                     (if (= "good" sig) true (.respond ctx (get specs sig)))))}))
+
+(def ^:private gate-op
+  {"id" "hook"
+   "request" {"method" "POST" "path" "/hook"}
+   "effect" {"bind" {"sig" {"header" "x-sig"}}
+             "call" {"verb" "gate" "args" {"sig" "{sig}"} "as" "gated"}
+             "respond" {"status" 202 "json" {"gated" "{gated}"}}}})
+
+(defn- hook [op vs sig] (h/run op {:method "POST" :path "/hook" :headers {"x-sig" sig}} {:verbs vs}))
+
+(deftest a-verb-ends-the-request-with-ctx-respond
+  (let [vs (respond-with {"forged" #js {:status 401 :json #js {:error "bad signature"}}
+                          "teapot" #js {:status 418 :headers #js {"X-Why" "tea"} :body "short and stout"}
+                          "plain"  #js {:status 403 :text "no"}})
+        run (partial hook gate-op vs)]
+    (testing "any other value falls through to the rest of the effect"
+      (is (= [202 {"gated" "true"}] ((juxt :status :json) (run "good")))))
+    (testing "json is sent as JSON"
       (let [r (run "forged")]
         (is (= [401 {"error" "bad signature"}] ((juxt :status :json) r)))
         (is (= "application/json" (get-in r [:headers "Content-Type"])))))
-    (testing "{respond: {body}} ends it with that text and those headers"
+    (testing "body is sent as it is, with the headers given"
       (let [r (run "teapot")]
-        (is (= [418 "short and stout" "tea"] [(:status r) (:body r) (get-in r [:headers "X-Why"])]))))))
+        (is (= [418 "short and stout" "tea"] [(:status r) (:body r) (get-in r [:headers "X-Why"])]))))
+    (testing "text is sent as text, with no JSON content type"
+      (let [r (run "plain")]
+        (is (= [403 "no"] [(:status r) (:body r)]))
+        (is (nil? (get-in r [:headers "Content-Type"])))))))
+
+(deftest a-respond-key-is-just-a-value
+  (let [vs (verbs {"gate" (fn [_] (clj->js {"respond" {"status" 401}}))})
+        r  (hook gate-op vs "x")]
+    (is (= 202 (:status r)) "a plain {respond} object does not end the request")
+    (is (= "{\"respond\":{\"status\":401}}" (get-in r [:json "gated"]))
+        "it is bound to `as` like any other value")))
+
+(deftest ctx-respond-skips-later-writes
+  (let [vs     (respond-with {"forged" #js {:status 401 :json #js {:error "no"}}})
+        create {"id" "receive"
+                "request" {"method" "POST" "path" "/hook"}
+                "effect" {"bind" {"sig" {"header" "x-sig"}}
+                          "call" {"verb" "gate" "args" {"sig" "{sig}"}}
+                          "mint" {"id" {"prefix" "d_"}}
+                          "create" {"collection" "deliveries" "body" {"id" "{id}"} "status" 201}}}
+        store  {"id" "remember"
+                "request" {"method" "POST" "path" "/hook"}
+                "effect" {"bind" {"sig" {"header" "x-sig"}}
+                          "call" {"verb" "gate" "args" {"sig" "{sig}"}}
+                          "store" {"bucket" "seen" "key" "{sig}" "value" "yes"}
+                          "respond" {"status" 204}}}
+        colls  {"deliveries" {"idField" "id" "seed" []}}
+        list   {"id" "list" "request" {"method" "GET" "path" "/d"}
+                "effect" {"list" {"collection" "deliveries"}}}
+        look   {"id" "look" "request" {"method" "GET" "path" "/seen"}
+                "effect" {"lookup" {"bucket" "seen" "key" "forged" "as" "v" "miss" {"status" 404}}
+                          "respond" {"status" 200 "text" "{v}"}}}
+        state  (h/fresh-state)
+        run    (fn [op req] (h/run op req {:verbs vs :collections colls} state))]
+    (is (= 401 (:status (run create {:method "POST" :path "/hook" :headers {"x-sig" "forged"}}))))
+    (is (= 401 (:status (run store {:method "POST" :path "/hook" :headers {"x-sig" "forged"}}))))
+    (is (= 201 (:status (run create {:method "POST" :path "/hook" :headers {"x-sig" "good"}}))))
+    (is (= 1 (count (:json (run list {:path "/d"}))))
+        "only the delivery that passed the gate was created")
+    (is (= 404 (:status (run look {:path "/seen"}))) "the refused request stored nothing")))
+
+(deftest an-invalid-respond-is-a-500-naming-the-verb
+  (let [circular (let [o #js {}] (set! (.-self o) o) o)
+        err (fn [spec]
+              (try (hook gate-op (respond-with {"x" spec}) "x") nil
+                   (catch :default e (ex-message e))))]
+    (is (= "verb 'gate': ctx.respond takes an object {status, headers, json | text | body}" (err 5)))
+    (is (= "verb 'gate': ctx.respond takes an object {status, headers, json | text | body}" (err nil)))
+    (is (= "verb 'gate': ctx.respond got unknown key(s) jsn (use status, headers, json, text or body)"
+           (err #js {:status 200 :jsn #js {}})))
+    (is (= "verb 'gate': ctx.respond json is undefined" (err #js {:json js/undefined})))
+    (is (= "verb 'gate': ctx.respond takes one of json, text or body" (err #js {:json 1 :text "a"})))
+    (is (= "verb 'gate': ctx.respond status must be an HTTP status code" (err #js {:status "ok"})))
+    (is (= "verb 'gate': ctx.respond text must be a string" (err #js {:text 5})))
+    (is (str/starts-with? (str (err #js {:json circular})) "verb 'gate': ctx.respond json does not serialize: "))))
 
 (deftest call-runs-after-reads-and-before-mint
   (let [vs (verbs {"first"  (fn [^js ctx] (str "row " (.. ctx -vars -user -id)
