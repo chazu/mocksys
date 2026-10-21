@@ -13,6 +13,8 @@
 #   node examples/grpc-todos/client.js localhost:9150 WatchTodos '{"filter":"done eq true"}'
 #   node examples/grpc-todos/client.js localhost:9150 PreviewImport '[{"title":"a"},{"title":"b"}]'
 #   node examples/grpc-todos/client.js localhost:9150 CreateTodos '[{"title":"a"},{"title":"b"}]'
+# For gRPC over TLS, add `tls: true` below, run it again, and trust the mocksys CA:
+#   NODE_EXTRA_CA_CERTS="$(mocksys tls ca)" node examples/grpc-todos/client.js --tls localhost:9150 GetTodo '{"id":"t1"}'
 service: todo
 scenario: demo/todos
 origin: authored

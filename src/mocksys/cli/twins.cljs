@@ -5,14 +5,16 @@
             [mocksys.mb :as mb]
             [mocksys.store :as store]
             [mocksys.service :as service]
-            [mocksys.inject :as inject]
             [mocksys.contract :as contract]
+            [mocksys.effect :as effect]
             [mocksys.proto :as proto]
             [mocksys.runtime.grpc :as grpc]
             [mocksys.conform :as conform]
             [mocksys.kits :as kits]
             [mocksys.lifecycle :as lifecycle]
-            [mocksys.cli.util :refer [die running-imposter]]))
+            [mocksys.modules :as modules]
+            [mocksys.tls :as tls]
+            [mocksys.cli.util :refer [die running-imposter modules-notice]]))
 
 (defn cmd-conform
   "Replay a request corpus at the twin and diff it against reality — the fidelity
@@ -44,7 +46,7 @@
                              (conform/recorded->corpus (get full "requests")))
                            []))
               port      (lifecycle/ensure-running! scenario (:port opts))
-              twin-base (str "http://localhost:" port)]
+              twin-base (lifecycle/address scenario port)]
         (when (empty? corpus)
           (die (str "empty corpus — pass --corpus FILE, or `run` the twin, drive some "
                     "traffic at it, then `conform " scenario "` to replay it")))
@@ -55,7 +57,7 @@
                 {:fails fails :total (count corpus)}
                 (let [req (first reqs)
                       label (str (get req "method" "GET") " " (get req "path"))]
-                  (p/let [tw (conform/fire twin-base req)
+                  (p/let [tw (conform/fire twin-base req tls/fetch-own)
                           lv (when against (conform/fire against req))]
                     (let [[ok? note]
                           (if against
@@ -115,12 +117,13 @@
                  (die (str "unknown clock verb '" verb "' — use: advance <dur> | set <ts> | (nothing)")))]
       (p/let [live (mb/list-imposters)
               imp  (running-imposter scenario live)
-              out  (if (proto/grpc? (store/read-contract scenario))
-                     (grpc/clock-call (:port imp) body)
-                     (p/let [res  (js/fetch (str "http://localhost:" (:port imp) "/_mocksys/clock")
-                                            #js {:method "POST"
-                                                 :headers #js {"Content-Type" "application/json"}
-                                                 :body (js/JSON.stringify (clj->js body))})
+              c    (store/read-contract scenario)
+              out  (if (proto/grpc? c)
+                     (grpc/clock-call (:port imp) body (boolean (get c "tls")))
+                     (p/let [res  (tls/fetch-own (str (lifecycle/address scenario (:port imp)) "/_mocksys/clock")
+                                                 #js {:method "POST"
+                                                      :headers #js {"Content-Type" "application/json"}
+                                                      :body (js/JSON.stringify (clj->js body))})
                              text (.text res)]
                        (try (js->clj (js/JSON.parse text)) (catch :default _ nil))))]
         (if (and (map? out) (get out "now"))
@@ -151,9 +154,13 @@
               [--issuer URL] [--signing-key FILE.pem] [--scenario NAME] [--port N]
      kit oauth2 [--provider github|codeberg] [--users FILE.json] [--token-ttl S]
                 [--scenario NAME] [--port N]
-     kit <name> [--<flag> VALUE ...] [--scenario NAME] [--port N]"
+     kit <name> [--<flag> VALUE ...] [--scenario NAME] [--port N] [--force]
+   A directory kit's modules are copied into the scenario. A module there that
+   differs from the kit's copy stops the kit before it writes, unless --force."
   [{:keys [pos opts]}]
-  (let [kind     (first pos)
+  (let [force?   (try (:force (kits/parse-flags {:flags {:force {:type :boolean}}} (select-keys opts [:force]) nil))
+                      (catch :default e (die (.-message e))))
+        kind     (first pos)
         registry (load-kits)
         known    (str/join "|" (sort (keys registry)))]
     (when-not kind
@@ -170,14 +177,33 @@
                        (default-scenario-for kind (or (:provider flags) (get-in kit [:flags :provider :default]))))
           built    (cond-> ((:build kit) scenario flags)
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))
-          _        (when-let [errs (seq (:errors (contract/validate built)))]
+          kit-dir  (:dir kit)
+          sdir     (store/scenario-dir scenario)
+          [paths plan] (try (when kit-dir
+                              (let [ps (modules/scenario-paths kit-dir (get built "modules") "kit directory")]
+                                [ps (modules/copy-plan kit-dir sdir ps)]))
+                            (catch :default e (die (str "kit " kind ": " (.-message e) "; nothing was written"))))
+          ;; The copies land at the kit-relative paths, so the contract names those.
+          built    (cond-> built (seq paths) (assoc "modules" paths))
+          _        (when-let [errs (seq (:errors (contract/validate built kit-dir)))]
                      (die (str "kit " kind " generated an invalid contract; nothing was written\n  "
                                (str/join "\n  " errs))))
+          changed  (for [[p state] plan :when (= state :changed)] p)
+          _        (when (and (seq changed) (not force?))
+                     (die (str (str/join ", " changed) " in " sdir (if (next changed) " differ" " differs")
+                               " from the kit's copy; nothing was written. "
+                               "Rerun with --force to replace it, or pick another --scenario")))
           expanded (contract/expand built)]
+      (try (modules/copy! kit-dir sdir plan)
+           (catch :default e (die (str "kit " kind ": " (.-message e) "; contract.yaml was not written"))))
       (store/write-contract! scenario built)
       (lifecycle/compile! scenario)
       (println (str "✦ generated '" scenario "' from kit '" kind "'"))
-      (when (inject/contract-stateful? expanded)
+      (doseq [p changed]
+        (println (str "  replaced " p ", which differed from the kit's copy")))
+      (when-let [ms (seq (get built "modules"))]
+        (println (modules-notice scenario ms)))
+      (when (effect/contract-stateful? expanded)
         (println "  (stateful: served by the mocksys daemon, started automatically by `run`)"))
       (doseq [op (get expanded "operations")]
         (println (str "  · " (get-in op ["request" "method"]) " " (get-in op ["request" "path"]))))
@@ -191,9 +217,12 @@
    flags, their types and their defaults:  kits"
   [_]
   (let [registry (load-kits)]
-    (println (str "# kits (mocksys kit <name> [--flag VALUE ...]); yours go in " store/kits-dir "/*.yaml"))
-    (doseq [[kname {:keys [doc source flags]}] (sort registry)]
-      (println (str "  · " kname "  " doc "  [" source "]"))
+    (println (str "# kits (mocksys kit <name> [--flag VALUE ...]); yours go in " store/kits-dir
+                  "/*.yaml, or <name>/kit.yaml beside the modules it ships"))
+    (doseq [[kname {:keys [doc source flags modules]}] (sort registry)]
+      (println (str "  · " kname "  " doc "  [" source "]"
+                    (when modules
+                      (str "  ships modules: " (if (sequential? modules) (str/join ", " modules) modules)))))
       (println (str "      " (if (empty? flags)
                                  "(no flags)"
                                  (str/join "  " (for [[f {:keys [default type]}] (sort flags)]

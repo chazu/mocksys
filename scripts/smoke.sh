@@ -7,6 +7,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MS="${MOCKSYS_BIN:-$ROOT/bin/mocksys}"
+# the checks run from a temp dir, so MOCKSYS_BIN=dist/mocksys must resolve from here
+case "$MS" in /*) ;; *) MS="$PWD/$MS" ;; esac
 PORT="${SMOKE_PORT:-9471}"
 
 free_port() { node -e 'const s=require("net").createServer().listen(0,()=>{console.log(s.address().port);s.close()})'; }
@@ -18,6 +20,7 @@ export MOCKSYS_HOME="$WORK/store"
 cd "$WORK"
 cleanup() {
   "$MS" daemon stop >/dev/null 2>&1 || true
+  [ -n "${ADMIN2:-}" ] && env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME="$WORK/store2" "$MS" daemon stop >/dev/null 2>&1 || true
   [ -n "${OLD_PID:-}" ] && kill "$OLD_PID" 2>/dev/null || true
   rm -rf "$WORK"
 }
@@ -74,6 +77,18 @@ else
 fi
 check "the admin API refuses a browser origin" 403 \
   "$(status_of -H 'Origin: https://evil.example' "$ADMIN/imposters")"
+TOKEN_FILE="$MOCKSYS_HOME/daemon-$MOCKSYS_ADMIN_PORT.token"
+check "an admin call without the token is 401" 401 "$(status_of "$ADMIN/imposters")"
+check "with the store's token it is served" 200 \
+  "$(status_of -H "Authorization: Bearer $(cat "$TOKEN_FILE")" "$ADMIN/imposters")"
+check "only the daemon's user can read the token" 600 \
+  "$(node -p '(require("fs").statSync(process.argv[1]).mode & 0o777).toString(8)' "$TOKEN_FILE")"
+out="$(MOCKSYS_HOME="$WORK/other" "$MS" ls 2>&1)" && code=0 || code=$?
+check "a CLI on another store, set to this daemon's port, is refused" 1 "$code"
+check "and told whose daemon it reached" 1 \
+  "$(echo "$out" | grep -c "daemon on 127.0.0.1:$MOCKSYS_ADMIN_PORT belongs to another store or user")"
+check "and its pid, to stop it" 1 "$(echo "$out" | grep -c "stop it (pid $(curl -s "$ADMIN/" | json_field '.pid'))")"
+check "and how to run its own" 1 "$(echo "$out" | grep -c MOCKSYS_ADMIN_PORT)"
 "$MS" stop demo/hello >/dev/null
 
 echo "# okta twin"
@@ -95,7 +110,8 @@ check "conform golden corpus" 0 $?
 
 echo "# determinism"
 "$MS" stop okta/okta >/dev/null
-"$MS" run okta/okta >/dev/null
+MOCKSYS_NO_INJECTION=1 "$MS" run okta/okta >/dev/null && code=0 || code=$?
+check "MOCKSYS_NO_INJECTION still runs a stateful twin" 0 "$code"
 id2=$(curl -s -X POST localhost:$PORT/api/v1/users -H 'Content-Type: application/json' \
         -d '{"profile":{"login":"smoke@example.com","email":"smoke@example.com"}}' | json_field '.id')
 check "a fresh twin mints the same id for the same request" "$id" "$id2"
@@ -159,13 +175,41 @@ mv "$WH/verbs.js" "$MOCKSYS_HOME/outside.js"
 out="$(MOCKSYS_HOME="$WORK/store2" "$MS" unpack "$WORK/webhooks.mock.tgz" 2>&1)"
 check "unpack names the module code it brought" 1 \
   "$(echo "$out" | grep -c 'demo/webhooks runs JavaScript from its modules (./verbs.js)')"
-MOCKSYS_HOME="$WORK/store2" "$MS" run demo/webhooks --port $P3 >/dev/null
+store2() { env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME="$WORK/store2" "$MS" "$@"; }
+ADMIN2="$(store2 home | sed -n 's/^daemon: *127\.0\.0\.1://p')"
+check "home shows a second store's admin port, derived from its path" yes \
+  "$([ "${ADMIN2:-0}" -ge 26000 ] && [ "$ADMIN2" -le 26999 ] && echo yes || echo no)"
+store2 run demo/webhooks --port $P3 >/dev/null
 check "a bundle carries the module" 202 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
-MOCKSYS_HOME="$WORK/store2" "$MS" stop demo/webhooks >/dev/null
+check "the second store's daemon runs beside the first" "mocksys mocksys" \
+  "$(curl -s "http://127.0.0.1:$ADMIN2/" | json_field '.name') $(curl -s "$ADMIN/" | json_field '.name')"
+"$MS" ls >/dev/null && code=0 || code=$?
+check "and the first store still reaches its own" 0 "$code"
+mkdir -p "$WORK/sub"
+out="$(cd "$WORK/sub" && env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME=../store2 "$MS" ls 2>&1)" && code=0 || code=$?
+check "a relative store from a subdirectory reaches the same daemon" "0 1" \
+  "$code $(echo "$out" | grep -c '▶ demo/webhooks.*LIVE')"
+store2 daemon stop >/dev/null
 sed -i.bak 's#\./verbs\.js#../../outside.js#' "$WH/contract.yaml"
 out="$("$MS" validate demo/webhooks 2>&1)" && code=0 || code=$?
 check "a module outside the scenario directory is refused" 1 "$code"
 check "and named" 1 "$(echo "$out" | grep -c 'modules: ../../outside.js is outside the scenario directory')"
+
+echo "# kits that ship modules"
+cp -R "$ROOT/examples/kits/webhooks" "$MOCKSYS_HOME/kits/"
+check "kits marks a kit that ships modules" 1 "$("$MS" kits | grep -c 'webhooks .*ships modules: ./verbs.js')"
+out="$("$MS" kit webhooks --secret whsec_kit --port $P3 2>&1)"
+check "kit names the module code it copied" 1 \
+  "$(echo "$out" | grep -c 'webhooks/webhooks runs JavaScript from its modules (verbs.js)')"
+"$MS" run webhooks/webhooks >/dev/null
+check "the kit's module checks a delivery signed with the kit's secret" 202 \
+  "$(deliver $P3 "$(hmac whsec_kit "$body")" "$body")"
+check "and refuses one signed with another" 401 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
+"$MS" stop webhooks/webhooks >/dev/null
+echo '// edited by hand' >> "$MOCKSYS_HOME/webhooks/webhooks/verbs.js"
+check "kit again keeps a hand-edited module" 1 "$("$MS" kit webhooks >/dev/null 2>&1 && echo 0 || echo 1)"
+check "and --force replaces it" 0 \
+  "$("$MS" kit webhooks --force >/dev/null 2>&1 && grep -c 'edited by hand' "$MOCKSYS_HOME/webhooks/webhooks/verbs.js" || true)"
 
 echo "# async failures in module code"
 P4=$((PORT + 3))
@@ -220,6 +264,9 @@ node -e '
 "$MS" run okta/okta >/dev/null
 check "a planted injection is not served" "" "$(curl -s localhost:$PORT/pwned)"
 check "imposter.json was rebuilt from the contract" 0 "$(grep -c pwned "$imp" || true)"
+out="$(curl -s -X POST "$ADMIN/imposters" -H 'Content-Type: application/json' \
+         -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -d "{\"protocol\":\"http\",\"port\":$((PORT + 3)),\"stubs\":[{\"responses\":[{\"inject\":\"function(){}\"}]}]}")"
+check "the daemon refuses a posted injection" "stubs[0].responses[0]: unsupported field(s) inject" "$(echo "$out" | json_field '.errors[0].message')"
 
 echo "# grpc"
 GP=$((PORT + 2))
@@ -270,6 +317,74 @@ check "and a code" PERMISSION_DENIED "$(rec DeleteTodo '{"id":"t1"}' | json_fiel
 "$MS" stop demo/rec-todos >/dev/null
 out="$("$MS" record demo/tls --target https://localhost:$GP --proto "$G/todo.proto" 2>&1)" && code=0 || code=$?
 check "record refuses a TLS gRPC upstream" 1 "$code"
+
+echo "# recorded-request cap"
+"$MS" daemon stop >/dev/null
+MOCKSYS_MAX_RECORDED_REQUESTS=2 "$MS" run demo/hello --port $PORT >/dev/null
+for p in /first /hello /hello; do curl -s -o /dev/null "localhost:$PORT$p"; done
+check "requests shows the newest 2 and counts the dropped one" 1 \
+  "$("$MS" requests demo/hello | grep -c '(2; 1 older dropped)')"
+out="$("$MS" assert demo/hello --saw 'GET /first' 2>&1)" && code=0 || code=$?
+check "assert misses a dropped call" 1 "$code"
+check "and says it may have been dropped" 1 "$(echo "$out" | grep -c '1 older request(s) were dropped')"
+"$MS" stop demo/hello >/dev/null
+
+echo "# tls"
+TP=$((PORT + 3))
+mode_of() { node -p '(require("fs").statSync(process.argv[1]).mode & 0o777).toString(8)' "$1"; }
+mkdir -p "$MOCKSYS_HOME/demo/https"
+cp "$ROOT/examples/https.yaml" "$MOCKSYS_HOME/demo/https/contract.yaml"
+out="$("$MS" run demo/https --port $TP)"
+check "run names an https URL" 1 "$(echo "$out" | grep -c "running 'demo/https' at https://localhost:$TP")"
+CA="$("$MS" tls ca 2>/dev/null)"
+check "tls ca prints the CA in the store" "$MOCKSYS_HOME/tls/ca.pem" "$CA"
+check "run says which CA to trust" 1 "$(echo "$out" | grep -c "TLS: trust the mocksys CA, $CA")"
+check "the CA directory is the owner's alone" 700 "$(mode_of "$MOCKSYS_HOME/tls")"
+check "so is the CA key" 600 "$(mode_of "$MOCKSYS_HOME/tls/ca.key")"
+check "curl trusting the CA gets the body" alice "$(curl -s --cacert "$CA" "https://localhost:$TP/whoami" | json_field '.user')"
+curl -s -o /dev/null "https://localhost:$TP/whoami" && code=0 || code=$?
+check "curl without it refuses the certificate" 60 "$code"
+check "node trusts it through NODE_EXTRA_CA_CERTS" alice \
+  "$(NODE_EXTRA_CA_CERTS="$CA" node -e 'fetch(process.argv[1]).then(r => r.json()).then(b => console.log(b.user))' "https://localhost:$TP/whoami")"
+check "env exports NODE_EXTRA_CA_CERTS" "export NODE_EXTRA_CA_CERTS=$CA" "$("$MS" env demo/https | grep NODE_EXTRA_CA_CERTS)"
+check "imposter.json holds no key" 0 "$(grep -c 'PRIVATE KEY' "$MOCKSYS_HOME/demo/https/imposter.json" || true)"
+echo '[{"method":"GET","path":"/whoami","expect":200}]' > "$WORK/https-corpus.json"
+"$MS" conform demo/https --corpus "$WORK/https-corpus.json" >/dev/null && code=0 || code=$?
+check "conform replays at an https twin" 0 "$code"
+"$MS" conform demo/https --corpus "$WORK/https-corpus.json" --against "https://localhost:$TP" >/dev/null 2>&1 && code=0 || code=$?
+check "conform --against checks the live service's certificate" 1 "$code"
+NODE_EXTRA_CA_CERTS="$CA" "$MS" conform demo/https --corpus "$WORK/https-corpus.json" --against "https://localhost:$TP" >/dev/null && code=0 || code=$?
+check "and passes once its CA is trusted" 0 "$code"
+check "env --json names the CA" "$CA" "$("$MS" env demo/https --json | json_field '.caCert')"
+cp "$CA" "$WORK/corp.pem"
+out="$(NODE_EXTRA_CA_CERTS="$WORK/corp.pem" "$MS" env demo/https 2>"$WORK/env.err")"
+check "env leaves a NODE_EXTRA_CA_CERTS of another file alone" 0 "$(echo "$out" | grep -c NODE_EXTRA_CA_CERTS || true)"
+check "and says to add the CA to that file" 1 \
+  "$(grep -c "NODE_EXTRA_CA_CERTS is already $WORK/corp.pem; add the certificate in $CA to that file" "$WORK/env.err")"
+"$MS" stack tls-stack demo/https >/dev/null
+check "up exports NODE_EXTRA_CA_CERTS" "export NODE_EXTRA_CA_CERTS=$CA" "$("$MS" up tls-stack | grep NODE_EXTRA_CA_CERTS)"
+out="$(NODE_EXTRA_CA_CERTS="$WORK/corp.pem" "$MS" up tls-stack 2>"$WORK/up.err")"
+check "up leaves a NODE_EXTRA_CA_CERTS of another file alone" 0 "$(echo "$out" | grep -c NODE_EXTRA_CA_CERTS || true)"
+check "and says to add the CA to that file" 1 \
+  "$(grep -c "NODE_EXTRA_CA_CERTS is already $WORK/corp.pem; add the certificate in $CA to that file" "$WORK/up.err")"
+mkdir -p "$MOCKSYS_HOME/demo/login-tls"
+{ echo "tls: true"; sed "s#^scenario: demo/login-throttle#scenario: demo/login-tls#" "$ROOT/examples/login-throttle.yaml"; } > "$MOCKSYS_HOME/demo/login-tls/contract.yaml"
+"$MS" run demo/login-tls --port $((TP + 1)) >/dev/null
+check "clock reaches an https twin" 1 "$("$MS" clock demo/login-tls advance 1h | grep -c 'virtual time 2024-01-01T01:00:00')"
+"$MS" stop demo/login-tls >/dev/null
+GTP=$((TP + 2))
+mkdir -p "$MOCKSYS_HOME/demo/todos-tls"
+cp "$G/todo.proto" "$MOCKSYS_HOME/demo/todos-tls/"
+{ echo "tls: true"; sed "s#^scenario: demo/todos#scenario: demo/todos-tls#" "$G/contract.yaml"; } > "$MOCKSYS_HOME/demo/todos-tls/contract.yaml"
+out="$("$MS" run demo/todos-tls --port $GTP)"
+check "run says gRPC over TLS" 1 "$(echo "$out" | grep -c "running 'demo/todos-tls' at localhost:$GTP (gRPC over TLS)")"
+check "a grpc-js client trusting the CA gets the reply" "Write the proto" \
+  "$(NODE_EXTRA_CA_CERTS="$CA" node "$G/client.js" --tls "localhost:$GTP" GetTodo '{"id":"t1"}' | json_field '.title')"
+check "an insecure client cannot connect" UNAVAILABLE "$(node "$G/client.js" "localhost:$GTP" GetTodo '{"id":"t1"}' | json_field '.code' || true)"
+"$MS" stop demo/todos-tls >/dev/null
+"$MS" publish >/dev/null
+check "publish commits no file of the CA" 0 "$(git -C "$MOCKSYS_HOME" ls-files | grep -c '^tls/' || true)"
+"$MS" stop demo/https >/dev/null
 
 echo "# daemon stop"
 "$MS" daemon stop >/dev/null

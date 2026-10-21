@@ -1,35 +1,34 @@
-(ns mocksys.inject-safety-test
-  "Contract values that reach code in the daemon must be rejected at compile time,
-   and `validate` must report them: numbers spliced unquoted into generated JS, and
-   JSONPath selectors richer than a plain path."
+(ns mocksys.effect-safety-test
+  "Code-shaped contract values must be refused before they reach the daemon, and
+   `validate` must report them: strings where an effect takes a number, and JSONPath
+   selectors richer than a plain path."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
-            [mocksys.inject :as inject]
+            [mocksys.effect :as effect]
             [mocksys.contract :as contract]))
 
 (def ^:private payload "200,body:require('child_process').execSync('id').toString()")
 
-(defn- gen-error [op]
-  (try (inject/gen op {}) nil
-       (catch :default e (.-message e))))
+(defn- effect-error [op]
+  (first (effect/errors (get op "effect"))))
 
 (deftest code-shaped-numbers-are-rejected
   (testing "respond.status"
-    (let [msg (gen-error {"id" "evil" "effect" {"respond" {"status" payload}}})]
+    (let [msg (effect-error {"id" "evil" "effect" {"respond" {"status" payload}}})]
       (is (some? msg))
-      (is (str/includes? msg "status must be a number"))))
+      (is (str/includes? msg "respond.status must be an HTTP status"))))
   (testing "a terminal collection verb's status"
-    (is (some? (gen-error {"id" "l" "effect" {"list" {"collection" "users" "status" payload}}}))))
+    (is (some? (effect-error {"id" "l" "effect" {"list" {"collection" "users" "status" payload}}}))))
   (testing "store.ttl, limit.window and a now offset"
-    (is (some? (gen-error {"id" "t" "effect" {"store" {"bucket" "b" "key" "k" "ttl" "1;process.exit()"}
+    (is (some? (effect-error {"id" "t" "effect" {"store" {"bucket" "b" "key" "k" "ttl" "1;process.exit()"}
                                               "respond" {"status" 200}}})))
-    (is (some? (gen-error {"id" "w" "effect" {"limit" {"bucket" "b" "key" "k" "window" "60;x()"}
+    (is (some? (effect-error {"id" "w" "effect" {"limit" {"bucket" "b" "key" "k" "window" "60;x()"}
                                               "respond" {"status" 200}}})))
-    (is (some? (gen-error {"id" "n" "effect" {"bind" {"t" {"now" {"add" "1;x()"}}}
+    (is (some? (effect-error {"id" "n" "effect" {"bind" {"t" {"now" {"add" "1;x()"}}}
                                               "respond" {"status" 200}}})))))
 
 (deftest numbers-still-compile
-  (is (nil? (gen-error {"id" "ok" "effect" {"store" {"bucket" "b" "key" "k" "ttl" 60}
+  (is (nil? (effect-error {"id" "ok" "effect" {"store" {"bucket" "b" "key" "k" "ttl" 60}
                                             "respond" {"status" 201}}}))))
 
 (deftest validate-reports-the-bad-field
@@ -37,7 +36,7 @@
                           "request" {"method" "GET" "path" "/x"}
                           "effect" {"respond" {"status" payload}}}]}
         {:keys [errors]} (contract/validate c)]
-    (is (some #(str/includes? % "evil: status must be a number") errors))))
+    (is (some #(str/includes? % "evil: respond.status must be an HTTP status") errors))))
 
 (def ^:private script-selector "$..[?(@.constructor.constructor('return process')().exit())]")
 

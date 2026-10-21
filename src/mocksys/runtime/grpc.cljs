@@ -2,11 +2,12 @@
   "gRPC imposters: a grpc-js server per imposter, built from the descriptor the
   imposter carries. Every method of the proto is registered; a call becomes the
   request the stubs already match on (POST /pkg.Service/Method, metadata as
-  headers, the decoded message as a JSON body), so matching, injection and state
+  headers, the decoded message as a JSON body), so matching, effects and state
   are the HTTP imposter's. A client stream's request body is the array of its
   messages; each message of a bidirectional stream is a request of its own.
   Methods the proto does not declare answer UNIMPLEMENTED. Every server also
-  serves reflection (mocksys.runtime.grpc-reflection).
+  serves reflection (mocksys.runtime.grpc-reflection). An imposter with `tls`
+  serves gRPC over TLS.
 
   The outcome maps back as follows. A 2xx JSON object body is the reply message,
   checked against the reply type by mocksys.runtime.proto-json; a JSON array fills
@@ -372,7 +373,7 @@
 
 ;; --- the virtual clock ------------------------------------------------------------
 ;; A twin with a virtual clock has a stub at POST /_mocksys/clock (see
-;; inject/clock-control-stub). No proto declares that path, so every grpc imposter
+;; effect/clock-control-stub). No proto declares that path, so every grpc imposter
 ;; also serves it as a raw method whose messages are JSON text, and `mocksys clock`
 ;; calls it through `clock-call`.
 
@@ -389,9 +390,16 @@
         (p/catch (fn [e] (callback #js {:code (codes "INTERNAL") :details (ex-message e)}))))))
 
 (defn clock-call
-  "POST `body` to the clock of the grpc twin on `port`; resolves the parsed reply."
-  [port body]
-  (let [^js client (grpc/Client. (str "127.0.0.1:" port) (.createInsecure grpc/credentials))]
+  "POST `body` to the clock of the grpc twin on `port`, over TLS when `tls?`;
+   resolves the parsed reply. TLS skips the certificate check: the port came from
+   the CLI's own daemon, and a contract's own certificate may come from any CA."
+  [port body & [tls?]]
+  (let [creds      (if tls?
+                     (.createSsl grpc/credentials nil nil nil #js {:rejectUnauthorized false})
+                     (.createInsecure grpc/credentials))
+        ;; TLS takes a name, not an IP address, as the server name (node's DEP0123)
+        ^js client (grpc/Client. (str "127.0.0.1:" port) creds
+                                 (if tls? #js {"grpc.ssl_target_name_override" "localhost"} #js {}))]
     (js/Promise.
      (fn [resolve reject]
        (.makeUnaryRequest client clock-path text-out text-in (js/JSON.stringify (clj->js body))
@@ -423,10 +431,16 @@
                               ^js rpc (aget (.-methods (.lookupService root k)) m)]]
                     [m (handler imp md (.-resolvedResponseType rpc) client-for)]))]))
 
-(defn- bind! [^js server addr]
+(defn- server-credentials [tls]
+  (if tls
+    (.createSsl grpc/ServerCredentials nil #js [#js {:cert_chain  (js/Buffer.from (get tls "cert"))
+                                                     :private_key (js/Buffer.from (get tls "key"))}])
+    (.createInsecure grpc/ServerCredentials)))
+
+(defn- bind! [^js server addr tls]
   (js/Promise.
    (fn [resolve reject]
-     (.bindAsync server addr (.createInsecure grpc/ServerCredentials)
+     (.bindAsync server addr (server-credentials tls)
                  (fn [err port] (if err (reject err) (resolve port)))))))
 
 (defn- no-ipv6?
@@ -449,6 +463,7 @@
   (let [[pkg-def root] (package-definition (get-in @imp [:spec "descriptor"]))
         ^js server     (grpc/Server.)
         port           (imposter/port imp)
+        tls            (imposter/tls imp)
         clients        (atom {})
         client-for     (fn [to]
                          (or (get @clients to)
@@ -463,8 +478,8 @@
       (.addService server svc (clj->js impl)))
     (reflection/add! server pkg-def)
     (.register server clock-path (clock-handler imp) text-out text-in "unary")
-    (-> (p/let [_ (bind! server (str "127.0.0.1:" port))
-                _ (p/catch (bind! server (str "[::1]:" port))
+    (-> (p/let [_ (bind! server (str "127.0.0.1:" port) tls)
+                _ (p/catch (bind! server (str "[::1]:" port) tls)
                            (fn [e] (when-not (no-ipv6? e) (throw e))))]
           [{:stop stop}])
         (p/catch (fn [e]

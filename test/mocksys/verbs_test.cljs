@@ -1,6 +1,6 @@
 (ns mocksys.verbs-test
   "Custom verbs: a contract lists CommonJS `modules` that export `verbs`, and an effect
-   runs one with `call`. Covers the generated injection (through the harness), what
+   runs one with `call`. Covers the effect interpreter (through the harness), what
    `lower` and `validate` accept, and the daemon loading modules on each post."
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
@@ -12,11 +12,12 @@
             [mocksys.harness :as h]
             [mocksys.contract :as contract]
             [mocksys.lifecycle :as lifecycle]
+            [mocksys.mb :as mb]
             [mocksys.store :as store]
             [mocksys.cli.author :as author]
-            [mocksys.runtime :as runtime]))
+            [mocksys.daemon-fixture :as daemon]))
 
-;; --- the generated injection ---------------------------------------------------
+;; --- the interpreter -----------------------------------------------------------
 
 (defn- verbs [m] (clj->js m))
 
@@ -267,19 +268,14 @@
 (defn- call
   ([url] (call url {}))
   ([url {:keys [method body]}]
-   (p/let [res  (js/fetch url (clj->js (cond-> {:method (or method "GET") :headers {"Content-Type" "application/json"}}
+   (p/let [res  (js/fetch url (clj->js (cond-> {:method (or method "GET") :headers (merge {"Content-Type" "application/json"} (daemon/auth url))}
                                          body (assoc :body (if (string? body) body (js/JSON.stringify (clj->js body)))))))
            text (.text res)]
      {:status (.-status res)
       :text   text
       :json   (try (js->clj (js/JSON.parse text)) (catch :default _ nil))})))
 
-(defn- with-daemon [done f]
-  (p/let [d     (runtime/start! {:host "127.0.0.1" :port 0})
-          admin (str "http://127.0.0.1:" (:port d))]
-    (-> (p/do (f admin))
-        (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
-        (p/finally (fn [] (p/do ((:stop! d)) (done)))))))
+(def ^:private with-daemon daemon/with-daemon)
 
 (defn- lowered
   "The imposter for contract `c` as the lifecycle posts it, its modules absolute."
@@ -411,7 +407,9 @@
         saved {:root store/root :services store/services-dir :port (.-MOCKSYS_ADMIN_PORT env)}]
     (set! store/root home)
     (set! store/services-dir (path/join home "services"))
-    (when admin (set! (.-MOCKSYS_ADMIN_PORT env) (.-port (js/URL. admin))))
+    (when admin
+      (set! (.-MOCKSYS_ADMIN_PORT env) (.-port (js/URL. admin)))
+      (fs/writeFileSync (mb/token-path (mb/admin-port)) (daemon/token admin)))
     (store/write-contract! "demo/shout" contract)
     (doseq [[n src] files] (fs/writeFileSync (path/join (store/scenario-dir "demo/shout") n) src))
     (-> (p/resolved nil)

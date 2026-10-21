@@ -22,6 +22,7 @@
      "  mocksys kit okta                              # Okta twin: users+groups CRUD, SCIM filter, OIDC"
      "  mocksys kit oauth2 --provider github          # OAuth2 provider: picker, single-use codes, userinfo"
      "  mocksys kits                                  # every kit + its flags (yours: $MOCKSYS_HOME/kits/*.yaml)"
+     "A kit that ships modules is a directory, kits/<name>/kit.yaml; `kit` copies them into the scenario."
      "  mocksys genes                                 # reusable genes + their params (list them under `genes:`)"
      "A twin is one stateful scenario sharing one port/state; `run` it like any other."
      ""
@@ -59,6 +60,9 @@
      "  eval \"$(mocksys env acme/get-widget)\"          # exports BASE_URL=... etc"
      "  # point your code at the exported URL, run it, then assert what it called:"
      "  mocksys assert acme/get-widget --saw 'GET /widgets/*'   # exit 1 on miss"
+     "HTTPS or gRPC over TLS: add `tls: true` to the contract (a cert for localhost from"
+     "mocksys's local CA), and trust the CA in the client:"
+     "  export NODE_EXTRA_CA_CERTS=\"$(mocksys tls ca)\"   # node; curl --cacert \"$(mocksys tls ca)\""
      ""
      "## Validate fidelity against reality (the digital-twin loop)"
      "  mocksys conform okta/okta --corpus calls.json            # golden: status vs expect"
@@ -97,7 +101,7 @@
      "## Store + sharing"
      "All scenarios live in one shared library at ~/.mocksys (a git repo; override"
      "with MOCKSYS_HOME). It's the same library from every project."
-     "  mocksys home                          # store path + git status"
+     "  mocksys home                          # store path, daemon port + git status"
      "  mocksys status / log                  # uncommitted changes / recent history"
      "  mocksys publish github/create-issue   # git-commit a scenario"
      "  mocksys rm github/create-issue        # delete a scenario (or a whole service)"
@@ -114,7 +118,7 @@
   (println "  TWINS (full behavioral clones in one command — see `mocksys genes`)")
   (println "  mocksys kit okta [--users F.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--scenario NAME] [--port N]")
   (println "  mocksys kit oauth2 [--provider github|codeberg] [--users F.json] [--token-ttl S] [--port N]   OAuth2 provider twin")
-  (println "  mocksys kit <name> [--<flag> VALUE ...]         any kit, built in or from $MOCKSYS_HOME/kits/*.yaml")
+  (println "  mocksys kit <name> [--<flag> VALUE ...] [--force]   any kit, built in or from $MOCKSYS_HOME/kits/ (*.yaml or <name>/kit.yaml)")
   (println "  mocksys kits                                    list kits (built in and yours) with their flags")
   (println "  mocksys genes                                   list the genes (and their params) a contract or kit composes")
   (println "  mocksys conform <name> --corpus FILE [--against URL] [--ignore k1,k2]   replay+diff (exit 1 on drift)")
@@ -144,6 +148,7 @@
   (println "  mocksys ls")
   (println "  mocksys stop <name> | --all")
   (println "  mocksys daemon stop                             stop the daemon and every mock it serves")
+  (println "  mocksys tls ca                                  print the CA that tls: true mocks are issued from")
   (println "  mocksys rm <scenario|service>                   delete from the store (stops it if live)")
   (println)
   (println "  SEED FROM LIVE TRAFFIC (optional — needs real access)")
@@ -157,7 +162,7 @@
   (println "  mocksys unpack <file.mock.tgz>")
   (println)
   (println "  STORE (git-backed shared library)")
-  (println "  mocksys home                                    show the store path + git status")
+  (println "  mocksys home                                    show the store path, daemon port + git status")
   (println "  mocksys status                                  list uncommitted changes in the store")
   (println "  mocksys log [--n N]                             recent store history")
   (println "  mocksys restore <name> | --all                 discard uncommitted local changes")

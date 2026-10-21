@@ -1,8 +1,8 @@
 (ns mocksys.runtime
   "The mocksys daemon. An admin API on 127.0.0.1 creates, lists, reads and deletes
-  imposters; each imposter is an HTTP server on the loopback addresses that answers
+  imposters; each imposter is an HTTP(S) server on the loopback addresses that answers
   through `mocksys.runtime.imposter`. The admin routes are exactly the ones
-  `mocksys.mb` calls:
+  `mocksys.mb` calls, and all but GET / need `Authorization: Bearer <token>`:
 
     GET    /                                  identify the daemon: {name version pid}
     DELETE /                                  stop every imposter and the admin API
@@ -13,8 +13,11 @@
     DELETE /imposters/:port/savedRequests     forget recorded requests"
   (:require [promesa.core :as p]
             [clojure.string :as str]
+            ["node:crypto" :as crypto]
+            ["node:fs" :as fs]
             ["node:http" :as http]
             ["node:https" :as https]
+            ["node:path" :as path]
             [mocksys.runtime.imposter :as imposter]
             [mocksys.runtime.grpc :as grpc]
             [mocksys.version :refer [version]]))
@@ -144,10 +147,12 @@
       (p/catch (fn [e] (write-json! res 500 {"errors" [{"code" "response error" "message" (ex-message e)}]})))))
 
 (defn- tracked-server
-  "An HTTP server that remembers its open sockets, so stopping it can cut them
-   (a response may be parked in a long `wait`)."
-  [handler]
-  (let [^js server (http/createServer handler)
+  "An HTTP server, or HTTPS with `tls` ({cert key} PEM), that remembers its open
+   sockets, so stopping it can cut them (a response may be parked in a long `wait`)."
+  [handler & [tls]]
+  (let [^js server (if tls
+                     (https/createServer #js {:cert (get tls "cert") :key (get tls "key")} handler)
+                     (http/createServer handler))
         sockets    (atom #{})]
     (.on server "connection"
          (fn [^js s]
@@ -178,9 +183,10 @@
    `localhost` to either address reaches the mock."
   [imp]
   (let [port    (imposter/port imp)
-        handler (fn [rq rs] (serve! imp rq rs))]
-    (-> (p/let [v4 (listen! (tracked-server handler) port "127.0.0.1")]
-          (-> (listen! (tracked-server handler) port "::1")
+        handler (fn [rq rs] (serve! imp rq rs))
+        server  #(tracked-server handler (imposter/tls imp))]
+    (-> (p/let [v4 (listen! (server) port "127.0.0.1")]
+          (-> (listen! (server) port "::1")
               (p/then (fn [v6] [v4 v6]))
               (p/catch (fn [^js e]
                          (if (#{"EADDRNOTAVAIL" "EAFNOSUPPORT"} (.-code e))
@@ -197,10 +203,10 @@
   "Register the imposter, then start its servers. The port is claimed in the
    registry before the servers listen, so a delete can land in between; the
    servers are only attached if the entry still holds this imposter."
-  [registry body]
+  [registry imposter-opts body]
   (let [spec  (try (js->clj (js/JSON.parse body))
                    (catch :default _ (throw (ex-info "the imposter is not valid JSON" {:code "bad data"}))))
-        imp   (imposter/create spec)
+        imp   (imposter/create spec imposter-opts)
         port  (imposter/port imp)
         mine? #(identical? imp (get-in @registry [port :imp]))]
     (when (contains? @registry port) (throw (in-use port)))
@@ -225,7 +231,7 @@
 (defn- route
   "[status body] for one admin call, or [status body after] where `after` runs once
    the response is sent."
-  [registry stop! method path query body]
+  [registry imposter-opts stop! method path query body]
   (let [segs (vec (remove str/blank? (str/split path #"/")))
         port (when (= "imposters" (first segs)) (some-> (get segs 1) js/parseInt))
         imp  (when port (:imp (get @registry port)))
@@ -241,7 +247,7 @@
       [200 {"imposters" (mapv #(imposter/to-json (:imp %) {:list? true}) (vals @registry))}]
 
       (and (= segs ["imposters"]) (= method "POST"))
-      (create! registry body)
+      (create! registry imposter-opts body)
 
       (and (= 2 (count segs)) (= method "DELETE") port)
       (delete! registry port)
@@ -258,37 +264,88 @@
 (defn- local-host? [host]
   (contains? #{"127.0.0.1" "localhost"} (str/replace (or host "") #":\d+$" "")))
 
+(defn- authorized?
+  "Whether the Authorization header carries `token`, compared in constant time."
+  [token header]
+  (let [want (js/Buffer.from (str "Bearer " token))
+        got  (js/Buffer.from (or header ""))]
+    (and (= (.-length want) (.-length got)) (crypto/timingSafeEqual want got))))
+
 (defn- admin-handler
-  "The admin API takes code (injections) and runs it, so only local, non-browser
+  "The admin API loads code (an imposter's modules) and runs it, so only local, non-browser
    callers may use it: a request carrying an Origin, or addressed to any host other
    than the loopback name, is refused. That stops a web page from posting an
-   imposter directly or through DNS rebinding."
-  [registry stop!]
+   imposter directly or through DNS rebinding. Every call but GET / must also
+   carry the daemon's token, which only the user who started it can read, so
+   another local user cannot either."
+  [registry imposter-opts token stop!]
   (fn [^js node-req ^js res]
-    (let [hs (.-headers node-req)]
-      (if (or (aget hs "origin") (not (local-host? (aget hs "host"))))
+    (let [hs  (.-headers node-req)
+          url (try (js/URL. (.-url node-req) "http://localhost") (catch :default _ nil))]
+      (cond
+        (or (aget hs "origin") (not (local-host? (aget hs "host"))))
         (write-json! res 403 (error-body "forbidden" "the admin API only serves local, non-browser clients"))
+
+        (nil? url)
+        (do (.resume node-req)
+            (write-json! res 400 (error-body "bad data" (str "not a valid URL: " (.-url node-req)))))
+
+        (and (not (and (= "GET" (.-method node-req)) (= "/" (.-pathname url))))
+             (not (authorized? token (aget hs "authorization"))))
+        (do (.resume node-req)
+            (write-json! res 401 (error-body "unauthorized" "the admin API needs the daemon's token")))
+
+        :else
         (-> (p/let [body            (read-body node-req)
-                    url             (js/URL. (.-url node-req) "http://localhost")
-                    [st resp after] (route registry stop! (.-method node-req) (.-pathname url) (query-of url) body)]
+                    [st resp after] (route registry imposter-opts stop! (.-method node-req) (.-pathname url) (query-of url) body)]
               (when after (.once res "finish" after))
               (write-json! res st resp))
             (p/catch (fn [e]
                        (let [code (or (:code (ex-data e)) "internal error")]
                          (write-json! res (if (= code "internal error") 500 400) (error-body code (ex-message e)))))))))))
 
+(defn max-recorded-requests
+  "How many requests each imposter keeps: $MOCKSYS_MAX_RECORDED_REQUESTS, else
+   10000. 0 is refused rather than read as \"keep none\": a mock that records and
+   keeps nothing would fail every assert; turn recordRequests off instead."
+  []
+  (let [v (.-MOCKSYS_MAX_RECORDED_REQUESTS js/process.env)]
+    (if (and v (not= v ""))
+      (if (and (re-matches #"\d+" v) (pos? (js/parseInt v 10)))
+        (js/parseInt v 10)
+        (throw (js/Error. (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number above 0, got " (pr-str v)))))
+      imposter/default-max-requests)))
+
+(defn- write-token!
+  "Write `token` to `file`, readable by this user only. The rename swaps the whole
+   file in, so a client never reads half a token. The temp file is created afresh
+   (`wx`), since a mode only applies to a new file and a link there would be followed."
+  [file token]
+  (fs/mkdirSync (path/dirname file) #js {:recursive true})
+  (let [tmp (str file "." (.-pid js/process) ".tmp")]
+    (fs/rmSync tmp #js {:force true})
+    (fs/writeFileSync tmp token #js {:mode 0600 :flag "wx"})
+    (fs/renameSync tmp file)))
+
 (defn start!
-  "Run the daemon's admin API on `host`:`port` (port 0 picks one). Resolves
-   {:port :stop!}; `stop!` closes the admin API and every imposter. `DELETE /` runs
-   the same stop, then `on-stop`."
-  [{:keys [host port on-stop]}]
+  "Run the daemon's admin API on `host`:`port` (port 0 picks one) under a fresh
+   random token, written to `token-file` once the port is ours, so a daemon that
+   loses the port to another leaves that one's token in place. Each imposter keeps
+   its newest `max-requests` requests. Resolves {:port :token :stop!}; `stop!`
+   closes the admin API and every imposter. `DELETE /` runs the same stop, then
+   `on-stop`."
+  [{:keys [host port on-stop token-file max-requests] :or {max-requests imposter/default-max-requests}}]
   (let [registry (atom {})
         admin    (atom nil)
+        token    (.toString (crypto/randomBytes 32) "hex")
         stop!    (fn []
                    (p/let [_ (p/all (map close! (mapcat :servers (vals @registry))))]
                      (reset! registry {})
                      (close! @admin)))]
-    (reset! admin (tracked-server (admin-handler registry #(p/then (stop!) (or on-stop identity)))))
+    (reset! admin (tracked-server (admin-handler registry {:max-requests max-requests} token
+                                                 #(p/then (stop!) (or on-stop identity)))))
     (p/let [_ (listen! @admin port host)]
+      (when token-file (write-token! token-file token))
       {:port  (.-port (.address ^js (:server @admin)))
+       :token token
        :stop! stop!})))

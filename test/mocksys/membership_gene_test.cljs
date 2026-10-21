@@ -2,7 +2,7 @@
   "TDD for the `membership` gene in kits.cljs: it should emit the four Okta group-
    membership operations (assign/unassign/list-group-users/list-user-groups) wired
    to the link/unlink/listJoin verbs, each FK-guarded so a bad group/user id 404s.
-   We drive the gene's emitted ops through the injection harness."
+   We drive the gene's emitted ops through the effect harness."
   (:require [clojure.test :refer [deftest testing is]]
             [mocksys.harness :as h]
             [mocksys.kits :as kits]))

@@ -19,6 +19,7 @@ fault:    {}                     # optional transport fault overlay (see Faults)
 issuer:   "http://..."           # optional origin for baseUrl/JWT iss when a request has no Host header
 protocol: http                   # http (default) or grpc (see gRPC)
 proto:    ./todo.proto           # grpc only: the .proto file, relative to the scenario directory
+tls:      true                   # optional: serve HTTPS or gRPC over TLS (see TLS)
 seed:     {}                     # named arrays for effects to read (see effects.md)
 state:    {}                     # collections, clock, randomSeed (see effects.md)
 modules:  [./verbs.js]           # optional: JS files in the scenario directory whose verbs effects can `call` (see effects.md)
@@ -105,7 +106,7 @@ mocksys use stripe/createcharge --op createcharge --example card_declined --only
 ### Response templating (`{{request.*}}`)
 
 A static response body or header may splice values from the **incoming request** at serve
-time — no injection, no state. Tokens:
+time — no effect, no state. Tokens:
 
 ```
 {{request.query.<name>}}    {{request.headers.<name>}}    {{request.body.<jsonpath>}}
@@ -416,16 +417,17 @@ server stream's messages are a 200 array. An error is the HTTP status that
 with the same code. A server stream that fails partway keeps the messages it sent as
 the body's `messages`, and replays them before the error; a stream still open when the
 60-second default deadline passes is recorded so, with `DEADLINE_EXCEEDED`. A client
-stream is recorded with its reply. A bidirectional stream
-is not recorded: the proxy answers it `UNIMPLEMENTED`. An upstream that does not
-connect fails the call `UNAVAILABLE`, and nothing is saved. The upstream call carries
-the client's deadline, or 60 seconds when the client sets none; a call the client
-cancels, or whose deadline passes, is cancelled upstream and nothing is saved. `--target` is `host:port`
-without TLS; an `https://` target is refused.
+stream is recorded with its reply. A bidirectional stream is not recorded: the proxy
+answers it `UNIMPLEMENTED`. An upstream that does not connect fails the call
+`UNAVAILABLE`, and nothing is saved. The upstream call carries the client's deadline,
+or 60 seconds when the client sets none; a call the client cancels, or whose deadline
+passes, is cancelled upstream and nothing is saved. `--target` is `host:port` without
+TLS; an `https://` target is refused, since `record` does not yet reach an upstream
+over TLS.
 
-Out of scope: TLS, `proxy` responses in a contract, and `conform`, which replays HTTP. A grpc mock
-listens on `127.0.0.1` and `::1` without TLS, so a client connects with insecure
-credentials.
+Out of scope: `proxy` responses in a contract, and `conform`, which replays HTTP. A
+grpc mock listens on `127.0.0.1` and `::1`, without TLS unless the contract sets `tls`
+([TLS](#tls)), so a client connects with insecure credentials.
 
 ### The proto file
 
@@ -444,6 +446,46 @@ outside the scenario directory and names the file to copy in.
 `run`, `env` and `up` give a grpc mock's address as `localhost:PORT`, the target form
 gRPC clients take. `clock` reaches a grpc twin's virtual clock: every grpc mock also
 serves the `/_mocksys/clock` control method, with JSON messages.
+
+## TLS
+
+`tls: true` serves the mock as HTTPS, or a grpc mock as gRPC over TLS, on the same
+port. Use it when the code under test only accepts `https://` URLs or TLS channels.
+
+```yaml
+tls: true                                   # a certificate from the mocksys CA
+tls: { cert: ./cert.pem, key: ./key.pem }   # or your own, inside the scenario directory
+```
+
+With `tls: true`, `run` issues the mock a new certificate for `localhost`,
+`127.0.0.1` and `::1` each time it posts the scenario. The certificate comes from one
+local CA that mocksys creates in `$MOCKSYS_HOME/tls/` on first use. The client must
+trust that CA:
+
+```sh
+export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"   # node: https, fetch, grpc-js createSsl()
+curl --cacert "$(mocksys tls ca)" https://localhost:9160/whoami
+```
+
+`run` prints the CA's path and these commands. `env` exports `NODE_EXTRA_CA_CERTS`,
+and `env --json` adds `caCert`. See [cli.md](cli.md#tls) for other clients and for
+trusting the CA system-wide.
+
+What is stored where:
+
+- `imposter.json` records only `tls: true`, or the two paths relative to the scenario
+  directory. It never holds a key, so `pack`, `publish` and `push` carry no key
+  material for `tls: true`.
+- The certificate and key exist only in the post to the daemon and in the daemon's
+  memory. The admin API shows `tls: true` and never returns the key.
+- A `{cert, key}` pair must be files inside the scenario directory, like `modules`, so
+  they travel with the scenario. That shares the key with everyone who gets the
+  scenario, so use a key made for tests.
+
+The address of an HTTPS mock is `https://localhost:PORT`. A gRPC mock's address stays
+`localhost:PORT`; `run` prints `(gRPC over TLS)`. `conform` and `clock` reach a TLS
+twin without extra flags. Recording from an `https://` target works with or without
+`tls`, because the recording proxy is the client of that connection.
 
 ## Transport faults
 
@@ -478,7 +520,9 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
   module that is outside the scenario directory or missing; a `call` with no `verb`, an
   unknown key, non-object `args`, or a reserved `as`; a `call` in a contract with no
   `modules`. `validate` never runs a module, so whether each verb exists is checked
-  when the scenario runs (see effects.md).
+  when the scenario runs (see effects.md). A `tls` that is not `true`, `false` or
+  `{cert, key}`, or a `cert` or `key` file that is missing or outside the scenario
+  directory.
 - **gRPC errors**: an unknown `protocol`; a grpc contract with no `proto`; a grpc
   operation that names `method` or `path`, or whose `rpc` is missing or not of the form
   `pkg.Service/Method`; an `rpc` on an http contract; a proto that does not load (a

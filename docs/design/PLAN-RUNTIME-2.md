@@ -18,17 +18,39 @@ those belong in the interpreter, not in code that E deletes.
 
 **Admin token.** Today any local user can post an imposter, and an imposter can carry
 module code, so any local user can run code as the daemon's owner.
-- At start, before it listens, the daemon writes a random 32-byte token to
-  `$MOCKSYS_HOME/daemon.token`, mode 0600.
+- At start, once it holds its port, the daemon writes a random 32-byte token to
+  `$MOCKSYS_HOME/daemon-<port>.token`, mode 0600, through a rename so a client never
+  reads half a token. The temp file is removed and then created with `wx`, since a
+  mode only applies to a new file and a link at that path would be followed. One file
+  per port lets two daemons share a store on different admin ports. Writing after the
+  listen means a daemon that loses the port race leaves the running daemon's token
+  alone. No client reads the token before the port answers, so nothing is lost by
+  waiting.
+- A daemon therefore serves one store, so each store gets its own admin port. Without
+  `MOCKSYS_ADMIN_PORT`, the default store `~/.mocksys` keeps 2626 and any other store
+  takes 26000 plus the first four bytes of `sha256(path)` mod 1000, its path absolute
+  and with links resolved as far as it exists. A project store (`MOCKSYS_HOME=./.mocks`) then works beside the
+  shared daemon with no setting, from any subdirectory. The range is below the
+  ephemeral ranges of Linux (32768+), macOS and Windows (49152+), where mock ports come
+  from. `mocksys home` prints the port. A hash collision, or an explicit port another
+  store holds, still gets the 401 below. In-process test daemons take the token from
+  `runtime/start!`'s result instead of a file.
+- A request whose URL does not parse (`GET //`) gets a 400 after the origin check and
+  before the token check, rather than a throw in the request listener.
 - Every admin call except `GET /` needs `Authorization: Bearer <token>`, compared in
   constant time. A missing or wrong token gets 401.
 - `mocksys.mb` reads the token file for every call. A 401 means the daemon on that port
-  belongs to another store or user. The error says so and names `MOCKSYS_ADMIN_PORT`.
+  belongs to another store or user. The error says so, names the pid that daemon
+  reports on `GET /` so the user can stop it, and names `MOCKSYS_ADMIN_PORT`.
 - Replacing a daemon after a version mismatch needs the token too. Without it the CLI
   fails with the same message.
 
 **Recorded-request cap.** An imposter with `recordRequests` keeps the newest N requests,
-default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment.
+default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment and
+read once at start (a whole number above 0; anything else stops the daemon at start, and
+the CLI shows the log). 0 is refused rather than read as "keep none": a mock that records
+and keeps nothing fails every `assert`, and an imposter that should keep nothing already
+says so with `recordRequests: false`.
 `numberOfRequests` still counts every request. The full imposter view reports how many
 were dropped. `assert` says when a dropped request could change its answer.
 
@@ -40,9 +62,19 @@ were dropped. `assert` says when a dropped request could change its answer.
   inside it. `mocksys kit` copies each module into the scenario directory at the same
   relative path, so the scenario keeps travelling as one directory.
 - A single-file kit that lists modules fails, and the error points at the directory form.
+  It fails when the kits load, as a skipped kit with a warning, so `kits` reports it too.
 - `mocksys kits` marks kits that ship modules. `mocksys kit` prints the same warning
   `unpack` prints about module JavaScript.
+- `kit` checks every destination before it writes: a copy may not land outside the
+  scenario directory through a symlink in it, or through a dangling one, or below a
+  file. It copies the modules before it writes `contract.yaml`, so a copy that fails
+  at write time (permissions, a full disk) leaves no new contract behind.
+- Running `kit` again rewrites `contract.yaml`, since flags change it, but no flag changes
+  a module, so a module that differs from the kit's copy is a hand edit. `kit` then writes
+  nothing and names the file; `--force` replaces it. A matching module is left alone.
 - An example kit under `examples/kits/` ships a module.
+- Not covered: a directory kit's gRPC proto is not copied. A gRPC kit still needs an
+  absolute `proto` path.
 
 ## C. gRPC streaming, reflection, recording
 
@@ -89,22 +121,53 @@ not recorded. `freeze` lifts a grpc imposter to a grpc contract (`protocol`, `pr
   shelling out to `openssl`.
 - `record --target https://...` keeps working, since that is the client side of TLS.
 
+As built:
+- **The CLI issues, at post time.** `compile!` records `tls` in `imposter.json` as
+  declared (`true`, or the relative paths), like `modules`. `ensure-running!` swaps in
+  PEM text: a new certificate from the CA for `true`, the files for a pair. Not the
+  daemon: `tls ca` and `run`'s trust lines name the CLI's store, and a daemon on the
+  admin port may run with another `MOCKSYS_HOME`. Not `compile!`: `imposter.json` is
+  copied by pack, publish and push, so it must hold no key. The daemon reads no key
+  files, checks the pair with `createSecureContext`, and shows `tls: true` without it.
+- **The CA.** `$MOCKSYS_HOME/tls/` at 0700, `ca.key` at 0600, both re-tightened on use,
+  and a `.gitignore` of `*`, because `publish` runs `git add -A` over the store and a
+  project may commit `./.mocks`. Created in a temp directory and renamed into place.
+  Ten years. Replaced when it expires within 30 days or a file is missing:
+  the old directory is renamed to `tls.bak-<time>`, never deleted, and a stderr line
+  says that clients must trust the new CA and running mocks must be run again. A file
+  that is there but unusable (unreadable, not RSA, encrypted, a key of another
+  certificate) is an error naming it, since replacing it would lose the user's CA. A mock's certificate lasts at most 397 days and is new on every run, so it
+  needs no renewal. node-forge signs RSA keys from node's crypto.
+- **Trust.** `tls ca` prints only the path on stdout (`NODE_EXTRA_CA_CERTS=$(mocksys
+  tls ca)`), and the curl, grpc-js, gRPC C core and grpcurl forms on stderr. `run`
+  prints the CA and the commands; `env` and `up` export `NODE_EXTRA_CA_CERTS` unless
+  it already names another file; `env --json` adds `caCert`. `conform` and `clock`
+  reach a TLS twin, skipping the certificate check on the CLI's own calls.
+
 ## E. The effect interpreter
 
 Effects compile to JavaScript source strings (`inject.cljs`), which the daemon
 evaluates. Mountebank needed that form. It is now gone, so the daemon can evaluate
 effect maps directly.
 
-- Stubs carry the operation's effect map, and the contract settings it needs (state,
-  collections, the clock, signing keys), instead of an `inject` string. The daemon
-  validates effects when an imposter is posted. Bad effects get 400, naming the stub and
-  the field.
-- One interpreter namespace evaluates effects over the per-imposter state. Custom verbs
-  run from it directly.
+- Stubs carry the operation's effect map, `{effect: {...}}`, instead of an `inject`
+  string. The settings every effect shares (seeds, collections, the clock's start, the
+  id stream's seed, the fallback issuer) go once into the imposter's `state`, not into
+  each stub. Signing keys stay in the `sign` verb's spec, where the contract has them.
+  The clock control stub answers with `{clock: true}`. The daemon validates effects when
+  an imposter is posted. Bad effects get 400, naming the stub and the field.
+- One interpreter namespace (`mocksys.effect`) evaluates effects over the per-imposter
+  state, from a table of verbs that also holds each verb's field checks. Custom verbs
+  run from it directly. The verbs a module must export are read off the effects, so the
+  imposter's `calls` field goes away.
+- `MOCKSYS_NO_INJECTION` refuses modules only. An effect is data, so a stateful
+  scenario without modules runs no code from the scenario.
 - **Proof before deletion.** While both exist, run every effect case in the unit suite
   through codegen and through the interpreter, and compare the responses and the
   resulting state. Run `conform` from a daemon built at the base commit to the new
   one over `examples/okta-corpus.json`. Both must show 0 differences.
+  `scripts/conform-builds.sh <base-ref>` reruns the second, plus a byte-for-byte replay
+  of the corpus and of stateful sequences.
 - Then delete the codegen, the `inject` response type and `compile-injection`. A
   planted `inject` in an imposter.json is then refused as an unknown field.
 - The Okta twin's responses do not change.
@@ -126,6 +189,7 @@ Built on E.
 
 `npm test`, `npm run build` with 0 warnings, and `scripts/smoke.sh` on node. A change
 that adds a dependency or touches serving also runs smoke against the bun binary:
-`scripts/build-binary.sh && MOCKSYS_BIN=dist/mocksys scripts/smoke.sh`. Use a distinct
+`scripts/build-binary.sh && MOCKSYS_BIN=dist/mocksys scripts/smoke.sh` (smoke resolves a
+relative `MOCKSYS_BIN` before it changes directory). Use a distinct
 `SMOKE_PORT` per worktree. Each item adds tests and an example, updates the docs it
 changes, and gets an independent review before it merges.

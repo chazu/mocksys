@@ -4,24 +4,28 @@
 
   The inventory, and nothing else:
     imposter   protocol http or grpc, port, name, recordRequests, stubs, modules
-               (absolute paths of CommonJS files whose `verbs` the injections can
-               call), calls (the verb names the injections call, checked on create)
-               and for grpc the proto's descriptor (served by mocksys.runtime.grpc)
+               (absolute paths of CommonJS files whose `verbs` effects can call),
+               state (the settings effects run over, see mocksys.effect), tls ({cert
+               key} PEM text, served as HTTPS or gRPC over TLS) and for
+               grpc the proto's descriptor (served by mocksys.runtime.grpc)
     stub       predicates (see mocksys.runtime.match), responses
     response   exactly one of
                  is      {statusCode headers body _mode}
-                 inject  \"function (request, state, logger) {...}\" over a per-imposter state
+                 effect  an operation's effect map, run over the imposter's state
+                 clock   true: read or move the virtual clock (/_mocksys/clock)
                  proxy   {to, mode proxyOnce, predicateGenerators [{matches {field true}}]}
                  fault   CONNECTION_RESET_BY_PEER | RANDOM_DATA_THEN_CLOSE
                plus optional behaviors: wait (ms) and copy (regex or jsonpath from a
                request field into a ${token})
 
   `respond` turns one request into an outcome for the server to write. Everything
-  here is pure data except the injected functions and the proxy fetch, which the
-  caller passes in."
+  here is pure data except the modules' verbs and the proxy fetch, which the caller
+  passes in."
   (:require [clojure.string :as str]
             [promesa.core :as p]
             ["node:path" :as path]
+            ["node:tls" :as node-tls]
+            [mocksys.effect :as effect]
             [mocksys.modules :as modules]
             [mocksys.runtime.match :as match]))
 
@@ -52,16 +56,8 @@
       (doseq [re (leaves (get pred "matches"))]
         (try (js/RegExp. re) (catch :default _ (bad path (str "invalid regex " (pr-str re)))))))))
 
-(def ^:private response-types #{"is" "inject" "proxy" "fault"})
+(def ^:private response-types #{"is" "effect" "clock" "proxy" "fault"})
 (def ^:private faults #{"CONNECTION_RESET_BY_PEER" "RANDOM_DATA_THEN_CLOSE"})
-
-(defn compile-injection
-  "The function an injection source evaluates to. It runs in this process with
-   `require` in scope, the way Mountebank evaluated it, and `verbs`, the custom verbs
-   of the imposter's modules."
-  ([src] (compile-injection src nil))
-  ([src verbs]
-   ((js/Function. "require" "verbs" (str "return (" src "\n);")) js/require verbs)))
 
 (defn proxy-target-error
   "Why `to` cannot be a proxy target, or nil; `field` names it in the message. The
@@ -111,17 +107,15 @@
 
 (defn- check-response! [path r]
   (when-not (map? r) (bad path "a response must be an object"))
+  (only-keys! path r (conj response-types "behaviors"))
   (let [types (filter response-types (keys r))]
     (when-not (= 1 (count types))
       (bad path (str "a response needs exactly one of " (str/join ", " (sort response-types)))))
-    (only-keys! path r (conj response-types "behaviors"))
     (let [v (get r (first types))]
       (case (first types)
         "is"     (check-is! path v)
-        "inject" (do (when-not (string? v) (bad path "inject must be a function source"))
-                     (let [f (try (compile-injection v)
-                                  (catch :default e (bad path (str "injection does not compile: " (ex-message e)))))]
-                       (when-not (fn? f) (bad path "inject must be a function"))))
+        "effect" (when-let [es (seq (effect/errors v))] (bad (str path ".effect") (str/join "; " es)))
+        "clock"  (when-not (true? v) (bad path "clock must be true"))
         "proxy"  (do (when-not (map? v) (bad path "proxy must be an object"))
                      (only-keys! path v #{"to" "mode" "predicateGenerators"})
                      (when-let [e (proxy-target-error "proxy.to" (get v "to"))] (bad path e))
@@ -137,15 +131,22 @@
       (doseq [[j b] (map-indexed vector bs)]
         (check-behavior! (str path ".behaviors[" j "]") b)))))
 
+(defn- check-tls! [v]
+  (when-not (and (map? v) (= #{"cert" "key"} (set (keys v))) (every? string? (vals v)))
+    (bad "" "tls must be {cert, key}, PEM text; mocksys run issues them"))
+  (try (node-tls/createSecureContext #js {:cert (get v "cert") :key (get v "key")})
+       (catch :default e (bad "tls" (ex-message e)))))
+
 (defn- validate! [spec]
   (when-not (map? spec) (bad "" "an imposter must be a JSON object"))
-  (only-keys! "" spec (cond-> #{"protocol" "port" "name" "recordRequests" "stubs" "modules" "calls"}
+  (only-keys! "" spec (cond-> #{"protocol" "port" "name" "recordRequests" "stubs" "modules" "state" "tls"}
                         (= "grpc" (get spec "protocol")) (conj "descriptor")))
   (when-not ((some-fn nil? #(and (vector? %) (every? (fn [m] (and (string? m) (path/isAbsolute m))) %)))
              (get spec "modules"))
     (bad "" "modules must be absolute paths"))
-  (when-not ((some-fn nil? #(and (vector? %) (every? string? %))) (get spec "calls"))
-    (bad "" "calls must be an array of verb names"))
+  (when (contains? spec "state")
+    (when-let [es (seq (effect/settings-errors (get spec "state")))] (bad "" (str/join "; " es))))
+  (when (contains? spec "tls") (check-tls! (get spec "tls")))
   (when-not (contains? #{"http" "grpc"} (get spec "protocol"))
     (bad "" (str "unsupported protocol " (pr-str (get spec "protocol")) " (http or grpc)")))
   (when (and (= "grpc" (get spec "protocol")) (not (map? (get spec "descriptor"))))
@@ -164,49 +165,47 @@
     (doseq [[j pred] (map-indexed vector (get stub "predicates"))]
       (check-predicate! (str path ".predicates[" j "]") pred))
     (doseq [[j r] (map-indexed vector (get stub "responses"))]
-      (check-response! (str path ".responses[" j "]") r))))
+      (check-response! (str path ".responses[" j "]") r)
+      (when-let [es (seq (effect/collection-errors (get r "effect") (get spec "state")))]
+        (bad (str path ".responses[" j "].effect") (str/join "; " es)))
+      (when (and (contains? r "clock") (not (number? (get-in spec ["state" "clock"]))))
+        (bad (str path ".responses[" j "]") "a clock response needs the imposter's state.clock")))))
 
 ;; --- construction ------------------------------------------------------------
 
-(defn- injections-of [stubs verbs]
-  (into {} (for [s stubs, r (get s "responses") :let [src (get r "inject")] :when src]
-             [src (compile-injection src verbs)])))
+(defn- calls-in
+  "The custom verbs the spec's effects call, in stub order."
+  [spec]
+  (distinct (for [s (get spec "stubs"), r (get s "responses"), c (effect/calls-of (get r "effect"))]
+              (get c "verb"))))
 
 (defn- verbs-of
   "The custom verbs of the spec's modules, read from disk on every post so an edited
-   module takes effect when the scenario is run again. A verb in `calls` that no
+   module takes effect when the scenario is run again. A verb an effect calls that no
    module exports fails the post."
   [spec]
-  (try (modules/load-verbs (map vector (get spec "modules") (get spec "modules")) (get spec "calls"))
+  (try (modules/load-verbs (map vector (get spec "modules") (get spec "modules")) (calls-in spec))
        (catch :default e (bad "" (ex-message e)))))
 
+(def default-max-requests 10000)
+
 (defn create
-  "A live imposter (an atom) from a posted spec. Throws ex-info {:code \"bad data\"}
-   naming the offending field when the spec steps outside the inventory."
-  [spec]
-  (validate! spec)
-  (let [stubs (vec (get spec "stubs"))]
-    (atom {:spec       (dissoc spec "stubs")
-           :stubs      (vec (map-indexed (fn [i s] {:id i :spec s :cursor 0}) stubs))
-           :next-id    (count stubs)
-           :requests   []
-           :count      0
-           :state      #js {}
-           :injections (injections-of stubs (verbs-of spec))})))
-
-;; --- injection ---------------------------------------------------------------
-
-(def ^:private logger
-  (let [noop (fn [& _])] #js {:debug noop :info noop :warn noop :error noop}))
-
-(defn run-injection
-  "Call an injected function the way Mountebank's legacy signature does,
-   `f(request, state, logger)`, and return its response as a map."
-  [f request state]
-  (let [r (.call f nil (clj->js request) state logger)]
-    (when-not (and r (= "object" (goog/typeOf r)))
-      (throw (js/Error. "injection returned no response object")))
-    (js->clj r)))
+  "A live imposter (an atom) from a posted spec. With recordRequests it keeps the
+   newest `max-requests` requests. Throws ex-info {:code \"bad data\"} naming the
+   offending field when the spec steps outside the inventory."
+  ([spec] (create spec {}))
+  ([spec {:keys [max-requests] :or {max-requests default-max-requests}}]
+   (validate! spec)
+   (let [stubs (vec (get spec "stubs"))]
+     (atom {:spec         (dissoc spec "stubs")
+            :stubs        (vec (map-indexed (fn [i s] {:id i :spec s :cursor 0}) stubs))
+            :next-id      (count stubs)
+            :requests     #queue []
+            :max-requests max-requests
+            :dropped      0
+            :count        0
+            :state        (effect/new-state)
+            :verbs        (verbs-of spec)}))))
 
 ;; --- behaviors -----------------------------------------------------------------
 
@@ -290,10 +289,14 @@
 ;; --- serving ---------------------------------------------------------------------
 
 (defn- record-request! [imp request]
-  (swap! imp (fn [s]
-               (cond-> (update s :count inc)
-                 (get-in s [:spec "recordRequests"])
-                 (update :requests conj (assoc request "timestamp" (.toJSON (js/Date.))))))))
+  (swap! imp (fn [{:keys [max-requests] :as s}]
+               (let [s (update s :count inc)]
+                 (if-not (get-in s [:spec "recordRequests"])
+                   s
+                   (let [rs (conj (:requests s) (assoc request "timestamp" (.toJSON (js/Date.))))]
+                     (if (> (count rs) max-requests)
+                       (assoc s :requests (pop rs) :dropped (inc (:dropped s)))
+                       (assoc s :requests rs))))))))
 
 (defn- next-response!
   "The first stub whose predicates hold and that stub's next response (cycling
@@ -342,8 +345,12 @@
         (contains? config "is")
         (out (get config "is"))
 
-        (contains? config "inject")
-        (out (run-injection (get-in @imp [:injections (get config "inject")]) request (:state @imp)))
+        (contains? config "effect")
+        (let [{:keys [spec state verbs]} @imp]
+          (out (effect/run (get config "effect") {:state state :request request :settings (get spec "state") :verbs verbs})))
+
+        (contains? config "clock")
+        (out (effect/clock (:state @imp) (get-in @imp [:spec "state" "clock"]) request))
 
         (contains? config "proxy")
         (let [cfg   (get config "proxy")
@@ -358,21 +365,25 @@
         {:fault (get config "fault")}))))
 
 (defn clear-requests! [imp]
-  (swap! imp assoc :requests []))
+  (swap! imp assoc :requests #queue [] :dropped 0))
 
 (defn port [imp] (get-in @imp [:spec "port"]))
 (defn protocol [imp] (get-in @imp [:spec "protocol"]))
+(defn tls [imp] (get-in @imp [:spec "tls"]))
 
 (defn to-json
-  "The imposter as the admin API shows it. `:list?` is the summary row;
-   `:replayable?` drops requests and proxy timings; `:remove-proxies?` drops proxy
+  "The imposter as the admin API shows it. `:list?` is the summary row; the full
+   view adds the recorded requests and how many the cap dropped. `:replayable?`
+   drops requests and proxy timings; `:remove-proxies?` drops proxy
    responses and any stub left with none. Every form but the summary keeps `modules`
-   and `calls`, so a replayable imposter posts back as it was."
+   and `state`, so a replayable imposter posts back as it was, except that `tls`
+   shows as true: the admin API never returns a private key."
   [imp {:keys [list? replayable? remove-proxies?]}]
-  (let [{:keys [spec stubs requests] n :count} @imp
-        header (cond-> (select-keys spec ["protocol" "port" "name" "modules" "calls"])
+  (let [{:keys [spec stubs requests dropped] n :count} @imp
+        header (cond-> (select-keys spec ["protocol" "port" "name" "modules"])
                  (not replayable?) (assoc "numberOfRequests" n))
-        body   (merge header (select-keys spec ["descriptor"]))
+        body   (cond-> (merge header (select-keys spec ["state" "descriptor"]))
+                 (contains? spec "tls") (assoc "tls" true))
         strip  (fn [r] (cond-> r (contains? r "is") (update "is" dissoc "_proxyResponseTime")))
         proxy? (fn [r] (contains? r "proxy"))
         stubs  (cond->> (mapv :spec stubs)
@@ -380,7 +391,7 @@
                  remove-proxies? (mapv #(update % "responses" (partial filterv (complement proxy?))))
                  remove-proxies? (filterv #(seq (get % "responses"))))]
     (cond
-      list?       (dissoc header "modules" "calls")
+      list?       (dissoc header "modules")
       replayable? (assoc body "recordRequests" (boolean (get spec "recordRequests")) "stubs" stubs)
       :else       (assoc body "recordRequests" (boolean (get spec "recordRequests"))
-                         "requests" requests "stubs" stubs))))
+                         "requests" (vec requests) "droppedRequests" dropped "stubs" stubs))))

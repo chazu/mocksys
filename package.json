@@ -35,6 +35,7 @@
     "@grpc/proto-loader": "^0.8.1",
     "@grpc/reflection": "1.0.4",
     "js-yaml": "^4.1.0",
+    "node-forge": "^1.4.0",
     "openapi-sampler": "^1.7.4",
     "protobufjs": "^7.6.6"
   },

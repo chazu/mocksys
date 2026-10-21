@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // A minimal grpc-js client for todo.proto:
-//   node client.js <host:port> <Method> '<json request>'
+//   node client.js [--tls] <host:port> <Method> '<json request>'
+// --tls connects over TLS, trusting node's roots plus NODE_EXTRA_CA_CERTS, so
+// NODE_EXTRA_CA_CERTS="$(mocksys tls ca)" trusts a `tls: true` mock.
 // Prints the reply as JSON, or {"code": "<STATUS>", "details": "..."} and exits 1.
 // A client or bidirectional stream takes a JSON array, one element per message sent.
 // A server or bidirectional stream prints one JSON line per message it receives.
@@ -8,9 +10,11 @@ const path = require("path");
 const grpc = require("@grpc/grpc-js");
 const loader = require("@grpc/proto-loader");
 
-const [target, method, json] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const tls = args[0] === "--tls";
+const [target, method, json] = tls ? args.slice(1) : args;
 if (!target || !method) {
-  console.error("usage: node client.js <host:port> <Method> '<json request>'");
+  console.error("usage: node client.js [--tls] <host:port> <Method> '<json request>'");
   process.exit(2);
 }
 
@@ -24,7 +28,7 @@ if (!rpc) {
   process.exit(2);
 }
 const request = JSON.parse(json || (rpc.requestStream ? "[]" : "{}"));
-const client = new Todos(target, grpc.credentials.createInsecure());
+const client = new Todos(target, tls ? grpc.credentials.createSsl() : grpc.credentials.createInsecure());
 const options = { deadline: Date.now() + 5000 };
 
 function fail(err) {

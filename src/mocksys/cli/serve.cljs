@@ -1,6 +1,6 @@
 (ns mocksys.cli.serve
   "Running and verifying mocks: run, env, inspect, doctor, requests, assert, ls,
-  stop, and stacks (stack/up/down)."
+  stop, stacks (stack/up/down), the daemon, and the local TLS CA (tls ca)."
   (:require [promesa.core :as p]
             [clojure.string :as str]
             [mocksys.mb :as mb]
@@ -12,6 +12,7 @@
             [mocksys.proto :as proto]
             [mocksys.lifecycle :as lifecycle]
             [mocksys.runtime :as runtime]
+            [mocksys.tls :as tls]
             [mocksys.version :refer [version]]
             [mocksys.cli.util :refer [die env-vars-for running-imposter]]))
 
@@ -31,10 +32,13 @@
    `daemon stop` stops it, and every mock it serves."
   [{:keys [pos]}]
   (case (first pos)
-    nil    (p/let [_              (keep-serving!)
-                   {:keys [port]} (runtime/start! {:host    "127.0.0.1"
-                                                   :port    (mb/admin-port)
-                                                   :on-stop #(js/process.exit 0)})]
+    nil    (p/let [_    (keep-serving!)
+                   port (mb/admin-port)
+                   _    (runtime/start! {:host         "127.0.0.1"
+                                         :port         port
+                                         :token-file   (mb/token-path port)
+                                         :max-requests (runtime/max-recorded-requests)
+                                         :on-stop      #(js/process.exit 0)})]
              (println (str "mocksys " version " daemon on http://127.0.0.1:" port " (pid " (.-pid js/process) ")")))
     "stop" (p/let [mocks (mb/stop-daemon!)]
              (println (cond
@@ -44,15 +48,69 @@
                                             (str/join ", " (keep :name mocks))))))
     (die (str "unknown daemon command " (pr-str (first pos)) "; did you mean `mocksys daemon stop`?"))))
 
+(defn cmd-tls
+  "`tls ca` prints the local CA's certificate file, creating the CA on first use, so
+   `export NODE_EXTRA_CA_CERTS=$(mocksys tls ca)` works; stderr says how other
+   clients trust it."
+  [{:keys [pos]}]
+  (when-not (= ["ca"] pos)
+    (die "usage: mocksys tls ca   (prints the CA certificate that tls: true mocks are issued from)"))
+  (tls/ensure-ca!)
+  (let [ca (tls/ca-file)]
+    (println ca)
+    (binding [*print-fn* *print-err-fn*]
+      (println (str/join "\n" ["Mocks with `tls: true` get a certificate from this CA. Trust it in the client:"
+                               (str "  node          export NODE_EXTRA_CA_CERTS=" ca "   (https, fetch, grpc-js createSsl())")
+                               (str "  curl          curl --cacert " ca " https://localhost:PORT/...")
+                               (str "  grpc-js       grpc.credentials.createSsl(fs.readFileSync(\"" ca "\"))")
+                               (str "  gRPC C core   export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=" ca "   (python, ruby, c++)")
+                               (str "  grpcurl       grpcurl -cacert " ca " -proto FILE localhost:PORT list")
+                               "The CA's key stays in this directory (mode 0700); never copy it off the machine."])))))
+
+(defn- tls-lines
+  "How a client trusts `scenario`, served at `at`; empty when it serves plain text."
+  [scenario at]
+  (let [contract (store/read-contract scenario)
+        decl     (get contract "tls")
+        ca       (tls/ca-file)]
+    (cond
+      (not decl) []
+      (map? decl) [(str "  TLS: the contract's own certificate, " (get decl "cert"))]
+      :else (into [(str "  TLS: trust the mocksys CA, " ca)]
+                  (if (proto/grpc? contract)
+                    [(str "    node     export NODE_EXTRA_CA_CERTS=" ca "   (then grpc.credentials.createSsl())")
+                     (str "    grpcurl  grpcurl -cacert " ca " -proto "
+                          (proto/contract-file contract (store/scenario-dir scenario)) " " at " list")]
+                    [(str "    node     export NODE_EXTRA_CA_CERTS=" ca)
+                     (str "    curl     curl --cacert " ca " " at)])))))
+
+(defn- ca-exports
+  "The export that makes node trust the mocksys CA, when any of `scenarios` was
+   issued a certificate from it. NODE_EXTRA_CA_CERTS names one file, so when it
+   already names another, stderr says to add the CA to that file instead."
+  [scenarios]
+  (let [ca  (tls/ca-file)
+        cur (.-NODE_EXTRA_CA_CERTS js/process.env)]
+    (cond
+      (not-any? #(true? (get (store/read-contract %) "tls")) scenarios) []
+      (or (str/blank? cur) (= cur ca)) [(str "export NODE_EXTRA_CA_CERTS=" ca)]
+      :else (binding [*print-fn* *print-err-fn*]
+              (println (str "# NODE_EXTRA_CA_CERTS is already " cur "; add the certificate in " ca
+                            " to that file so node trusts the mock"))
+              []))))
+
 (defn cmd-run [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "run needs a scenario: run <name>"))
     (let [prof (service/effective scenario)]
       (p/let [port (lifecycle/ensure-running! scenario (:port opts))]
-        (let [at (lifecycle/address scenario port)]
-          (println (str "▶ running '" scenario "' at " at (when (proto/grpc? (store/read-contract scenario)) " (gRPC)")))
+        (let [contract (store/read-contract scenario)
+              at       (lifecycle/address scenario port)]
+          (println (str "▶ running '" scenario "' at " at
+                        (when (proto/grpc? contract) (if (get contract "tls") " (gRPC over TLS)" " (gRPC)"))))
           (doseq [v (env-vars-for scenario opts prof)]
-            (println (str "  export " v "=" at))))
+            (println (str "  export " v "=" at)))
+          (run! println (tls-lines scenario at)))
         (when (:watch opts) (lifecycle/watch-scenario! scenario))))))
 
 (defn- tilt-snippet
@@ -90,14 +148,16 @@
         (p/let [port (lifecycle/ensure-running! scenario (:port opts))]
           (let [url (lifecycle/address scenario port)]
             (println (js/JSON.stringify
-                      (clj->js (into {"scenario" scenario "port" port "url" url}
-                                     (map (fn [v] [v url]) vars)))
+                      (clj->js (cond-> (into {"scenario" scenario "port" port "url" url}
+                                             (map (fn [v] [v url]) vars))
+                                 (true? (get (store/read-contract scenario) "tls")) (assoc "caCert" (tls/ca-file))))
                       nil 2))))
 
         :else
         (p/let [port (lifecycle/ensure-running! scenario (:port opts))]
           (doseq [v vars]
             (println (str "export " v "=" (lifecycle/address scenario port))))
+          (run! println (ca-exports [scenario]))
           (println (str "export MOCKSYS_SCENARIO=" scenario)))))))
 
 (defn- call-line [{:keys [method path status]} i]
@@ -190,9 +250,11 @@
       (if (:clear opts)
         (p/do (mb/clear-requests! (:port imp))
               (println (str "✓ cleared recorded requests for " scenario)))
-        (p/let [full (mb/get-imposter (:port imp))
-                reqs (get full "requests")]
-          (println (str "# requests seen by " scenario " (" (count reqs) ")"))
+        (p/let [full    (mb/get-imposter (:port imp))
+                reqs    (get full "requests")
+                dropped (get full "droppedRequests" 0)]
+          (println (str "# requests seen by " scenario " (" (count reqs)
+                        (when (pos? dropped) (str "; " dropped " older dropped")) ")"))
           (doseq [[r i] (map vector reqs (range))]
             (let [q (get r "query")]
               (println (str "  " (inc i) ". " (get r "method") " " (get r "path")
@@ -205,6 +267,16 @@
                            (str/replace #"[.+?^${}()|\[\]\\]" "\\$&")
                            (str/replace #"\*" ".*"))
                    "$")))
+
+(defn assert-miss
+  "The report for an `assert` that found no match among `n` recorded requests. When
+   the daemon dropped older ones from the log, the call may have been among them."
+  [scenario saw n dropped]
+  (str "✗ did NOT see " saw "  (" n " request(s) recorded)"
+       (when (pos? dropped)
+         (str "\n  " dropped " older request(s) were dropped from the log, which keeps the newest " n
+              " (MOCKSYS_MAX_RECORDED_REQUESTS), so the call may be among them. Run `mocksys requests "
+              scenario " --clear` before the calls you assert on."))))
 
 (defn cmd-assert
   "Verify a request was observed: assert <name> --saw 'METHOD /path' (path may
@@ -227,7 +299,7 @@
         (if hit?
           (println (str "✓ saw " saw))
           (do (binding [*print-fn* *print-err-fn*]
-                (println (str "✗ did NOT see " saw "  (" (count reqs) " request(s) recorded)")))
+                (println (assert-miss scenario saw (count reqs) (get full "droppedRequests" 0))))
               (js/process.exit 1)))))))
 
 (defn cmd-ls [_]
@@ -310,7 +382,8 @@
            (doseq [[sc port _] results] (println (str "  ▶ " sc "  " (lifecycle/address sc port))))
            (println)
            (doseq [[sc port vars] results, v vars]
-             (println (str "export " v "=" (lifecycle/address sc port)))))))))
+             (println (str "export " v "=" (lifecycle/address sc port))))
+           (run! println (ca-exports (map first results))))))))
 
 (defn cmd-down
   "Stop every scenario in a stack:  down <stack>"

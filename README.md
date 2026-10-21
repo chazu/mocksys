@@ -40,6 +40,9 @@ share — not a one-off blob:
 - **gRPC as well as HTTP.** A contract with `protocol: grpc` and a `.proto` serves its
   RPCs, unary and streaming, statefully, through the same effects, matching and `assert`,
   and serves reflection so `grpcurl` needs no proto.
+- **HTTPS and gRPC over TLS.** `tls: true` serves a mock with a certificate for
+  localhost from a local CA, so a client that insists on TLS keeps verifying:
+  `export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"`.
 - **Mocks are test oracles.** `assert` checks what the running mock actually received
   and exits non-zero on a miss, so it drops straight into a test script.
 - **Secrets never hit disk.** When you *do* record, raw traffic lives only inside the
@@ -47,11 +50,13 @@ share — not a one-off blob:
   (`Date`, `ETag`, request-ids) **in memory** before writing anything.
 - **One shared library.** Every scenario lives in a git-backed store at `~/.mocksys`
   that's the same from every project, and shareable with a remote.
-- **Shared mocks can't smuggle in code.** Stateful mocks run generated JavaScript inside
-  the daemon, so mocksys only posts what it compiled from a contract. It rebuilds a
-  pulled or unpacked `imposter.json` before use, and contract values reach the
-  generated code only as escaped literals. The daemon listens on loopback addresses
-  only, and its admin API refuses browser requests.
+- **Shared mocks can't smuggle in code.** Stateful mocks are data: the daemon evaluates
+  each `effect` and refuses any response form that carries code. The only code a
+  scenario can bring is the `modules` it lists, which `unpack` names and
+  `MOCKSYS_NO_INJECTION=1` refuses. mocksys rebuilds a pulled or unpacked
+  `imposter.json` before use. The daemon listens on loopback addresses only, and its
+  admin API refuses browser requests and any call without the token it
+  writes for its own user.
 
 ## Install
 
@@ -71,7 +76,10 @@ npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 
 Requires **Node 18+** (for global `fetch`).
 `mocksys` starts its daemon for you on first use and leaves it running. The daemon's
-admin API listens on `127.0.0.1:2626`. Set `MOCKSYS_ADMIN_PORT` to use another port.
+admin API listens on `127.0.0.1:2626` for the default store, `~/.mocksys`. A daemon
+serves the store it started from (it keeps its admin token there), so any other store
+gets a daemon of its own, on a port in 26000–26999 derived from the store's path.
+`mocksys home` shows the port. Set `MOCKSYS_ADMIN_PORT` to choose the port yourself.
 `mocksys daemon stop` stops the daemon and every mock it serves. After an upgrade, the
 first command that serves a mock replaces a daemon from the old version and prints
 which mocks stopped. The daemon logs to `$MOCKSYS_HOME/daemon.log` (else
@@ -241,10 +249,12 @@ what the running twin has already received. Drive the twin toward zero observabl
 ## Shared store + sharing
 
 All scenarios live in one git-backed library at `~/.mocksys` (override with
-`MOCKSYS_HOME`; set it to `./.mocks` to scope mocks to a single project).
+`MOCKSYS_HOME`; set it to `./.mocks` to scope mocks to a single project). A relative
+`MOCKSYS_HOME` is resolved against the directory you run in. Each store gets its own
+daemon, so a project store runs beside the shared one with no other setting.
 
 ```sh
-mocksys home                                 # store path + git status
+mocksys home                                 # store path, daemon port + git status
 mocksys status                               # which scenarios are new/edited/removed
 mocksys log --n 10                           # recent store history
 mocksys publish github/create-issue          # git-commit a frozen scenario (inits the repo on first use)
@@ -273,10 +283,10 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `env <name>` | `eval "$(...)"` — wire a shell to the mock |
 | `inspect <name>` | agent-readable fixture summary |
 | `doctor <name> [--fix]` | lint matchers/volatility; `--fix` cleans in place |
-| `requests <name> [--clear]` | what the running mock received |
+| `requests <name> [--clear]` | what the running mock received (the newest 10000; `MOCKSYS_MAX_RECORDED_REQUESTS`, a whole number above 0, changes that, read when the daemon starts) |
 | `assert <name> --saw 'METHOD /path'` | verify a call happened (exit 1 on miss) |
 | `kit <okta\|oauth2> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
-| `kits` | list the kits, built in and in `$MOCKSYS_HOME/kits`, with their flags |
+| `kits` | list the kits, built in and in `$MOCKSYS_HOME/kits` (a file, or a directory that ships modules), with their flags |
 | `genes` | list the genes a contract can list under `genes:`, with their params |
 | `conform <name> --corpus FILE [--against URL] [--ignore k1,k2]` | replay+diff vs reality (exit 1 on drift) |
 | `clock <name> [advance <1h\|30m> \| set <ts>]` | read/move a twin's deterministic virtual clock |
@@ -324,11 +334,11 @@ Node script (`out/mocksys.js`), shipped as prebuilt JS over npm and as a
 `bun build --compile` binary via Homebrew. Focused
 modules: `core` (entry point + command table), `cli.*` (one namespace per command
 group), `lifecycle` (compile/run a scenario), `mb` (admin-API client + daemon lifecycle), `runtime` (the daemon: admin API,
-imposter servers, predicate matching, injection), `store` (disk layout), `scrub`
+imposter servers, predicate matching, effects), `store` (disk layout), `scrub`
 (redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
-(the canonical source format — compile/lift/validate/example selection), `inject` (the
-declarative stateful layer — handshakes + resource collections, compiled to generated
-injections), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
+(the canonical source format — compile/lift/validate/example selection), `effect` (the
+declarative stateful layer — handshakes + resource collections, checked and evaluated
+by the daemon), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
 (differential fidelity vs reality), `openapi` (spec import, via
 `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle` (pack/unpack), `git` (the
 shared store). Design notes and plans live in [`docs/design/`](docs/design/).

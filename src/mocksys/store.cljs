@@ -12,11 +12,17 @@
 
 ;; The store is a single shared library, not per-project: $MOCKSYS_HOME, else
 ;; ~/.mocksys. Set MOCKSYS_HOME=./.mocks in a project to scope mocks to it.
-(def root
-  (let [home (.-MOCKSYS_HOME js/process.env)]
-    (if (and home (not= home ""))
-      home
-      (path/join (os/homedir) ".mocksys"))))
+(def default-root (path/join (os/homedir) ".mocksys"))
+
+(defn root-for
+  "The store a MOCKSYS_HOME value names, as an absolute path, so a command run from
+   a subdirectory, and the daemon it starts, agree on the store and its token file."
+  [home]
+  (if (and home (not= home ""))
+    (path/resolve home)
+    default-root))
+
+(def root (root-for (.-MOCKSYS_HOME js/process.env)))
 
 (def services-dir (path/join root "services"))
 
@@ -176,22 +182,41 @@
 (def kits-dir (path/join root "kits"))
 
 (defn- read-kit-file
-  "[file text], or [file nil reason] when `file` is not a readable regular file."
+  "{:file :text}, or {:file :error} when `file` is not a readable regular file."
   [file]
   (try
     (if (.isFile (fs/statSync file))
-      [file (fs/readFileSync file "utf8")]
-      [file nil "not a file"])
-    (catch :default e [file nil (.-message e)])))
+      {:file file :text (fs/readFileSync file "utf8")}
+      {:file file :error "not a file"})
+    (catch :default e {:file file :error (.-message e)})))
+
+(defn- directory? [file]
+  (try (.isDirectory (fs/statSync file)) (catch :default _ false)))
+
+(defn- read-kit-dir
+  "A directory kit: its kit.yaml as read-kit-file reads it, with :dir, the directory
+   the files it ships resolve against."
+  [dir]
+  (let [file (path/join dir "kit.yaml")]
+    (if (fs/existsSync file)
+      (assoc (read-kit-file file) :dir dir)
+      {:file dir :error "no kit.yaml (a directory kit keeps its kit in kit.yaml)"})))
 
 (defn kit-files
-  "[[path text] ...] for every *.yaml and *.yml entry in `dir`, sorted by name; an
-   entry that cannot be read is [path nil reason]. Empty when `dir` does not exist."
+  "One entry per kit in `dir`, sorted by name: {:file :text} for a *.yaml or *.yml
+   file, the same with :dir for a subdirectory holding kit.yaml, and {:file :error}
+   for an entry that cannot be read. A subdirectory whose name starts with a dot
+   (.git) is not a kit. Empty when `dir` does not exist."
   [dir]
   (if-not (fs/existsSync dir)
     []
     (->> (fs/readdirSync dir)
          (map str)
-         (filter #(re-find #"\.ya?ml$" %))
          sort
-         (mapv #(read-kit-file (path/join dir %))))))
+         (keep (fn [entry]
+                 (let [file (path/join dir entry)]
+                   (cond
+                     (directory? file)           (when-not (str/starts-with? entry ".")
+                                                   (read-kit-dir file))
+                     (re-find #"\.ya?ml$" entry) (read-kit-file file)))))
+         vec)))
