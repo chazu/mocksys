@@ -48,21 +48,24 @@
             :else                        (p/do (p/delay 10) (p/recur))))))
 
 (defn- sse-open
-  "Open an SSE stream; resolves {:status :headers :text (atom of what arrived) :close!}
-   once its headers are in."
+  "Open an SSE stream; resolves {:status :headers :text (atom of what arrived) :state
+   (atom, :open until the response closes) :close!} once its headers are in."
   [port path headers]
   (js/Promise.
    (fn [resolve reject]
      (let [text   (atom "")
+           state  (atom :open)
            ^js rq (.get http #js {:host "127.0.0.1" :port port :path path :headers (clj->js headers)})]
        (.on rq "response"
             (fn [^js res]
               (.setEncoding res "utf8")
               (.on res "data" #(swap! text str %))
               (.on res "error" (fn [_]))
+              (.on res "close" #(reset! state :closed))
               (resolve {:status  (.-statusCode res)
                         :headers (js->clj (.-headers res))
                         :text    text
+                        :state   state
                         :ended?  #(.-complete res)
                         :close!  #(.destroy rq)})))
        (.on rq "error" reject)))))
@@ -151,6 +154,36 @@
           (is (>= took 35) "the second event waits its delay")
           (is (= "retry: 500\n\nevent: tick\nid: 2\ndata: b\ndata: c\n\n" (:text resume))
               "Last-Event-ID resumes after that event"))))))
+
+(deftest keep-alive-0-sends-no-comments
+  (async done
+    (daemon/with-daemon done
+      (fn [admin]
+        (p/let [port   (free-port)
+                stubs  [(stub "GET" "^/quiet$" {"sse" {"channel" "q" "keepAlive" 0}})
+                        (stub "GET" "^/chatty$" {"sse" {"channel" "q" "keepAlive" 20}})]
+                _      (call (str admin "/imposters") {:method "POST" :body (imposter port stubs)})
+                quiet  (sse-open port "/quiet" {})
+                chatty (sse-open port "/chatty" {})
+                _      (until "two keep-alives on the other stream" #(<= 2 (count (re-seq #"keep-alive" @(:text chatty)))))]
+          (is (= "" @(:text quiet)) "keepAlive 0 turns the comments off")
+          ((:close! quiet))
+          ((:close! chatty)))))))
+
+(deftest a-websocket-message-waits-its-delay
+  (async done
+    (daemon/with-daemon done
+      (fn [admin]
+        (p/let [port  (free-port)
+                _     (call (str admin "/imposters")
+                            {:method "POST" :body (imposter port [(stub "GET" "^/paced$" {"websocket" {"messages" [{"data" "a"} {"data" "b" "delay" 80}]}})])})
+                start (js/Date.now)
+                c     (ws-open (str "ws://127.0.0.1:" port "/paced"))
+                _     (until "both messages" #(= 2 (count @(:messages c))))
+                took  (- (js/Date.now) start)]
+          (is (= ["a" "b"] @(:messages c)))
+          (is (>= took 80) "the second message waits its delay")
+          (.close (:ws c)))))))
 
 (deftest a-post-publishes-to-an-open-sse-stream
   (async done
@@ -389,12 +422,19 @@
                   _    ((:close! s))
                   _    (.close (:ws c))
                   _    (until "both unsubscribed" #(empty? (open)))
-                  ^js early (.get http #js {:host "127.0.0.1" :port port :path "/late"})
-                  _    (.on early "error" (fn [_]))
-                  _    (p/delay 50)
+                  late #(let [^js rq (.get http #js {:host "127.0.0.1" :port port :path "/late"})]
+                          (.on rq "error" (fn [_]))
+                          rq)
+                  seen #(count (filter (fn [r] (= "/late" (get r "path"))) (:requests @imp)))
+                  ^js early (late)
+                  _    (until "the request in its wait" #(= 1 (seen)))
                   _    (.destroy early)
-                  _    (p/delay 450)
-                  _    (is (empty? (open)) "a client that left during the answer's wait is never subscribed")
+                  ^js later (late)
+                  _    (until "the later client subscribed" #(= ["late"] (open)))
+                  _    (is (= 1 (.-size (unchecked-get (imposter/channels imp) "late")))
+                           "a client that left during the answer's wait, which ended first, is never subscribed")
+                  _    (.destroy later)
+                  _    (until "the later client unsubscribed" #(empty? (open)))
                   c2   (ws-open (str "ws://127.0.0.1:" port "/rooms/b/socket?token=t"))
                   _    (until "subscribed again" #(= ["room-b"] (open)))
                   _    (#'runtime/delete! registry port)
@@ -402,3 +442,27 @@
             (is (empty? (open)) "deleting the imposter cuts its sockets, which unsubscribes them"))
           (p/catch (fn [e] (is (nil? e) (ex-message e))))
           (p/finally (fn [] (p/do (p/all (map #(#'runtime/delete! registry %) (keys @registry))) (done))))))))
+
+(defn- timers []
+  (count (filter #{"Timeout"} (js/process.getActiveResourcesInfo))))
+
+(deftest stopping-the-daemon-closes-its-streams
+  (async done
+    (p/let [d (daemon/start!)]
+      (-> (p/let [port    (free-port)
+                  _       (call (str (:admin d) "/imposters") {:method "POST" :body (imposter port chat)})
+                  _       (call (str "http://127.0.0.1:" port "/tokens") {:method "POST" :body {"token" "t" "who" "w"}})
+                  before  (timers)
+                  s       (sse-open port "/rooms/a/events" {})
+                  c       (ws-open (str "ws://127.0.0.1:" port "/rooms/a/socket?token=t"))
+                  _       (until "the joined event" #(str/includes? @(:text s) "event: joined"))
+                  during  (timers)
+                  res     (call (str (:admin d) "/") {:method "DELETE"})
+                  _       (until "the SSE stream closed" #(not= :open @(:state s)))
+                  _       (until "the socket closed" #(some? @(:closed c)))
+                  _       (until "the keep-alive timer cleared" #(<= (timers) before))]
+            (is (= 200 (:status res)))
+            (is (= (inc before) during) "the SSE stream's keep-alive is a live timer while it is open")
+            (is (<= (timers) before) "and none outlives the stop"))
+          (p/catch (fn [e] (is (nil? e) (ex-message e))))
+          (p/finally (fn [] (p/do ((:stop! d)) (done))))))))
