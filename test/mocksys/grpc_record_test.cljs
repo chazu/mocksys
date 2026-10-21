@@ -90,33 +90,46 @@
               (is (= {"x-upstream" "yes"} (get (is-of "kv.Store/Get") "headers"))
                   "the upstream's metadata, without gRPC's own headers"))))))))
 
+(defn- record-error
+  "Record the upstream's answer `is` to Get through a proxy, then replay the saved
+   imposter. Resolves [saved-is replayed-answer]."
+  [admin dir desc is]
+  (p/let [up     (fx/free-port)
+          port   (fx/free-port)
+          _      (fx/admin-call (str admin "/imposters") "POST"
+                                {"protocol" "grpc" "port" up "name" "t/up" "descriptor" desc
+                                 "stubs" [(on "kv.Store/Get" [] {"is" is})]})
+          _      (fx/admin-call (str admin "/imposters") "POST" (recorder desc up port))
+          c      (fx/connect (path/join dir "kv.proto") "kv.Store" port)
+          _      (fx/unary c "Get" {:key "a"})
+          _      (fx/close c)
+          saved  (fx/admin-call (str admin "/imposters/" port "?replayable=true&removeProxies=true") "GET" nil)
+          replay (fx/free-port)
+          _      (fx/admin-call (str admin "/imposters") "POST" (assoc (:json saved) "port" replay "name" "t/replay"))
+          r      (fx/connect (path/join dir "kv.proto") "kv.Store" replay)
+          got    (fx/unary r "Get" {:key "a"})]
+    (fx/close r)
+    [(select-keys (get-in saved [:json "stubs" 0 "responses" 0 "is"]) ["statusCode" "body"])
+     [(:code got) (:details got)]]))
+
 (deftest a-recorded-grpc-error-replays-its-code
   (async done
     (fx/with-daemon done
       (fn [admin]
         (p/let [dir  (fx/kv-dir)
                 desc (:descriptor (proto/read-proto (path/join dir "kv.proto")))
-                up   (fx/free-port)
-                port (fx/free-port)
-                _    (fx/admin-call (str admin "/imposters") "POST"
-                                    {"protocol" "grpc" "port" up "name" "t/up" "descriptor" desc
-                                     "stubs" [(on "kv.Store/Get" []
-                                                  {"is" {"statusCode" 400 "body" {"grpcCode" "FAILED_PRECONDITION" "message" "not yet"}}})]})
-                _    (fx/admin-call (str admin "/imposters") "POST" (recorder desc up port))
-                c    (fx/connect (path/join dir "kv.proto") "kv.Store" port)
-                _    (fx/unary c "Get" {:key "a"})
-                _    (fx/close c)
-                saved  (fx/admin-call (str admin "/imposters/" port "?replayable=true&removeProxies=true") "GET" nil)
-                replay (fx/free-port)
-                _      (fx/admin-call (str admin "/imposters") "POST"
-                                      (assoc (:json saved) "port" replay "name" "t/replay"))
-                r      (fx/connect (path/join dir "kv.proto") "kv.Store" replay)
-                got    (fx/unary r "Get" {:key "a"})]
-          (fx/close r)
-          (is (= {"statusCode" 400 "body" {"grpcCode" "FAILED_PRECONDITION" "message" "not yet"}}
-                 (select-keys (get-in saved [:json "stubs" 0 "responses" 0 "is"]) ["statusCode" "body"])))
-          (is (= [(codes "FAILED_PRECONDITION") "not yet"] [(:code got) (:details got)])
-              "the saved imposter replays the upstream's code"))))))
+                pre  (record-error admin dir desc {"statusCode" 400 "body" {"grpcCode" "FAILED_PRECONDITION" "message" "not yet"}})
+                miss (record-error admin dir desc {"statusCode" 404 "body" {"message" "no a"}})
+                down (record-error admin dir desc {"statusCode" 503 "body" {"grpcCode" "UNAVAILABLE" "message" "draining"}})]
+          (is (= [{"statusCode" 400 "body" {"grpcCode" "FAILED_PRECONDITION" "message" "not yet"}}
+                  [(codes "FAILED_PRECONDITION") "not yet"]]
+                 pre)
+              "a code that shares its HTTP status with others replays as itself")
+          (is (= [{"statusCode" 404 "body" {"grpcCode" "NOT_FOUND" "message" "no a"}} [(codes "NOT_FOUND") "no a"]]
+                 miss))
+          (is (= [{"statusCode" 503 "body" {"grpcCode" "UNAVAILABLE" "message" "draining"}} [(codes "UNAVAILABLE") "draining"]]
+                 down)
+              "an upstream that answers UNAVAILABLE is recorded, unlike one that does not connect"))))))
 
 (deftest an-upstream-that-does-not-answer-is-not-recorded
   (async done
