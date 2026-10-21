@@ -124,11 +124,14 @@ mocksys clock <twin> advance 1h                                    # move the de
 ## Notes for agents
 
 - Scenarios live in one git-backed store at `~/.mocksys` (override `MOCKSYS_HOME`; set
-  `MOCKSYS_HOME=./.mocks` to scope to a project). A daemon serves one store, so a second
-  store in use at the same time needs its own `MOCKSYS_ADMIN_PORT`; the error "belongs
-  to another store or user" means exactly that.
+  `MOCKSYS_HOME=./.mocks` to scope to a project). A daemon serves one store, and each
+  store gets its own admin port, so a project store runs beside `~/.mocksys` with no
+  other setting.
 - `mocksys` starts its daemon for you and leaves it running; never run `mocksys daemon`
-  yourself. Its admin API is `127.0.0.1:2626` (`MOCKSYS_ADMIN_PORT` overrides).
+  yourself. Its admin API is `127.0.0.1:2626` for `~/.mocksys`, else a port in
+  26000–26999 derived from the store's path; `mocksys home` prints it, and
+  `MOCKSYS_ADMIN_PORT` overrides it. The error "belongs to another store or user" means
+  that port is held by another store's daemon.
   `mocksys daemon stop` stops it and every running mock. If the daemon fails to start,
   read `$MOCKSYS_HOME/daemon.log`.
 - **Quote any contract path containing `{param}`**: `path: "/users/{id}"` (unquoted YAML

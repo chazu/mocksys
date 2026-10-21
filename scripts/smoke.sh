@@ -18,7 +18,7 @@ export MOCKSYS_HOME="$WORK/store"
 cd "$WORK"
 cleanup() {
   "$MS" daemon stop >/dev/null 2>&1 || true
-  [ -n "${ADMIN2:-}" ] && MOCKSYS_HOME="$WORK/store2" MOCKSYS_ADMIN_PORT="$ADMIN2" "$MS" daemon stop >/dev/null 2>&1 || true
+  [ -n "${ADMIN2:-}" ] && env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME="$WORK/store2" "$MS" daemon stop >/dev/null 2>&1 || true
   [ -n "${OLD_PID:-}" ] && kill "$OLD_PID" 2>/dev/null || true
   rm -rf "$WORK"
 }
@@ -171,11 +171,20 @@ mv "$WH/verbs.js" "$MOCKSYS_HOME/outside.js"
 out="$(MOCKSYS_HOME="$WORK/store2" "$MS" unpack "$WORK/webhooks.mock.tgz" 2>&1)"
 check "unpack names the module code it brought" 1 \
   "$(echo "$out" | grep -c 'demo/webhooks runs JavaScript from its modules (./verbs.js)')"
-# a daemon serves one store, so the second store gets its own
-ADMIN2="$(free_port)"
-store2() { MOCKSYS_HOME="$WORK/store2" MOCKSYS_ADMIN_PORT="$ADMIN2" "$MS" "$@"; }
+store2() { env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME="$WORK/store2" "$MS" "$@"; }
+ADMIN2="$(store2 home | sed -n 's/^daemon: *127\.0\.0\.1://p')"
+check "home shows a second store's admin port, derived from its path" yes \
+  "$([ "${ADMIN2:-0}" -ge 26000 ] && [ "$ADMIN2" -le 26999 ] && echo yes || echo no)"
 store2 run demo/webhooks --port $P3 >/dev/null
 check "a bundle carries the module" 202 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
+check "the second store's daemon runs beside the first" "mocksys mocksys" \
+  "$(curl -s "http://127.0.0.1:$ADMIN2/" | json_field '.name') $(curl -s "$ADMIN/" | json_field '.name')"
+"$MS" ls >/dev/null && code=0 || code=$?
+check "and the first store still reaches its own" 0 "$code"
+mkdir -p "$WORK/sub"
+out="$(cd "$WORK/sub" && env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME=../store2 "$MS" ls 2>&1)" && code=0 || code=$?
+check "a relative store from a subdirectory reaches the same daemon" "0 1" \
+  "$code $(echo "$out" | grep -c '▶ demo/webhooks.*LIVE')"
 store2 daemon stop >/dev/null
 sed -i.bak 's#\./verbs\.js#../../outside.js#' "$WH/contract.yaml"
 out="$("$MS" validate demo/webhooks 2>&1)" && code=0 || code=$?

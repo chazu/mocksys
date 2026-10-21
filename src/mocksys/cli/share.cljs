@@ -36,6 +36,7 @@
 (defn cmd-home [_]
   (let [{:keys [root repo? branch remote dirty?]} (git/info)]
     (println (str "store: " root))
+    (println (str "daemon: 127.0.0.1:" (mb/admin-port)))
     (if repo?
       (do (println (str "git:   " branch (when dirty? " (uncommitted changes)")))
           (println (str "remote: " (or remote "none — `mocksys remote <url>` to set"))))

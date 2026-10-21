@@ -5,11 +5,12 @@ orientation. A scenario id is `service/name`. Commands that start a mock recompi
 `imposter.json` from the contract first.
 
 Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`); user kits live in its `kits/`. Commands that serve a mock
-start the mocksys daemon if it is not running; its admin API is `127.0.0.1:2626`, and
-`MOCKSYS_ADMIN_PORT` picks another port. The daemon serves the store it was started
-from: it writes an admin token to `$MOCKSYS_HOME/daemon-<port>.token`, and a command run
-with another store, or by another user, fails with an error saying so. Give each store
-you use at the same time its own `MOCKSYS_ADMIN_PORT`. A daemon left running by another mocksys
+start the mocksys daemon if it is not running. The daemon serves the store it was
+started from, and writes an admin token to `$MOCKSYS_HOME/daemon-<port>.token`. Its
+admin API is `127.0.0.1:2626` for the default store; any other store gets its own daemon
+on a port in 26000–26999 derived from the store's path, which `mocksys home` prints.
+`MOCKSYS_ADMIN_PORT` picks the port instead. A command that reaches a daemon of another
+store, or of another user, fails with an error saying so. A daemon left running by another mocksys
 version is stopped and replaced, with a line on stderr that names the mocks it was
 serving; run them again. The daemon writes its output to `$MOCKSYS_HOME/daemon.log`,
 and a failed start shows the end of that log. Each running mock keeps its newest 10000

@@ -71,9 +71,10 @@ npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 
 Requires **Node 18+** (for global `fetch`).
 `mocksys` starts its daemon for you on first use and leaves it running. The daemon's
-admin API listens on `127.0.0.1:2626`. Set `MOCKSYS_ADMIN_PORT` to use another port.
-The daemon serves the store it started from (it keeps its admin token there), so give
-each store you use at the same time its own `MOCKSYS_ADMIN_PORT`.
+admin API listens on `127.0.0.1:2626` for the default store, `~/.mocksys`. A daemon
+serves the store it started from (it keeps its admin token there), so any other store
+gets a daemon of its own, on a port in 26000–26999 derived from the store's path.
+`mocksys home` shows the port. Set `MOCKSYS_ADMIN_PORT` to choose the port yourself.
 `mocksys daemon stop` stops the daemon and every mock it serves. After an upgrade, the
 first command that serves a mock replaces a daemon from the old version and prints
 which mocks stopped. The daemon logs to `$MOCKSYS_HOME/daemon.log` (else
@@ -243,11 +244,12 @@ what the running twin has already received. Drive the twin toward zero observabl
 ## Shared store + sharing
 
 All scenarios live in one git-backed library at `~/.mocksys` (override with
-`MOCKSYS_HOME`; set it to `./.mocks` to scope mocks to a single project, with its own
-`MOCKSYS_ADMIN_PORT` if another store's daemon is running).
+`MOCKSYS_HOME`; set it to `./.mocks` to scope mocks to a single project). A relative
+`MOCKSYS_HOME` is resolved against the directory you run in. Each store gets its own
+daemon, so a project store runs beside the shared one with no other setting.
 
 ```sh
-mocksys home                                 # store path + git status
+mocksys home                                 # store path, daemon port + git status
 mocksys status                               # which scenarios are new/edited/removed
 mocksys log --n 10                           # recent store history
 mocksys publish github/create-issue          # git-commit a frozen scenario (inits the repo on first use)

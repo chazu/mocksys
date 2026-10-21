@@ -9,6 +9,7 @@
   (:require [promesa.core :as p]
             [clojure.string :as str]
             ["node:child_process" :as cp]
+            ["node:crypto" :as crypto]
             ["node:fs" :as fs]
             ["node:net" :as net]
             ["node:path" :as path]
@@ -17,9 +18,26 @@
 
 (def default-admin-port 2626)
 
+(defn- real-path
+  "`p` with its links resolved as far as it exists, so a store named through a link,
+   before or after it is created, is the same store."
+  [p]
+  (try (fs/realpathSync p)
+       (catch :default _
+         (let [parent (path/dirname p)]
+           (if (= parent p) p (path/join (real-path parent) (path/basename p)))))))
+
+(defn- store-admin-port
+  "A port in 26000-26999 that a stable hash of the store's path picks. The range is
+   below the ephemeral ranges of Linux, macOS and Windows, where mocks get their
+   ports, so a mock never takes it."
+  [root]
+  (+ 26000 (mod (.readUInt32BE (.digest (.update (crypto/createHash "sha256") root)) 0) 1000)))
+
 (defn admin-port
-  "The daemon's admin port: $MOCKSYS_ADMIN_PORT, else 2626 (not Mountebank's 2525,
-   so a real Mountebank is never mistaken for the daemon)."
+  "The daemon's admin port: $MOCKSYS_ADMIN_PORT, else 2626 for the default store
+   (not Mountebank's 2525, so a real Mountebank is never mistaken for the daemon),
+   else a port derived from the store's path, since a daemon serves one store."
   []
   (let [v (.-MOCKSYS_ADMIN_PORT js/process.env)]
     (if (and v (not= v ""))
@@ -27,7 +45,8 @@
         (if (and (js/Number.isInteger n) (< 0 n 65536))
           n
           (throw (js/Error. (str "MOCKSYS_ADMIN_PORT must be a port number, got " (pr-str v))))))
-      default-admin-port)))
+      (let [root (real-path store/root)]
+        (if (= root (real-path store/default-root)) default-admin-port (store-admin-port root))))))
 
 (defn- base [] (str "http://127.0.0.1:" (admin-port)))
 

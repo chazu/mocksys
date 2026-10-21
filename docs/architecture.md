@@ -3,7 +3,8 @@
 ## What mocksys is
 
 mocksys is a CLI with its own runtime: a daemon (`mocksys daemon`) that serves HTTP and gRPC
-mocks and takes commands over an admin API on `127.0.0.1:2626`. The CLI starts the
+mocks and takes commands over an admin API on `127.0.0.1` (port 2626 for the default
+store, see [the daemon](#the-runtime)). The CLI starts the
 daemon on first use and keeps it behind the commands. You work in agent vocabulary
 (*service, scenario, contract, example, effect, kit, twin*), never in the daemon's
 *imposters* and *stubs*.
@@ -76,8 +77,10 @@ stub order = contract order; first match wins).
 ## The on-disk store
 
 One shared, git-backed library — the same from every project. Location: `$MOCKSYS_HOME`,
-else `~/.mocksys`. (Set `MOCKSYS_HOME=./.mocks` to scope mocks to a single project, and
-give that store its own `MOCKSYS_ADMIN_PORT`, since a daemon serves one store.)
+else `~/.mocksys`; a relative `MOCKSYS_HOME` is resolved against the working directory,
+so a command run from a subdirectory finds the same store. (Set `MOCKSYS_HOME=./.mocks`
+to scope mocks to a single project. A daemon serves one store, and each store gets its
+own admin port, so the project store runs its own daemon.)
 
 ```
 ~/.mocksys/
@@ -123,8 +126,13 @@ truncated on each start. If the process cannot start, exits, or does not answer 
 version answers, `ensure-up!` stops it with `DELETE /`, starts a fresh one, and prints
 one stderr line naming the mocks that stopped. `mocksys daemon stop` sends the same
 `DELETE /`. If something other than mocksys answers, it stops with an error naming
-`MOCKSYS_ADMIN_PORT`, which overrides the default 2626. The daemon keeps imposters in
-memory, so they last until it exits.
+`MOCKSYS_ADMIN_PORT`. The admin port is `MOCKSYS_ADMIN_PORT` when set. Otherwise it is
+2626 for the default store, and for any other store a port in 26000–26999 picked by a
+SHA-256 of the store's path with its links resolved. That range is below the ephemeral
+range of Linux, macOS and Windows, where mocks get their ports, so a mock never holds
+it. Two stores whose paths hash to the same port share it: the second one gets a 401,
+and `MOCKSYS_ADMIN_PORT` separates them. `mocksys home` prints the port. The daemon
+keeps imposters in memory, so they last until it exits.
 
 **The admin token.** Once the daemon holds its port, it writes a random 32-byte token
 to `$MOCKSYS_HOME/daemon-<port>.token`, mode 0600. One file per port lets two daemons

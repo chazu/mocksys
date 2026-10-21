@@ -26,7 +26,40 @@
     (is (= ["/usr/bin/node" ["/src/mocksys/bin/mocksys" "daemon"]]
            (mb/daemon-command {:exec-path "/usr/bin/node" :script "/src/mocksys/bin/mocksys" :bun? false})))))
 
-;; --- the store -------------------------------------------------------------------
+;; --- which daemon a store uses ----------------------------------------------------
+
+(defn- port-for
+  "The admin port a CLI on `root` uses, with MOCKSYS_ADMIN_PORT set to `value`
+   (nil unsets it)."
+  [root value]
+  (let [env  (.-env js/process)
+        prev [store/root (.-MOCKSYS_ADMIN_PORT env)]]
+    (set! store/root root)
+    (if (nil? value) (js-delete env "MOCKSYS_ADMIN_PORT") (set! (.-MOCKSYS_ADMIN_PORT env) value))
+    (try (mb/admin-port)
+         (finally (set! store/root (first prev))
+                  (if (nil? (second prev)) (js-delete env "MOCKSYS_ADMIN_PORT") (set! (.-MOCKSYS_ADMIN_PORT env) (second prev)))))))
+
+(deftest each-store-has-its-own-admin-port
+  (is (= 2626 (port-for store/default-root nil)) "the default store keeps 2626")
+  (is (= 26739 (port-for "/work/a/.mocks" nil)) "another store's port comes from its path, the same in every process")
+  (is (= 26939 (port-for "/work/b/.mocks" nil)) "so a second store has a daemon of its own")
+  (is (every? #(<= 26000 % 26999) (map #(port-for (str "/work/" % "/.mocks") nil) (range 200)))
+      "derived ports stay in 26000-26999")
+  (is (= 9123 (port-for "/work/a/.mocks" "9123")) "MOCKSYS_ADMIN_PORT still wins"))
+
+(deftest a-store-reached-through-a-link-keeps-its-port
+  ;; process.cwd() is the physical path, so `./.mocks` and `$PWD/.mocks` differ
+  ;; when the project sits behind a link (macOS's /tmp and /var are links)
+  (let [real (fs/realpathSync (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-mb-")))
+        link (str real "-link")]
+    (fs/symlinkSync real link)
+    (is (= (port-for (path/join real "store") nil) (port-for (path/join link "store") nil))
+        "a store that does not exist yet")
+    (fs/mkdirSync (path/join real "store"))
+    (is (= (port-for (path/join real "store") nil) (port-for (path/join link "store") nil))
+        "and once it does")
+    (fs/unlinkSync link)))
 
 (deftest a-relative-store-is-resolved
   (is (= (path/join (js/process.cwd) ".mocks") (store/root-for "./.mocks"))

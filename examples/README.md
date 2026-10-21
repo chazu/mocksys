@@ -17,11 +17,10 @@ Runnable contracts and a conform corpus that back the
 ## Quick start
 
 These examples scope the store to this repo with `MOCKSYS_HOME=./.mocks` so they never
-touch your shared `~/.mocksys`. A daemon serves one store, so they also run their own
-daemon on another admin port.
+touch your shared `~/.mocksys`. That store gets its own daemon on its own admin port.
 
 ```sh
-export MOCKSYS_HOME=./.mocks MOCKSYS_ADMIN_PORT=2727
+export MOCKSYS_HOME=./.mocks
 
 # the okta twin + the conform corpus
 mocksys kit okta --port 9200
