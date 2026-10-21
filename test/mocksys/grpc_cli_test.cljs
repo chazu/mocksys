@@ -2,8 +2,9 @@
   "A grpc scenario in a throwaway store: compile embeds the proto's descriptor,
    validate checks rpcs against the proto, a bundle carries the proto or refuses,
    and the address a consumer gets has no http:// scheme."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
+            [promesa.core :as p]
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]
@@ -99,3 +100,35 @@ operations:
       (fn []
         (is (= "localhost:9000" (lifecycle/address "t/kv" 9000)))
         (is (= "http://localhost:9000" (lifecycle/address "web/hello" 9000)))))))
+(deftest watch-reloads-when-the-proto-or-an-import-changes
+  (async done
+    (let [home    (home-with kv-files)
+          reloads (atom 0)
+          saved   [store/root store/services-dir lifecycle/ensure-running!]
+          touch!  (fn [f] (fs/appendFileSync (path/join home "t/kv" f) "\n// edited\n"))
+          settle  #(p/delay 600)]
+      (set! store/root home)
+      (set! store/services-dir (path/join home "services"))
+      (set! lifecycle/ensure-running! (fn [_ _] (swap! reloads inc) (p/resolved 9000)))
+      (-> (p/let [^js w (lifecycle/watch-scenario! "t/kv")
+                  _     (settle)
+                  _     (touch! "types.proto")
+                  _     (settle)
+                  after-import @reloads
+                  _     (touch! "kv.proto")
+                  _     (settle)
+                  after-proto @reloads
+                  _     (touch! "contract.yaml")
+                  _     (settle)
+                  after-contract @reloads]
+            (.close w)
+            (is (= 1 after-import) "an import of the proto, inside the scenario directory")
+            (is (= 2 after-proto) "the proto")
+            (is (= 3 after-contract) "the contract"))
+          (p/catch (fn [e] (is (nil? e) (ex-message e))))
+          (p/finally (fn []
+                       (let [[root services ensure] saved]
+                         (set! store/root root)
+                         (set! store/services-dir services)
+                         (set! lifecycle/ensure-running! ensure))
+                       (done)))))))
