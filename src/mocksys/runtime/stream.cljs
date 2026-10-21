@@ -40,16 +40,24 @@
     (step events)
     #(js/clearTimeout @timer)))
 
+(def ^:private max-backlog
+  "Bytes an SSE response may hold unsent for a client that has stopped reading. Past
+   it the client is dropped, so a stalled reader cannot hoard every publish."
+  (* 1024 1024))
+
 (defn- sse!
   "Stream server-sent events over `res`: `retry`, the script, then the channel. A
    stream with no channel ends after its script; one with a channel stays open until
-   the client leaves, with a keep-alive comment every `keepAlive` ms. A client gone
-   before the answer was ready (during a `wait`) gets nothing: its close has already
-   fired, so nothing would clean up after it."
+   the client leaves or falls `max-backlog` behind, with a keep-alive comment every
+   `keepAlive` ms. A client gone before the answer was ready (during a `wait`) gets
+   nothing: its close has already fired, so nothing would clean up after it."
   [imp ^js res {:keys [status headers stream]}]
   (when-not (.-destroyed res)
     (let [{:strs [events channel retry keepAlive]} stream
-          write!  #(when-not (.-writableEnded res) (.write res %))
+          write!  (fn [s]
+                    (when-not (or (.-writableEnded res) (.-destroyed res))
+                      (when (and (false? (.write res s)) (> (.-writableLength res) max-backlog))
+                        (.destroy res))))
           unsub   (if channel (effect/subscribe! (imposter/channels imp) channel #(write! (sse-frame %))) (fn []))
           beat    (when (pos? keepAlive) (js/setInterval #(write! ": keep-alive\n\n") keepAlive))
           cancel  (atom (fn []))

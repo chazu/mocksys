@@ -313,6 +313,32 @@
           (is (str/includes? sse "data: a") "SSE over https")
           (is (= "welcome" hello) "a wss upgrade is accepted"))))))
 
+(deftest a-stalled-sse-client-is-dropped
+  (async done
+    (let [registry (atom {})
+          sock     (atom nil)]
+      (-> (p/let [port    (free-port)
+                  _       (#'runtime/create! registry {} (js/JSON.stringify (clj->js (imposter port chat))))
+                  imp     (get-in @registry [port :imp])
+                  open    #(vec (js/Object.keys (imposter/channels imp)))
+                  ^js c   (reset! sock (.connect net #js {:host "127.0.0.1" :port port}))
+                  _       (.on c "error" (fn [_]))
+                  _       (.write c "GET /rooms/s/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                  _       (.pause c)
+                  _       (until "subscribed" #(= ["room-s"] (open)))
+                  body    (js/JSON.stringify #js {:text (.repeat "x" 65536)})
+                  publish #(imposter/respond imp {"method" "POST" "path" "/rooms/s/messages" "query" {} "headers" {} "body" body} {})
+                  sent    (p/loop [n 0]
+                            (if (or (empty? (open)) (= n 512))
+                              n
+                              (p/do (publish) (p/delay 1) (p/recur (inc n)))))]
+            (is (empty? (open)) "a client that stopped reading is unsubscribed")
+            (is (< sent 128) (str "dropped after " sent " publishes of 64 KiB: the 1 MiB backlog and the kernel's buffers, not all 32 MiB")))
+          (p/catch (fn [e] (is (nil? e) (ex-message e))))
+          (p/finally (fn []
+                       (when-let [^js c @sock] (.destroy c))
+                       (p/do (p/all (map #(#'runtime/delete! registry %) (keys @registry))) (done))))))))
+
 (deftest a-closed-client-leaves-no-subscriber
   (async done
     (let [registry (atom {})]

@@ -204,6 +204,8 @@ as everything else.
   scripted events, then whatever the channel carries. A stream without a channel ends
   after its last event; one with a channel stays open until the client leaves. A
   `: keep-alive` comment goes out every `keepAlive` ms (default 15000, 0 turns it off).
+  When a write finds more than 1 MiB unsent (`writableLength`), the client is not
+  reading: the response is destroyed, which unsubscribes it.
   `Last-Event-ID` resumes the script after the event with that id; channel events are
   live only, never replayed.
 - **WebSockets.** Only an imposter with a `websocket` answer listens for `upgrade`,

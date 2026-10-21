@@ -481,7 +481,8 @@ operations:
 scripted events, and every event published on its channel. A stream with no `channel`
 ends after its last scripted event; one with a channel stays open until the client
 leaves. A `: keep-alive` comment goes out every 15 seconds (`keepAlive`, in ms; `0`
-turns it off). A client that reconnects with `Last-Event-ID` resumes the script after
+turns it off). A client that stops reading is disconnected once 1 MiB is waiting for it,
+so a stalled reader does not hold every publish in memory. A client that reconnects with `Last-Event-ID` resumes the script after
 the event with that id. Channel events are not replayed.
 
 **WebSockets.** A `websocket` answer accepts the upgrade on the operation's path.
