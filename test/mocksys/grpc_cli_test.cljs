@@ -74,6 +74,15 @@ operations:
       (fn []
         (is (= [] (:errors (lifecycle/validate "t/kv"))) "a streaming rpc is served")))))
 
+(deftest a-grpc-imposter-without-a-contract-is-refused-by-name
+  (let [home (home-with {"t/kv/imposter.json" (js/JSON.stringify (clj->js {"protocol" "grpc" "descriptor" {} "stubs" []}))})]
+    (in-store home
+      (fn []
+        (let [m (thrown #(lifecycle/ensure-contract! "t/kv"))]
+          (is (str/includes? (str m) "t/kv") m)
+          (is (str/includes? (str m) "proto:") m))
+        (is (not (fs/existsSync (path/join home "t/kv/contract.yaml"))) "and no contract is written")))))
+
 (deftest a-bundle-carries-the-proto
   (let [home (home-with kv-files)
         out  (path/join home "kv.mock.tgz")]
