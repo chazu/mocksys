@@ -193,10 +193,10 @@
 
 (defn- errors [c dir] (:errors (contract/validate c dir)))
 
-(deftest lower-records-absolute-module-paths
+(deftest lower-records-module-paths-relative-to-the-scenario
   (let [dir (scenario-dir! {"lib/verbs.js" upper-module})
         imp (contract/lower (shout-contract ["./lib/verbs.js"]) nil dir)]
-    (is (= [(path/join dir "lib/verbs.js")] (get imp "modules")))
+    (is (= ["lib/verbs.js"] (get imp "modules")) "imposter.json stays valid when the store moves")
     (is (= [] (errors (shout-contract ["./lib/verbs.js"]) dir)))
     (is (some #(= "/_mocksys/clock" (get-in % ["predicates" 0 "deepEquals" "path"])) (get imp "stubs"))
         "a call turns the virtual clock on, so ctx.now is the twin's time")))
@@ -264,6 +264,12 @@
         (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
         (p/finally (fn [] (p/do ((:stop! d)) (done)))))))
 
+(defn- lowered
+  "The imposter for contract `c` as the lifecycle posts it, its modules absolute."
+  [c dir]
+  (let [imp (contract/lower c nil dir)]
+    (cond-> imp (get imp "modules") (update "modules" (partial mapv #(path/resolve dir %))))))
+
 (defn- post! [admin imposter port]
   (p/do (call (str admin "/imposters/" port) {:method "DELETE"})
         (call (str admin "/imposters") {:method "POST" :body (assoc imposter "port" port)})))
@@ -276,11 +282,11 @@
               c   (shout-contract ["./verbs.js"])
               url #(str "http://127.0.0.1:" % "/shout?w=hey")]
           (p/let [port   (free-port)
-                  made   (post! admin (contract/lower c nil dir) port)
+                  made   (post! admin (lowered c dir) port)
                   first* (call (url port))
                   _      (fs/writeFileSync (path/join dir "verbs.js")
                                            "module.exports = { verbs: { upper(ctx) { return 'v2 ' + ctx.args.s; } } };")
-                  _      (post! admin (contract/lower c nil dir) port)
+                  _      (post! admin (lowered c dir) port)
                   second (call (url port))]
             (is (= 201 (:status made)))
             (is (= {"loud" "HEY!"} (:json first*)))
@@ -291,7 +297,7 @@
     (with-daemon done
       (fn [admin]
         (let [dir (scenario-dir! {"verbs.js" "module.exports = { verbs: { upper() { throw new Error('kaput'); } } };"})
-              imp (contract/lower (shout-contract ["./verbs.js"]) nil dir)]
+              imp (lowered (shout-contract ["./verbs.js"]) dir)]
           (p/let [port   (free-port)
                   _      (post! admin imp port)
                   threw  (call (str "http://127.0.0.1:" port "/shout"))
@@ -312,7 +318,7 @@
       (fn [admin]
         (let [dir (scenario-dir! {"verbs.js" "module.exports = { verbs: { upper(ctx) { return ctx.now; } } };"})]
           (p/let [port   (free-port)
-                  _      (post! admin (contract/lower (shout-contract ["./verbs.js"]) nil dir) port)
+                  _      (post! admin (lowered (shout-contract ["./verbs.js"]) dir) port)
                   before (call (str "http://127.0.0.1:" port "/shout"))
                   _      (call (str "http://127.0.0.1:" port "/_mocksys/clock") {:method "POST" :body {"advance" 60}})
                   after  (call (str "http://127.0.0.1:" port "/shout"))]
@@ -321,7 +327,7 @@
 
 (defn- post-error [admin dir modules]
   (p/let [port (free-port)
-          r    (post! admin (contract/lower (shout-contract modules) nil dir) port)]
+          r    (post! admin (lowered (shout-contract modules) dir) port)]
     [(:status r) (get-in r [:json "errors" 0 "message"])]))
 
 (deftest the-daemon-checks-modules-and-verbs-on-post
@@ -415,9 +421,22 @@
       (fn [admin]
         (let [dir (scenario-dir! {"verbs.js" upper-module})]
           (p/let [port   (free-port)
-                  _      (post! admin (contract/lower (shout-contract ["./verbs.js"]) nil dir) port)
+                  _      (post! admin (lowered (shout-contract ["./verbs.js"]) dir) port)
                   got    (call (str admin "/imposters/" port "?replayable=true"))
                   _      (post! admin (:json got) port)
                   served (call (str "http://127.0.0.1:" port "/shout?w=hey"))]
             (is (= [(path/join dir "verbs.js")] (get-in got [:json "modules"])))
             (is (= {"loud" "HEY!"} (:json served)) "the reposted imposter still reaches its verbs")))))))
+
+(deftest run-posts-the-modules-absolute
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (with-store admin {"verbs.js" upper-module} (shout-contract ["./verbs.js"])
+          (fn [dir]
+            (p/let [port   (lifecycle/ensure-running! "demo/shout" nil)
+                    live   (call (str admin "/imposters/" port))
+                    served (call (str "http://127.0.0.1:" port "/shout?w=hey"))]
+              (is (= ["verbs.js"] (get (store/read-imposter "demo/shout") "modules")) "imposter.json keeps them relative")
+              (is (= [(path/join dir "verbs.js")] (get-in live [:json "modules"])) "the daemon gets them absolute")
+              (is (= {"loud" "HEY!"} (:json served))))))))))
