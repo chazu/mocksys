@@ -113,6 +113,12 @@
    (stub "MESSAGE" "^/rooms/[^/]+/socket$"
          {"respond" {"status" 403 "text" "not allowed"}}
          {"equals" {"body" "shout"} "jsonpath" {"selector" "$.type"}})
+   (stub "GET" "^/gate$"
+         {"bind" {"x" {"query" "x"}} "respond" {"status" 401 "headers" {"X-Realm" "r={x}"}}})
+   (stub "POST" "^/echo$"
+         {"bind" {"t" {"body" "text"}} "respond" {"text" "got {t}"}})
+   {"predicates" [{"deepEquals" {"path" "/late"}}]
+    "responses"  [{"effect" {"sse" {"channel" "late"}} "behaviors" [{"wait" 300}]}]}
    (stub "POST" "^/rooms/[^/]+/messages$"
          {"bind"    {"room" room "text" {"body" "text"}}
           "publish" {"channel" "room-{room}" "event" "message" "id" "m1" "data" {"text" "{text}"}}
@@ -217,6 +223,40 @@
        (.on rq "error" reject)
        (.end rq)))))
 
+(defn- h2c-post
+  "POST `body` asking to upgrade to h2c, as curl --http2 does; resolves the answer's
+   [status body]."
+  [port path body]
+  (js/Promise.
+   (fn [resolve reject]
+     (let [^js rq (.request http #js {:host "127.0.0.1" :port port :path path :method "POST"
+                                      :headers #js {"Connection" "Upgrade, HTTP2-Settings" "Upgrade" "h2c"
+                                                    "HTTP2-Settings" "AAMAAABkAAQCAAAAAAIAAAAA"
+                                                    "Content-Type" "application/json"}})]
+       (.on rq "response" (fn [^js res]
+                            (let [text (atom "")]
+                              (.setEncoding res "utf8")
+                              (.on res "data" #(swap! text str %))
+                              (.on res "end" #(resolve [(.-statusCode res) @text])))))
+       (.on rq "error" reject)
+       (.end rq body)))))
+
+(deftest an-upgrade-other-than-websocket-is-an-ordinary-request
+  (async done
+    (with-chat done
+      (fn [port _]
+        (p/let [r (h2c-post port "/echo" "{\"text\":\"hello\"}")]
+          (is (= [200 "got hello"] r) "the body still arrives"))))))
+
+(deftest a-refused-upgrade-cannot-inject-headers
+  (async done
+    (with-chat done
+      (fn [port _]
+        (p/let [ok  (raw-upgrade port "/gate?x=abc")
+                bad (raw-upgrade port "/gate?x=a%0d%0aSet-Cookie:%20pwned=1")]
+          (is (= 401 (first ok)))
+          (is (= 500 (first bad)) "a header that would split the response is refused, as for a plain request"))))))
+
 (deftest an-upgrade-is-a-request-like-any-other
   (async done
     (with-chat done
@@ -276,6 +316,12 @@
                   _    ((:close! s))
                   _    (.close (:ws c))
                   _    (until "both unsubscribed" #(empty? (open)))
+                  ^js early (.get http #js {:host "127.0.0.1" :port port :path "/late"})
+                  _    (.on early "error" (fn [_]))
+                  _    (p/delay 50)
+                  _    (.destroy early)
+                  _    (p/delay 450)
+                  _    (is (empty? (open)) "a client that left during the answer's wait is never subscribed")
                   c2   (ws-open (str "ws://127.0.0.1:" port "/rooms/b/socket?token=t"))
                   _    (until "subscribed again" #(= ["room-b"] (open)))
                   _    (#'runtime/delete! registry port)

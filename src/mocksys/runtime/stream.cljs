@@ -43,19 +43,22 @@
 (defn- sse!
   "Stream server-sent events over `res`: `retry`, the script, then the channel. A
    stream with no channel ends after its script; one with a channel stays open until
-   the client leaves, with a keep-alive comment every `keepAlive` ms."
+   the client leaves, with a keep-alive comment every `keepAlive` ms. A client gone
+   before the answer was ready (during a `wait`) gets nothing: its close has already
+   fired, so nothing would clean up after it."
   [imp ^js res {:keys [status headers stream]}]
-  (let [{:strs [events channel retry keepAlive]} stream
-        write!  #(when-not (.-writableEnded res) (.write res %))
-        unsub   (if channel (effect/subscribe! (imposter/channels imp) channel #(write! (sse-frame %))) (fn []))
-        beat    (when (pos? keepAlive) (js/setInterval #(write! ": keep-alive\n\n") keepAlive))
-        cancel  (atom (fn []))
-        stop!   (fn [] (unsub) (js/clearInterval beat) (@cancel))]
-    (.on res "close" stop!)
-    (.writeHead res status (clj->js headers))
-    (.flushHeaders res)
-    (when retry (write! (str "retry: " retry "\n\n")))
-    (reset! cancel (play! events #(write! (sse-frame %)) #(when-not channel (stop!) (.end res))))))
+  (when-not (.-destroyed res)
+    (let [{:strs [events channel retry keepAlive]} stream
+          write!  #(when-not (.-writableEnded res) (.write res %))
+          unsub   (if channel (effect/subscribe! (imposter/channels imp) channel #(write! (sse-frame %))) (fn []))
+          beat    (when (pos? keepAlive) (js/setInterval #(write! ": keep-alive\n\n") keepAlive))
+          cancel  (atom (fn []))
+          stop!   (fn [] (unsub) (js/clearInterval beat) (@cancel))]
+      (.on res "close" stop!)
+      (.writeHead res status (clj->js headers))
+      (.flushHeaders res)
+      (when retry (write! (str "retry: " retry "\n\n")))
+      (reset! cancel (play! events #(write! (sse-frame %)) #(when-not channel (stop!) (.end res)))))))
 
 (defn- upgrade-required!
   "A plain request that reached a `websocket` answer."

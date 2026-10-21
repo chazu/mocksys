@@ -154,11 +154,16 @@
 
 (defn- write-raw!
   "Write `out` as a whole HTTP response on a socket the server handed over for an
-   upgrade, then close it."
+   upgrade, then close it. Each header is checked as writeHead checks it, so a value
+   from the request cannot split the response; a bad one throws before anything is
+   written."
   [^js socket {:keys [status headers body encoding]}]
   (let [buf  (js/Buffer.from (or body "") (or encoding "utf8"))
         hs   (-> (into {} (remove (fn [[k _]] (#{"content-length" "connection"} (str/lower-case k)))) headers)
                  (assoc "Content-Length" (.-length buf) "Connection" "close"))]
+    (doseq [[k v] hs, v (if (vector? v) v [v])]
+      (http/validateHeaderName k)
+      (http/validateHeaderValue k (str v)))
     (.write socket (str "HTTP/1.1 " status " " (or (aget http/STATUS_CODES status) "") "\r\n"
                         (apply str (for [[k v] hs, v (if (vector? v) v [v])] (str k ": " v "\r\n")))
                         "\r\n"))
@@ -182,14 +187,23 @@
         (p/catch (fn [e] (write-raw! socket {:status 500 :headers {"Content-Type" "application/json"}
                                              :body (js/JSON.stringify (clj->js (response-error e)))}))))))
 
+(defn- websocket-upgrade? [^js node-req]
+  (= "websocket" (str/lower-case (or (.. node-req -headers -upgrade) ""))))
+
 (defn- tracked-server
   "An HTTP server, or HTTPS with `tls` ({cert key} PEM), that remembers its open
-   sockets, so stopping it can cut them (a response may be parked in a long `wait`)."
-  [handler & [tls]]
-  (let [^js server (if tls
-                     (https/createServer #js {:cert (get tls "cert") :key (get tls "key")} handler)
-                     (http/createServer handler))
+   sockets, so stopping it can cut them (a response may be parked in a long `wait`).
+   With `on-upgrade`, a WebSocket upgrade goes there; any other Upgrade request, such
+   as curl's h2c, stays an ordinary request with its body."
+  [handler {:keys [tls on-upgrade]}]
+  (let [opts       (cond-> {}
+                     tls        (assoc :cert (get tls "cert") :key (get tls "key"))
+                     on-upgrade (assoc :shouldUpgradeCallback websocket-upgrade?))
+        ^js server (if tls
+                     (https/createServer (clj->js opts) handler)
+                     (http/createServer (clj->js opts) handler))
         sockets    (atom #{})]
+    (when on-upgrade (.on server "upgrade" on-upgrade))
     (.on server "connection"
          (fn [^js s]
            (swap! sockets conj s)
@@ -221,9 +235,8 @@
   (let [port    (imposter/port imp)
         handler (fn [rq rs] (serve! imp rq rs))
         wss     (WebSocketServer. #js {:noServer true :clientTracking false})
-        server  #(let [t (tracked-server handler (imposter/tls imp))]
-                   (.on ^js (:server t) "upgrade" (fn [rq socket head] (upgrade! imp wss rq socket head)))
-                   t)]
+        server  #(tracked-server handler {:tls        (imposter/tls imp)
+                                          :on-upgrade (fn [rq socket head] (upgrade! imp wss rq socket head))})]
     (-> (p/let [v4 (listen! (server) port "127.0.0.1")]
           (-> (listen! (server) port "::1")
               (p/then (fn [v6] [v4 v6]))
@@ -382,7 +395,8 @@
                      (reset! registry {})
                      (close! @admin)))]
     (reset! admin (tracked-server (admin-handler registry {:max-requests max-requests} token
-                                                 #(p/then (stop!) (or on-stop identity)))))
+                                                 #(p/then (stop!) (or on-stop identity)))
+                                  {}))
     (p/let [_ (listen! @admin port host)]
       (when token-file (write-token! token-file token))
       {:port  (.-port (.address ^js (:server @admin)))
