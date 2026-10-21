@@ -2,15 +2,14 @@
   "Test-only protos on disk and a grpc-js client for them. The client loads the
    proto with proto-loader on its own, so a test checks the daemon against an
    independent reading of the same file."
-  (:require [clojure.test :refer [is]]
-            [promesa.core :as p]
+  (:require [promesa.core :as p]
             ["node:fs" :as fs]
             ["node:net" :as net]
             ["node:os" :as os]
             ["node:path" :as path]
             ["@grpc/grpc-js" :as grpc]
             ["@grpc/proto-loader" :as loader]
-            [mocksys.runtime :as runtime]))
+            [mocksys.daemon-fixture :as daemon]))
 
 (defn free-port
   "A port nothing listens on now."
@@ -23,19 +22,12 @@
 (defn admin-call
   "Call the daemon's admin API; resolves {:status :json}."
   [url method body]
-  (p/let [res  (js/fetch url (clj->js (cond-> {:method method :headers {"Content-Type" "application/json"}}
+  (p/let [res  (js/fetch url (clj->js (cond-> {:method method :headers (merge {"Content-Type" "application/json"} (daemon/auth url))}
                                          body (assoc :body (js/JSON.stringify (clj->js body))))))
           text (.text res)]
     {:status (.-status res) :json (try (js->clj (js/JSON.parse text)) (catch :default _ nil))}))
 
-(defn with-daemon
-  "Run `f` against a fresh in-process daemon (its admin URL), report a rejection as
-   a failure, then stop the daemon and call `done`."
-  [done f]
-  (p/let [d (runtime/start! {:host "127.0.0.1" :port 0})]
-    (-> (p/do (f (str "http://127.0.0.1:" (:port d))))
-        (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
-        (p/finally (fn [] (p/do ((:stop! d)) (done)))))))
+(def with-daemon daemon/with-daemon)
 
 (def kv-proto "
 syntax = \"proto3\";

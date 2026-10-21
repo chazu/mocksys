@@ -2,7 +2,7 @@
   "The mocksys daemon. An admin API on 127.0.0.1 creates, lists, reads and deletes
   imposters; each imposter is an HTTP server on the loopback addresses that answers
   through `mocksys.runtime.imposter`. The admin routes are exactly the ones
-  `mocksys.mb` calls:
+  `mocksys.mb` calls, and all but GET / need `Authorization: Bearer <token>`:
 
     GET    /                                  identify the daemon: {name version pid}
     DELETE /                                  stop every imposter and the admin API
@@ -13,8 +13,11 @@
     DELETE /imposters/:port/savedRequests     forget recorded requests"
   (:require [promesa.core :as p]
             [clojure.string :as str]
+            ["node:crypto" :as crypto]
+            ["node:fs" :as fs]
             ["node:http" :as http]
             ["node:https" :as https]
+            ["node:path" :as path]
             [mocksys.runtime.imposter :as imposter]
             [mocksys.runtime.grpc :as grpc]
             [mocksys.version :refer [version]]))
@@ -258,18 +261,35 @@
 (defn- local-host? [host]
   (contains? #{"127.0.0.1" "localhost"} (str/replace (or host "") #":\d+$" "")))
 
+(defn- authorized?
+  "Whether the Authorization header carries `token`, compared in constant time."
+  [token header]
+  (let [want (js/Buffer.from (str "Bearer " token))
+        got  (js/Buffer.from (or header ""))]
+    (and (= (.-length want) (.-length got)) (crypto/timingSafeEqual want got))))
+
 (defn- admin-handler
   "The admin API takes code (injections) and runs it, so only local, non-browser
    callers may use it: a request carrying an Origin, or addressed to any host other
    than the loopback name, is refused. That stops a web page from posting an
-   imposter directly or through DNS rebinding."
-  [registry stop!]
+   imposter directly or through DNS rebinding. Every call but GET / must also
+   carry the daemon's token, which only the user who started it can read, so
+   another local user cannot either."
+  [registry token stop!]
   (fn [^js node-req ^js res]
-    (let [hs (.-headers node-req)]
-      (if (or (aget hs "origin") (not (local-host? (aget hs "host"))))
+    (let [hs  (.-headers node-req)
+          url (js/URL. (.-url node-req) "http://localhost")]
+      (cond
+        (or (aget hs "origin") (not (local-host? (aget hs "host"))))
         (write-json! res 403 (error-body "forbidden" "the admin API only serves local, non-browser clients"))
+
+        (and (not (and (= "GET" (.-method node-req)) (= "/" (.-pathname url))))
+             (not (authorized? token (aget hs "authorization"))))
+        (do (.resume node-req)
+            (write-json! res 401 (error-body "unauthorized" "the admin API needs the daemon's token")))
+
+        :else
         (-> (p/let [body            (read-body node-req)
-                    url             (js/URL. (.-url node-req) "http://localhost")
                     [st resp after] (route registry stop! (.-method node-req) (.-pathname url) (query-of url) body)]
               (when after (.once res "finish" after))
               (write-json! res st resp))
@@ -277,18 +297,32 @@
                        (let [code (or (:code (ex-data e)) "internal error")]
                          (write-json! res (if (= code "internal error") 500 400) (error-body code (ex-message e)))))))))))
 
+(defn- write-token!
+  "Write `token` to `file`, readable by this user only. The rename swaps the whole
+   file in, so a client never reads half a token."
+  [file token]
+  (fs/mkdirSync (path/dirname file) #js {:recursive true})
+  (let [tmp (str file "." (.-pid js/process) ".tmp")]
+    (fs/writeFileSync tmp token #js {:mode 0600})
+    (fs/renameSync tmp file)))
+
 (defn start!
-  "Run the daemon's admin API on `host`:`port` (port 0 picks one). Resolves
-   {:port :stop!}; `stop!` closes the admin API and every imposter. `DELETE /` runs
-   the same stop, then `on-stop`."
-  [{:keys [host port on-stop]}]
+  "Run the daemon's admin API on `host`:`port` (port 0 picks one) under a fresh
+   random token, written to `token-file` once the port is ours, so a daemon that
+   loses the port to another leaves that one's token in place. Resolves {:port :token :stop!}; `stop!`
+   closes the admin API and every imposter. `DELETE /` runs the same stop, then
+   `on-stop`."
+  [{:keys [host port on-stop token-file]}]
   (let [registry (atom {})
         admin    (atom nil)
+        token    (.toString (crypto/randomBytes 32) "hex")
         stop!    (fn []
                    (p/let [_ (p/all (map close! (mapcat :servers (vals @registry))))]
                      (reset! registry {})
                      (close! @admin)))]
-    (reset! admin (tracked-server (admin-handler registry #(p/then (stop!) (or on-stop identity)))))
+    (reset! admin (tracked-server (admin-handler registry token #(p/then (stop!) (or on-stop identity)))))
     (p/let [_ (listen! @admin port host)]
+      (when token-file (write-token! token-file token))
       {:port  (.-port (.address ^js (:server @admin)))
+       :token token
        :stop! stop!})))

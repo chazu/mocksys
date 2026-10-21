@@ -12,7 +12,8 @@
             ["node:os" :as os]
             ["node:path" :as path]
             [mocksys.mb :as mb]
-            [mocksys.runtime :as runtime]))
+            [mocksys.runtime :as runtime]
+            [mocksys.store :as store]))
 
 (deftest daemon-command-per-process-kind
   (testing "the bun binary is its own runtime; its script path is virtual"
@@ -36,19 +37,31 @@
 (defn- tmp-log []
   (path/join (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-mb-")) "daemon.log"))
 
+
+(defn- tmp-dir [] (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-mb-")))
+
 (defn- with-admin-port
-  "Run `(f port)` with MOCKSYS_ADMIN_PORT set to a free port (or `value`), then
-   restore it."
+  "Run `(f port)` with MOCKSYS_ADMIN_PORT set to a free port (or `value`) and a
+   fresh store, so the daemon's token file lands there, then restore both."
   ([done f] (p/let [port (free-port)] (with-admin-port done (str port) f)))
   ([done value f]
    (let [env  (.-env js/process)
-         prev (.-MOCKSYS_ADMIN_PORT env)]
+         prev (.-MOCKSYS_ADMIN_PORT env)
+         root store/root]
      (set! (.-MOCKSYS_ADMIN_PORT env) value)
+     (set! store/root (tmp-dir))
      (-> (p/do (f value))
          (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
          (p/finally (fn []
                       (if (nil? prev) (js-delete env "MOCKSYS_ADMIN_PORT") (set! (.-MOCKSYS_ADMIN_PORT env) prev))
+                      (set! store/root root)
                       (done)))))))
+
+(defn- start-daemon!
+  "The real runtime on `port`, publishing its token to the store as `mocksys daemon`
+   does."
+  [port]
+  (runtime/start! {:host "127.0.0.1" :port (js/Number port) :token-file (mb/token-path port)}))
 
 (defn- outcome
   "The promise's rejection message, or :resolved."
@@ -122,24 +135,34 @@
 (defn- old-daemon
   "A stand-in for a daemon from another mocksys version on `port`: it identifies
    itself with `version`, lists one mock, and on DELETE / closes (unless
-   `stoppable?` is false, like a daemon from before DELETE / existed). Resolves
+   `stoppable?` is false, like a daemon from before DELETE / existed). Given a
+   `token`, it refuses every call but GET / that does not carry it. Resolves
    {:server :calls}."
-  [port version stoppable?]
+  [port version stoppable? & [token]]
   (let [calls (atom [])
         srv   (atom nil)]
     (p/let [s (serve-on port
                         (fn [^js req ^js res]
                           (swap! calls conj [(.-method req) (.-url req)])
                           (let [reply (fn [st body] (.writeHead res st #js {"Content-Type" "application/json"})
-                                        (.end res (js/JSON.stringify (clj->js body))))]
-                            (case [(.-method req) (.-url req)]
-                              ["GET" "/"]          (reply 200 (cond-> {"name" "mocksys" "pid" 4242}
-                                                                version (assoc "version" version)))
-                              ["GET" "/imposters"] (reply 200 {"imposters" [{"port" 9999 "name" "okta/okta"}]})
-                              ["DELETE" "/"]       (if stoppable?
-                                                     (do (.on res "finish" #(let [^js s @srv] (.close s) (.closeAllConnections s)))
-                                                         (reply 200 {"stopped" 1}))
-                                                     (reply 404 {}))
+                                        (.end res (js/JSON.stringify (clj->js body))))
+                                call  [(.-method req) (.-url req)]]
+                            (cond
+                              (and token (not= call ["GET" "/"])
+                                   (not= (str "Bearer " token) (.. req -headers -authorization)))
+                              (reply 401 {"errors" [{"code" "unauthorized"}]})
+
+                              (= call ["GET" "/"])
+                              (reply 200 (cond-> {"name" "mocksys" "pid" 4242} version (assoc "version" version)))
+
+                              (= call ["GET" "/imposters"])
+                              (reply 200 {"imposters" [{"port" 9999 "name" "okta/okta"}]})
+
+                              (and (= call ["DELETE" "/"]) stoppable?)
+                              (do (.on res "finish" #(let [^js s @srv] (.close s) (.closeAllConnections s)))
+                                  (reply 200 {"stopped" 1}))
+
+                              :else
                               (reply 404 {})))))]
       (reset! srv s)
       {:server s :calls calls})))
@@ -149,7 +172,7 @@
    records the daemon so the test can stop it."
   [daemons]
   (fn [_]
-    (-> (runtime/start! {:host "127.0.0.1" :port (mb/admin-port)})
+    (-> (start-daemon! (mb/admin-port))
         (p/then #(swap! daemons conj %)))
     nil))
 
@@ -176,7 +199,7 @@
   (async done
     (with-admin-port done
       (fn [port]
-        (p/let [d       (runtime/start! {:host "127.0.0.1" :port (js/Number port)})
+        (p/let [d       (start-daemon! port)
                 spawned (atom 0)
                 warned  (atom [])
                 out     (outcome (mb/ensure-up! {:spawn! (fn [_] (swap! spawned inc) nil) :log (tmp-log)
@@ -199,7 +222,7 @@
     (with-admin-port done
       (fn [port]
         (p/let [none (mb/stop-daemon!)
-                d    (runtime/start! {:host "127.0.0.1" :port (js/Number port)})
+                d    (start-daemon! port)
                 mock (free-port)
                 _    (mb/post-imposter! {"protocol" "http" "port" mock "name" "demo/hello" "stubs" []})
                 gone (mb/stop-daemon!)
@@ -210,3 +233,67 @@
           (is (false? up) "the admin API is gone")
           (is (= :refused wire) "and so is the mock")
           (is (some? d)))))))
+
+;; --- the admin token ------------------------------------------------------------
+
+(deftest calls-carry-the-token-the-daemon-published
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [d     (start-daemon! port)
+                mock  (free-port)
+                made  (outcome (mb/post-imposter! {"protocol" "http" "port" mock "name" "demo/hello" "stubs" []}))
+                live  (mb/list-imposters)]
+          (is (= :resolved made))
+          (is (= [{:port mock :name "demo/hello"}] live))
+          ((:stop! d)))))))
+
+(defn- another-store-error [port]
+  (str "the mocksys daemon on 127.0.0.1:" port " belongs to another store or user"))
+
+(deftest a-daemon-of-another-store-is-named
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [other (path/join (tmp-dir) "daemon.token")
+                d     (runtime/start! {:host "127.0.0.1" :port (js/Number port) :token-file other})
+                ls    (outcome (mb/list-imposters))
+                post  (outcome (mb/post-imposter! {"protocol" "http" "port" 1 "stubs" []}))
+                stop  (outcome (mb/stop-daemon!))
+                up    (mb/up?)
+                _     (fs/writeFileSync (mb/token-path port) "stale")
+                stale (outcome (mb/list-imposters))]
+          (doseq [out [ls post stop stale]]
+            (is (str/includes? (str out) (another-store-error port)))
+            (is (str/includes? (str out) "MOCKSYS_ADMIN_PORT") "the error says how to get a daemon of your own"))
+          (is (str/includes? (str ls) (mb/token-path port)) "and names the token file it read")
+          (is (true? up) "a refused stop leaves the daemon running")
+          ((:stop! d)))))))
+
+(deftest replacing-a-daemon-needs-its-token
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [spawned (atom 0)
+                warned  (atom [])
+                old     (old-daemon port "0.0.0-old" true "theirs")
+                out     (outcome (mb/ensure-up! {:spawn! (fn [_] (swap! spawned inc) nil) :log (tmp-log)
+                                                 :warn!  #(swap! warned conj %)}))]
+          (.close (:server old))
+          (is (str/includes? (str out) (another-store-error port)))
+          (is (not (some #{["DELETE" "/"]} @(:calls old))) "it is not asked to stop without the token")
+          (is (= [0 []] [@spawned @warned]) "nothing is started or announced"))))))
+
+(deftest two-daemons-can-share-a-store
+  (async done
+    (with-admin-port done
+      (fn [port]
+        (p/let [port2 (free-port)
+                d1    (start-daemon! port)
+                d2    (start-daemon! port2)
+                one   (outcome (mb/list-imposters))
+                _     (set! (.-MOCKSYS_ADMIN_PORT (.-env js/process)) (str port2))
+                two   (outcome (mb/list-imposters))]
+          (is (= [:resolved :resolved] [one two]) "each daemon's token has its own file")
+          (is (not= (mb/token-path port) (mb/token-path port2)))
+          (p/all [((:stop! d1)) ((:stop! d2))]))))))

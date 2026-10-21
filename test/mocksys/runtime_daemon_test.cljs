@@ -6,8 +6,12 @@
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
+            ["node:fs" :as fs]
             ["node:http" :as http]
             ["node:net" :as net]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            [mocksys.daemon-fixture :as daemon]
             [mocksys.runtime :as runtime]))
 
 (defn- free-port []
@@ -43,7 +47,7 @@
   ([url] (call url {}))
   ([url {:keys [method body headers]}]
    (p/let [res  (js/fetch url (clj->js (cond-> {:method (or method "GET")
-                                                 :headers (merge {"Content-Type" "application/json"} headers)}
+                                                 :headers (merge {"Content-Type" "application/json"} (daemon/auth url) headers)}
                                           body (assoc :body (if (string? body) body (js/JSON.stringify (clj->js body)))))))
            text (.text res)]
      {:status  (.-status res)
@@ -51,14 +55,7 @@
       :text    text
       :json    (try (js->clj (js/JSON.parse text)) (catch :default _ nil))})))
 
-(defn- with-daemon
-  "Run `f` against a fresh daemon on an ephemeral admin port; stop it afterwards."
-  [done f]
-  (p/let [d (runtime/start! {:host "127.0.0.1" :port 0})
-          admin (str "http://127.0.0.1:" (:port d))]
-    (-> (p/do (f admin))
-        (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
-        (p/finally (fn [] (p/do ((:stop! d)) (done)))))))
+(def ^:private with-daemon daemon/with-daemon)
 
 (defn- imposter [port stubs & {:as extra}]
   (merge {"protocol" "http" "port" port "name" "t/one" "recordRequests" true "stubs" stubs} extra))
@@ -238,8 +235,8 @@
 (deftest delete-root-stops-the-daemon
   (async done
     (let [stopped (p/deferred)]
-      (p/let [d        (runtime/start! {:host "127.0.0.1" :port 0 :on-stop #(p/resolve! stopped :stopped)})
-              admin    (str "http://127.0.0.1:" (:port d))
+      (p/let [d        (daemon/start! {:on-stop #(p/resolve! stopped :stopped)})
+              admin    (:admin d)
               port     (free-port)
               _        (call (str admin "/imposters") {:method "POST" :body (imposter port [])})
               res      (call (str admin "/") {:method "DELETE"})
@@ -264,3 +261,71 @@
       (is (= 403 orig) "a browser request carries an Origin")
       (is (= 403 host) "a DNS-rebound request names a foreign host")
       (p/do ((:stop! d)) (done)))))
+
+;; --- the admin token -----------------------------------------------------------
+
+(defn- settle
+  "Report a rejection of `pr` as a failure; call `done` either way."
+  [done pr]
+  (-> pr
+      (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
+      (p/finally (fn [] (done)))))
+
+(defn- status-with
+  "The status of one admin call that sends exactly `headers`."
+  [url method headers]
+  (p/let [res (js/fetch url (clj->js {:method method :headers headers}))]
+    (.-status res)))
+
+(deftest the-admin-api-needs-the-token
+  (async done
+    (settle done
+     (p/let [d       (daemon/start!)
+             admin   (:admin d)
+             bearer  (fn [t] {"Authorization" (str "Bearer " t)})
+             ident   (status-with (str admin "/") "GET" {})
+             none    (status-with (str admin "/imposters") "GET" {})
+             wrong   (status-with (str admin "/imposters") "GET" (bearer (str/replace (:token d) #"^." #(if (= % "0") "1" "0"))))
+             short   (status-with (str admin "/imposters") "GET" (bearer "abc"))
+             bare    (status-with (str admin "/imposters") "GET" {"Authorization" (:token d)})
+             port    (free-port)
+             post    (p/let [res (js/fetch (str admin "/imposters")
+                                           (clj->js {:method "POST" :body (js/JSON.stringify (clj->js (imposter port [])))}))
+                             text (.text res)]
+                       [(.-status res) (js->clj (js/JSON.parse text))])
+             stop    (status-with (str admin "/") "DELETE" {})
+             listed  (call (str admin "/imposters"))]
+       (is (= 200 ident) "GET / identifies the daemon to anyone")
+       (is (= [401 401 401 401] [none wrong short bare]) "a missing, wrong or malformed token is refused")
+       (is (= 401 (first post)))
+       (is (= "unauthorized" (get-in (second post) ["errors" 0 "code"])))
+       (is (= 401 stop) "the daemon cannot be stopped without it")
+       (is (= 200 (:status listed)) "the token opens the API")
+       (is (= [] (get-in listed [:json "imposters"])) "the refused post created nothing")
+       (is (re-matches #"[0-9a-f]{64}" (:token d)) "the token is 32 random bytes")
+       ((:stop! d))))))
+
+(defn- tmp-dir [] (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-token-")))
+
+(defn- mode-of [file] (bit-and (.-mode (fs/statSync file)) 8r777))
+
+(deftest the-daemon-publishes-its-token-to-its-owner-only
+  (async done
+    (let [file (path/join (tmp-dir) "store" "daemon-1.token")]
+      (settle done
+       (p/let [d      (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})
+               text   (fs/readFileSync file "utf8")
+               mode   (mode-of file)
+               rival  (-> (runtime/start! {:host "127.0.0.1" :port (:port d) :token-file file})
+                          (p/then (constantly :listening))
+                          (p/catch (fn [^js e] (.-code e))))
+               after  (fs/readFileSync file "utf8")
+               again  (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})
+               mode2  (mode-of file)]
+         (is (= (:token d) text) "the file holds the token, and creates the store if needed")
+         (is (= 8r600 mode) "only the daemon's user can read it")
+         (is (= "EADDRINUSE" rival))
+         (is (= (:token d) after) "a daemon that cannot take the port leaves the running daemon's token alone")
+         (is (= (:token again) (fs/readFileSync file "utf8")) "a new daemon replaces a stale file")
+         (is (= 8r600 mode2))
+         (p/all [((:stop! d)) ((:stop! again))]))))))

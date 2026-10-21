@@ -31,10 +31,12 @@
    `daemon stop` stops it, and every mock it serves."
   [{:keys [pos]}]
   (case (first pos)
-    nil    (p/let [_              (keep-serving!)
-                   {:keys [port]} (runtime/start! {:host    "127.0.0.1"
-                                                   :port    (mb/admin-port)
-                                                   :on-stop #(js/process.exit 0)})]
+    nil    (p/let [_    (keep-serving!)
+                   port (mb/admin-port)
+                   _    (runtime/start! {:host         "127.0.0.1"
+                                         :port         port
+                                         :token-file   (mb/token-path port)
+                                         :on-stop      #(js/process.exit 0)})]
              (println (str "mocksys " version " daemon on http://127.0.0.1:" port " (pid " (.-pid js/process) ")")))
     "stop" (p/let [mocks (mb/stop-daemon!)]
              (println (cond
