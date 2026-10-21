@@ -23,6 +23,7 @@
             [mocksys.inject :as inject]
             [mocksys.kits :as kits]
             [mocksys.modules :as modules]
+            [mocksys.tls :as tls]
             ["openapi-sampler" :as sampler]))
 
 ;; --- path templating ------------------------------------------------------
@@ -341,12 +342,15 @@
    prior artifact had one (ensure-running! reassigns at run time regardless). `dir` is the
    scenario directory that `modules` paths resolve against; the imposter records them
    relative to it, with `calls`, the verbs its operations name. Lowering never runs a
-   module: the daemon loads them and checks `calls` when the imposter is posted."
+   module: the daemon loads them and checks `calls` when the imposter is posted. `tls`
+   is recorded as declared (see mocksys.tls/declaration); `run` turns it into a
+   certificate and key."
   ([contract] (lower contract nil nil))
   ([contract port] (lower contract port nil))
   ([contract port dir]
    (let [contract (expand contract)
          mods     (modules/scenario-paths dir (get contract "modules"))
+         tls      (tls/declaration dir (get contract "tls"))
          calls    (into [] (comp (mapcat #(inject/calls-of (get % "effect"))) (keep #(get % "verb")) (distinct))
                         (get contract "operations"))
          fault (get contract "fault")
@@ -380,6 +384,7 @@
      (cond-> {"protocol" (get contract "protocol" "http") "stubs" stubs "name" (get contract "scenario")}
        port        (assoc "port" port)
        (seq mods)  (assoc "modules" mods)
+       tls         (assoc "tls" tls)
        (seq calls) (assoc "calls" calls)))))
 
 ;; --- lift: recorded imposter -> contract ----------------------------------

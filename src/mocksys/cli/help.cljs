@@ -57,6 +57,9 @@
      "  eval \"$(mocksys env acme/get-widget)\"          # exports BASE_URL=... etc"
      "  # point your code at the exported URL, run it, then assert what it called:"
      "  mocksys assert acme/get-widget --saw 'GET /widgets/*'   # exit 1 on miss"
+     "HTTPS or gRPC over TLS: add `tls: true` to the contract (a cert for localhost from"
+     "mocksys's local CA), and trust the CA in the client:"
+     "  export NODE_EXTRA_CA_CERTS=\"$(mocksys tls ca)\"   # node; curl --cacert \"$(mocksys tls ca)\""
      ""
      "## Validate fidelity against reality (the digital-twin loop)"
      "  mocksys conform okta/okta --corpus calls.json            # golden: status vs expect"
@@ -142,6 +145,7 @@
   (println "  mocksys ls")
   (println "  mocksys stop <name> | --all")
   (println "  mocksys daemon stop                             stop the daemon and every mock it serves")
+  (println "  mocksys tls ca                                  print the CA that tls: true mocks are issued from")
   (println "  mocksys rm <scenario|service>                   delete from the store (stops it if live)")
   (println)
   (println "  SEED FROM LIVE TRAFFIC (optional — needs real access)")

@@ -19,6 +19,7 @@ fault:    {}                     # optional transport fault overlay (see Faults)
 issuer:   "http://..."           # optional origin for baseUrl/JWT iss when a request has no Host header
 protocol: http                   # http (default) or grpc (see gRPC)
 proto:    ./todo.proto           # grpc only: the .proto file, relative to the scenario directory
+tls:      true                   # optional: serve HTTPS or gRPC over TLS (see TLS)
 seed:     {}                     # named arrays for effects to read (see effects.md)
 state:    {}                     # collections, clock, randomSeed (see effects.md)
 modules:  [./verbs.js]           # optional: JS files in the scenario directory whose verbs effects can `call` (see effects.md)
@@ -360,6 +361,46 @@ outside the scenario directory and names the file to copy in.
 gRPC clients take. `clock` reaches a grpc twin's virtual clock: every grpc mock also
 serves the `/_mocksys/clock` control method, with JSON messages.
 
+## TLS
+
+`tls: true` serves the mock as HTTPS, or a grpc mock as gRPC over TLS, on the same
+port. Use it when the code under test only accepts `https://` URLs or TLS channels.
+
+```yaml
+tls: true                                   # a certificate from the mocksys CA
+tls: { cert: ./cert.pem, key: ./key.pem }   # or your own, inside the scenario directory
+```
+
+With `tls: true`, `run` issues the mock a new certificate for `localhost`,
+`127.0.0.1` and `::1` each time it posts the scenario. The certificate comes from one
+local CA that mocksys creates in `$MOCKSYS_HOME/tls/` on first use. The client must
+trust that CA:
+
+```sh
+export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"   # node: https, fetch, grpc-js createSsl()
+curl --cacert "$(mocksys tls ca)" https://localhost:9160/whoami
+```
+
+`run` prints the CA's path and these commands. `env` exports `NODE_EXTRA_CA_CERTS`,
+and `env --json` adds `caCert`. See [cli.md](cli.md#tls) for other clients and for
+trusting the CA system-wide.
+
+What is stored where:
+
+- `imposter.json` records only `tls: true`, or the two paths relative to the scenario
+  directory. It never holds a key, so `pack`, `publish` and `push` carry no key
+  material for `tls: true`.
+- The certificate and key exist only in the post to the daemon and in the daemon's
+  memory. The admin API shows `tls: true` and never returns the key.
+- A `{cert, key}` pair must be files inside the scenario directory, like `modules`, so
+  they travel with the scenario. That shares the key with everyone who gets the
+  scenario, so use a key made for tests.
+
+The address of an HTTPS mock is `https://localhost:PORT`. A gRPC mock's address stays
+`localhost:PORT`; `run` prints `(gRPC over TLS)`. `conform` and `clock` reach a TLS
+twin without extra flags. Recording from an `https://` target works with or without
+`tls`, because the recording proxy is the client of that connection.
+
 ## Transport faults
 
 A `fault` overlay injects failure on top of every static operation's normal response.
@@ -393,7 +434,9 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
   module that is outside the scenario directory or missing; a `call` with no `verb`, an
   unknown key, non-object `args`, or a reserved `as`; a `call` in a contract with no
   `modules`. `validate` never runs a module, so whether each verb exists is checked
-  when the scenario runs (see effects.md).
+  when the scenario runs (see effects.md). A `tls` that is not `true`, `false` or
+  `{cert, key}`, or a `cert` or `key` file that is missing or outside the scenario
+  directory.
 - **gRPC errors**: an unknown `protocol`; a grpc contract with no `proto`; a grpc
   operation that names `method` or `path`, or whose `rpc` is missing or not of the form
   `pkg.Service/Method`; an `rpc` on an http contract; a proto that does not load (a

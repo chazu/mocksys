@@ -13,6 +13,7 @@ Runnable contracts and a conform corpus that back the
 | [`webhooks/`](webhooks/)                     | A **custom verb**: a webhook receiver whose `verifySignature` verb (in `verbs.js`) checks an HMAC signature header and rejects a forged delivery with 401. Copy the whole directory: the module travels with the scenario. |
 | [`kits/webhooks/`](kits/webhooks/)           | A **kit that ships a module**: the webhook receiver as a directory kit, `kit.yaml` with a `--secret` flag and `verbs.js` beside it. Copy the directory to `$MOCKSYS_HOME/kits/` and run `mocksys kit webhooks`; `kit` copies `verbs.js` into the scenario. |
 | [`grpc-todos/`](grpc-todos)                  | A stateful **gRPC** twin of `todo.proto`: create, get (`NOT_FOUND` on a miss), an update that keeps the fields it does not set, filtered list, and an explicit `grpcCode`. `client.js` calls it with grpc-js.                     |
+| [`https.yaml`](https.yaml)                   | An **HTTPS** mock: `tls: true` serves it with a certificate from the mocksys CA, which `mocksys tls ca` prints for the client to trust. Add the same line to `grpc-todos/contract.yaml` for gRPC over TLS. |
 | [`okta-corpus.json`](okta-corpus.json)       | A request corpus for `mocksys conform` — golden expectations for the Okta twin.                                                                                          |
 
 ## Quick start
@@ -76,6 +77,20 @@ mocksys run demo/todos --port 9150                                  # at localho
 node examples/grpc-todos/client.js localhost:9150 GetTodo '{"id":"t1"}'
 node examples/grpc-todos/client.js localhost:9150 GetTodo '{"id":"nope"}'   # {"code":"NOT_FOUND",...}
 mocksys assert demo/todos --saw 'POST /todo.v1.Todos/GetTodo'
+```
+
+```sh
+# an HTTPS mock, trusted through the mocksys CA
+mkdir -p .mocks/demo/https && cp examples/https.yaml .mocks/demo/https/contract.yaml
+mocksys run demo/https --port 9160                                  # at https://localhost:9160
+curl --cacert "$(mocksys tls ca)" https://localhost:9160/whoami
+export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"                      # node clients trust it too
+
+# the gRPC todo twin over TLS: add `tls: true` to its contract
+mkdir -p .mocks/demo/todos-tls && cp examples/grpc-todos/todo.proto .mocks/demo/todos-tls/
+{ echo 'tls: true'; cat examples/grpc-todos/contract.yaml; } > .mocks/demo/todos-tls/contract.yaml
+mocksys run demo/todos-tls --port 9170                              # at localhost:9170 (gRPC over TLS)
+NODE_EXTRA_CA_CERTS="$(mocksys tls ca)" node examples/grpc-todos/client.js --tls localhost:9170 GetTodo '{"id":"t1"}'
 ```
 
 See [docs/walkthrough.md](../docs/walkthrough.md) for the narrated tour and

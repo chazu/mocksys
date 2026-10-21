@@ -5,8 +5,9 @@
   The inventory, and nothing else:
     imposter   protocol http or grpc, port, name, recordRequests, stubs, modules
                (absolute paths of CommonJS files whose `verbs` the injections can
-               call), calls (the verb names the injections call, checked on create)
-               and for grpc the proto's descriptor (served by mocksys.runtime.grpc)
+               call), calls (the verb names the injections call, checked on create),
+               tls ({cert key} PEM text, served as HTTPS or gRPC over TLS) and for
+               grpc the proto's descriptor (served by mocksys.runtime.grpc)
     stub       predicates (see mocksys.runtime.match), responses
     response   exactly one of
                  is      {statusCode headers body _mode}
@@ -22,6 +23,7 @@
   (:require [clojure.string :as str]
             [promesa.core :as p]
             ["node:path" :as path]
+            ["node:tls" :as node-tls]
             [mocksys.modules :as modules]
             [mocksys.runtime.match :as match]))
 
@@ -137,15 +139,22 @@
       (doseq [[j b] (map-indexed vector bs)]
         (check-behavior! (str path ".behaviors[" j "]") b)))))
 
+(defn- check-tls! [v]
+  (when-not (and (map? v) (= #{"cert" "key"} (set (keys v))) (every? string? (vals v)))
+    (bad "" "tls must be {cert, key}, PEM text; mocksys run issues them"))
+  (try (node-tls/createSecureContext #js {:cert (get v "cert") :key (get v "key")})
+       (catch :default e (bad "tls" (ex-message e)))))
+
 (defn- validate! [spec]
   (when-not (map? spec) (bad "" "an imposter must be a JSON object"))
-  (only-keys! "" spec (cond-> #{"protocol" "port" "name" "recordRequests" "stubs" "modules" "calls"}
+  (only-keys! "" spec (cond-> #{"protocol" "port" "name" "recordRequests" "stubs" "modules" "calls" "tls"}
                         (= "grpc" (get spec "protocol")) (conj "descriptor")))
   (when-not ((some-fn nil? #(and (vector? %) (every? (fn [m] (and (string? m) (path/isAbsolute m))) %)))
              (get spec "modules"))
     (bad "" "modules must be absolute paths"))
   (when-not ((some-fn nil? #(and (vector? %) (every? string? %))) (get spec "calls"))
     (bad "" "calls must be an array of verb names"))
+  (when (contains? spec "tls") (check-tls! (get spec "tls")))
   (when-not (contains? #{"http" "grpc"} (get spec "protocol"))
     (bad "" (str "unsupported protocol " (pr-str (get spec "protocol")) " (http or grpc)")))
   (when (and (= "grpc" (get spec "protocol")) (not (map? (get spec "descriptor"))))
@@ -372,18 +381,21 @@
 
 (defn port [imp] (get-in @imp [:spec "port"]))
 (defn protocol [imp] (get-in @imp [:spec "protocol"]))
+(defn tls [imp] (get-in @imp [:spec "tls"]))
 
 (defn to-json
   "The imposter as the admin API shows it. `:list?` is the summary row; the full
    view adds the recorded requests and how many the cap dropped. `:replayable?`
    drops requests and proxy timings; `:remove-proxies?` drops proxy
    responses and any stub left with none. Every form but the summary keeps `modules`
-   and `calls`, so a replayable imposter posts back as it was."
+   and `calls`, so a replayable imposter posts back as it was, except that `tls`
+   shows as true: the admin API never returns a private key."
   [imp {:keys [list? replayable? remove-proxies?]}]
   (let [{:keys [spec stubs requests dropped] n :count} @imp
         header (cond-> (select-keys spec ["protocol" "port" "name" "modules" "calls"])
                  (not replayable?) (assoc "numberOfRequests" n))
-        body   (merge header (select-keys spec ["descriptor"]))
+        body   (cond-> (merge header (select-keys spec ["descriptor"]))
+                 (contains? spec "tls") (assoc "tls" true))
         strip  (fn [r] (cond-> r (contains? r "is") (update "is" dissoc "_proxyResponseTime")))
         proxy? (fn [r] (contains? r "proxy"))
         stubs  (cond->> (mapv :spec stubs)

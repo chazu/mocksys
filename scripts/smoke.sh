@@ -7,6 +7,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MS="${MOCKSYS_BIN:-$ROOT/bin/mocksys}"
+# the checks run from a temp dir, so MOCKSYS_BIN=dist/mocksys must resolve from here
+case "$MS" in /*) ;; *) MS="$PWD/$MS" ;; esac
 PORT="${SMOKE_PORT:-9471}"
 
 free_port() { node -e 'const s=require("net").createServer().listen(0,()=>{console.log(s.address().port);s.close()})'; }
@@ -301,6 +303,63 @@ out="$("$MS" assert demo/hello --saw 'GET /first' 2>&1)" && code=0 || code=$?
 check "assert misses a dropped call" 1 "$code"
 check "and says it may have been dropped" 1 "$(echo "$out" | grep -c '1 older request(s) were dropped')"
 "$MS" stop demo/hello >/dev/null
+
+echo "# tls"
+TP=$((PORT + 3))
+mode_of() { node -p '(require("fs").statSync(process.argv[1]).mode & 0o777).toString(8)' "$1"; }
+mkdir -p "$MOCKSYS_HOME/demo/https"
+cp "$ROOT/examples/https.yaml" "$MOCKSYS_HOME/demo/https/contract.yaml"
+out="$("$MS" run demo/https --port $TP)"
+check "run names an https URL" 1 "$(echo "$out" | grep -c "running 'demo/https' at https://localhost:$TP")"
+CA="$("$MS" tls ca 2>/dev/null)"
+check "tls ca prints the CA in the store" "$MOCKSYS_HOME/tls/ca.pem" "$CA"
+check "run says which CA to trust" 1 "$(echo "$out" | grep -c "TLS: trust the mocksys CA, $CA")"
+check "the CA directory is the owner's alone" 700 "$(mode_of "$MOCKSYS_HOME/tls")"
+check "so is the CA key" 600 "$(mode_of "$MOCKSYS_HOME/tls/ca.key")"
+check "curl trusting the CA gets the body" alice "$(curl -s --cacert "$CA" "https://localhost:$TP/whoami" | json_field '.user')"
+curl -s -o /dev/null "https://localhost:$TP/whoami" && code=0 || code=$?
+check "curl without it refuses the certificate" 60 "$code"
+check "node trusts it through NODE_EXTRA_CA_CERTS" alice \
+  "$(NODE_EXTRA_CA_CERTS="$CA" node -e 'fetch(process.argv[1]).then(r => r.json()).then(b => console.log(b.user))' "https://localhost:$TP/whoami")"
+check "env exports NODE_EXTRA_CA_CERTS" "export NODE_EXTRA_CA_CERTS=$CA" "$("$MS" env demo/https | grep NODE_EXTRA_CA_CERTS)"
+check "imposter.json holds no key" 0 "$(grep -c 'PRIVATE KEY' "$MOCKSYS_HOME/demo/https/imposter.json" || true)"
+echo '[{"method":"GET","path":"/whoami","expect":200}]' > "$WORK/https-corpus.json"
+"$MS" conform demo/https --corpus "$WORK/https-corpus.json" >/dev/null && code=0 || code=$?
+check "conform replays at an https twin" 0 "$code"
+"$MS" conform demo/https --corpus "$WORK/https-corpus.json" --against "https://localhost:$TP" >/dev/null 2>&1 && code=0 || code=$?
+check "conform --against checks the live service's certificate" 1 "$code"
+NODE_EXTRA_CA_CERTS="$CA" "$MS" conform demo/https --corpus "$WORK/https-corpus.json" --against "https://localhost:$TP" >/dev/null && code=0 || code=$?
+check "and passes once its CA is trusted" 0 "$code"
+check "env --json names the CA" "$CA" "$("$MS" env demo/https --json | json_field '.caCert')"
+cp "$CA" "$WORK/corp.pem"
+out="$(NODE_EXTRA_CA_CERTS="$WORK/corp.pem" "$MS" env demo/https 2>"$WORK/env.err")"
+check "env leaves a NODE_EXTRA_CA_CERTS of another file alone" 0 "$(echo "$out" | grep -c NODE_EXTRA_CA_CERTS || true)"
+check "and says to add the CA to that file" 1 \
+  "$(grep -c "NODE_EXTRA_CA_CERTS is already $WORK/corp.pem; add the certificate in $CA to that file" "$WORK/env.err")"
+"$MS" stack tls-stack demo/https >/dev/null
+check "up exports NODE_EXTRA_CA_CERTS" "export NODE_EXTRA_CA_CERTS=$CA" "$("$MS" up tls-stack | grep NODE_EXTRA_CA_CERTS)"
+out="$(NODE_EXTRA_CA_CERTS="$WORK/corp.pem" "$MS" up tls-stack 2>"$WORK/up.err")"
+check "up leaves a NODE_EXTRA_CA_CERTS of another file alone" 0 "$(echo "$out" | grep -c NODE_EXTRA_CA_CERTS || true)"
+check "and says to add the CA to that file" 1 \
+  "$(grep -c "NODE_EXTRA_CA_CERTS is already $WORK/corp.pem; add the certificate in $CA to that file" "$WORK/up.err")"
+mkdir -p "$MOCKSYS_HOME/demo/login-tls"
+{ echo "tls: true"; sed "s#^scenario: demo/login-throttle#scenario: demo/login-tls#" "$ROOT/examples/login-throttle.yaml"; } > "$MOCKSYS_HOME/demo/login-tls/contract.yaml"
+"$MS" run demo/login-tls --port $((TP + 1)) >/dev/null
+check "clock reaches an https twin" 1 "$("$MS" clock demo/login-tls advance 1h | grep -c 'virtual time 2024-01-01T01:00:00')"
+"$MS" stop demo/login-tls >/dev/null
+GTP=$((TP + 2))
+mkdir -p "$MOCKSYS_HOME/demo/todos-tls"
+cp "$G/todo.proto" "$MOCKSYS_HOME/demo/todos-tls/"
+{ echo "tls: true"; sed "s#^scenario: demo/todos#scenario: demo/todos-tls#" "$G/contract.yaml"; } > "$MOCKSYS_HOME/demo/todos-tls/contract.yaml"
+out="$("$MS" run demo/todos-tls --port $GTP)"
+check "run says gRPC over TLS" 1 "$(echo "$out" | grep -c "running 'demo/todos-tls' at localhost:$GTP (gRPC over TLS)")"
+check "a grpc-js client trusting the CA gets the reply" "Write the proto" \
+  "$(NODE_EXTRA_CA_CERTS="$CA" node "$G/client.js" --tls "localhost:$GTP" GetTodo '{"id":"t1"}' | json_field '.title')"
+check "an insecure client cannot connect" UNAVAILABLE "$(node "$G/client.js" "localhost:$GTP" GetTodo '{"id":"t1"}' | json_field '.code' || true)"
+"$MS" stop demo/todos-tls >/dev/null
+"$MS" publish >/dev/null
+check "publish commits no file of the CA" 0 "$(git -C "$MOCKSYS_HOME" ls-files | grep -c '^tls/' || true)"
+"$MS" stop demo/https >/dev/null
 
 echo "# daemon stop"
 "$MS" daemon stop >/dev/null

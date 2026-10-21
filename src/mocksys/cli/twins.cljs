@@ -13,6 +13,7 @@
             [mocksys.kits :as kits]
             [mocksys.lifecycle :as lifecycle]
             [mocksys.modules :as modules]
+            [mocksys.tls :as tls]
             [mocksys.cli.util :refer [die running-imposter modules-notice]]))
 
 (defn cmd-conform
@@ -45,7 +46,7 @@
                              (conform/recorded->corpus (get full "requests")))
                            []))
               port      (lifecycle/ensure-running! scenario (:port opts))
-              twin-base (str "http://localhost:" port)]
+              twin-base (lifecycle/address scenario port)]
         (when (empty? corpus)
           (die (str "empty corpus — pass --corpus FILE, or `run` the twin, drive some "
                     "traffic at it, then `conform " scenario "` to replay it")))
@@ -56,7 +57,7 @@
                 {:fails fails :total (count corpus)}
                 (let [req (first reqs)
                       label (str (get req "method" "GET") " " (get req "path"))]
-                  (p/let [tw (conform/fire twin-base req)
+                  (p/let [tw (conform/fire twin-base req tls/fetch-own)
                           lv (when against (conform/fire against req))]
                     (let [[ok? note]
                           (if against
@@ -116,12 +117,13 @@
                  (die (str "unknown clock verb '" verb "' — use: advance <dur> | set <ts> | (nothing)")))]
       (p/let [live (mb/list-imposters)
               imp  (running-imposter scenario live)
-              out  (if (proto/grpc? (store/read-contract scenario))
-                     (grpc/clock-call (:port imp) body)
-                     (p/let [res  (js/fetch (str "http://localhost:" (:port imp) "/_mocksys/clock")
-                                            #js {:method "POST"
-                                                 :headers #js {"Content-Type" "application/json"}
-                                                 :body (js/JSON.stringify (clj->js body))})
+              c    (store/read-contract scenario)
+              out  (if (proto/grpc? c)
+                     (grpc/clock-call (:port imp) body (boolean (get c "tls")))
+                     (p/let [res  (tls/fetch-own (str (lifecycle/address scenario (:port imp)) "/_mocksys/clock")
+                                                 #js {:method "POST"
+                                                      :headers #js {"Content-Type" "application/json"}
+                                                      :body (js/JSON.stringify (clj->js body))})
                              text (.text res)]
                        (try (js->clj (js/JSON.parse text)) (catch :default _ nil))))]
         (if (and (map? out) (get out "now"))

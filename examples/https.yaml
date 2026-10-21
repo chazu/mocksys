@@ -1,0 +1,24 @@
+# Hand-authored: an HTTPS mock. `tls: true` serves it with a certificate for
+# localhost, 127.0.0.1 and ::1 from mocksys's local CA, issued on every `run`.
+#
+# Stand it up:
+#   export MOCKSYS_HOME=./.mocks
+#   mkdir -p .mocks/demo/https && cp examples/https.yaml .mocks/demo/https/contract.yaml
+#   mocksys run demo/https --port 9160              # at https://localhost:9160
+# Call it with a client that trusts the CA (`mocksys tls ca` prints its path):
+#   curl --cacert "$(mocksys tls ca)" https://localhost:9160/whoami
+#   NODE_EXTRA_CA_CERTS="$(mocksys tls ca)" node -e 'fetch("https://localhost:9160/whoami").then(r => r.text()).then(console.log)'
+# To serve your own certificate instead, put the files in the scenario directory:
+#   tls: { cert: ./cert.pem, key: ./key.pem }
+service: demo
+scenario: demo/https
+origin: authored
+summary: an HTTPS endpoint behind a certificate from the mocksys CA
+tls: true
+operations:
+  - id: whoami
+    request: { method: GET, path: /whoami }
+    responses:
+      - status: 200
+        examples:
+          alice: { select: true, body: { user: alice, scheme: https } }
