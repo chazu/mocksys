@@ -16,7 +16,13 @@
 
   A request runs the verbs in the order of `verbs` below, whatever order the effect
   writes them in: bind, limit, consume, lookup, resolve, find, call, mint, sign, then
-  one terminal. A read that misses ends the request with that verb's `miss`.
+  one terminal, then publish. A read that misses ends the request with that verb's
+  `miss`.
+
+  Two terminals answer with a stream rather than a body: `sse` and `websocket`. The
+  response then carries `stream` {kind channel events ...} for mocksys.runtime.stream
+  to serve. `publish` hands events to the subscribers of a channel, in the imposter's
+  channel map: a JS object with no prototype from name to a Set of functions.
 
   An imposter's `state` settings, from the contract:
     seed         {name [item ...]}               resolve reads these
@@ -596,6 +602,85 @@
                      (js-obj "__ttl" true "v" v "exp" (+ (now state) ttl))
                      v))))
 
+;; --- streams and channels ----------------------------------------------------------------
+
+(defn new-channels
+  "A new imposter's channel map."
+  []
+  (dict))
+
+(defn subscribe!
+  "Hand `f` every event published on `channel` until the returned function is called.
+   The last subscriber to leave removes the channel."
+  [^js channels channel f]
+  (let [^js subs (or (unchecked-get channels channel)
+                     (let [s (js/Set.)] (unchecked-set channels channel s) s))]
+    (.add subs f)
+    (fn []
+      (.delete subs f)
+      (when (and (zero? (.-size subs)) (identical? subs (unchecked-get channels channel)))
+        (js-delete channels channel)))))
+
+(defn- payload
+  "An event's data as the text a stream carries: a string as written, any other value
+   as JSON. `dataVar` sends a variable."
+  [{:keys [vars]} spec]
+  (if (contains? spec "dataVar")
+    (let [v (unchecked-get vars (get spec "dataVar"))]
+      (cond (undefined? v) "" (string? v) v :else (js/JSON.stringify v)))
+    (let [d (get spec "data")]
+      (if (string? d) (interp d vars) (js/JSON.stringify (deep-interp d vars))))))
+
+(defn- event-of [{:keys [vars] :as ctx} spec]
+  (cond-> {"data" (payload ctx spec)}
+    (contains? spec "event") (assoc "event" (interp (get spec "event") vars))
+    (contains? spec "id")    (assoc "id" (interp (get spec "id") vars))
+    (contains? spec "delay") (assoc "delay" (get spec "delay"))))
+
+(def default-keep-alive
+  "Milliseconds between an SSE stream's keep-alive comments."
+  15000)
+
+(defn- resume-after
+  "The scripted `events` after the one whose id the client sent as Last-Event-ID; all
+   of them when it sent none or an id the script lacks."
+  [req events]
+  (let [last-id (header-value req "last-event-id")
+        at      (when (js/Boolean last-id)
+                  (first (keep-indexed (fn [i e] (when (= last-id (get e "id")) i)) events)))]
+    (if at (subvec events (inc at)) events)))
+
+(defn- run-sse [{:keys [req vars] :as ctx} s]
+  (js-obj "statusCode" 200
+          "headers"    (with-rate-headers ctx (js/Object.assign (js-obj "Content-Type" "text/event-stream" "Cache-Control" "no-cache")
+                                                                (deep-interp (get s "headers" {}) vars)))
+          "body"       ""
+          "stream"     (cond-> {"kind"      "sse"
+                                "events"    (resume-after req (mapv #(event-of ctx %) (get s "events")))
+                                "keepAlive" (get s "keepAlive" default-keep-alive)}
+                         (contains? s "channel") (assoc "channel" (interp (get s "channel") vars))
+                         (contains? s "retry")   (assoc "retry" (get s "retry")))))
+
+(defn- run-websocket [{:keys [vars] :as ctx} w]
+  (js-obj "statusCode" 101
+          "headers"    (js-obj)
+          "body"       ""
+          "stream"     (cond-> {"kind" "websocket" "events" (mapv #(event-of ctx %) (get w "messages"))}
+                         (contains? w "channel") (assoc "channel" (interp (get w "channel") vars)))))
+
+(defn- run-publish
+  "Hand each event to its channel's subscribers, now, when the answer is below 400. A
+   subscriber that throws is skipped: its client is gone, and the publishing request
+   must not fail for it."
+  [{:keys [vars channels answer] :as ctx} pubs]
+  (when (and channels (< (unchecked-get answer "statusCode") 400))
+    (doseq [p (many pubs)
+            :let [^js subs (unchecked-get channels (interp (get p "channel") vars))]
+            :when subs
+            :let [e (event-of ctx p)]
+            f (js/Array.from subs)]
+      (try (f e) (catch :default _ nil)))))
+
 ;; --- validation ------------------------------------------------------------------------
 
 (defn- finite? [v] (and (number? v) (js/isFinite v)))
@@ -615,12 +700,17 @@
   (for [k (sort (keys m)) :when (reserved-names k)]
     (str at "." k ": a " what " cannot be named " k " (use a name " not-reserved ")")))
 
+(def ^:private max-timer-ms
+  "The longest delay a JS timer keeps; a longer one fires after 1 ms."
+  2147483647)
+
 (def ^:private kinds
   "field kind -> [test, what the error says it must be]"
   {:string   [string? "a string"]
    :template [scalar? "a string"]
    :name     [#(and (string? %) (not (reserved-names %))) (str "a string " not-reserved)]
    :number   [finite? "a number"]
+   :ms       [#(and (integer? %) (<= 0 % max-timer-ms)) (str "a whole number of milliseconds up to " max-timer-ms)]
    :status   [status? "an HTTP status from 100 to 599"]
    :object   [map? "an object"]
    :names    [#(and (sequential? %) (every? string? %)) "a list of variable names"]
@@ -728,6 +818,22 @@
   ([fields required more]
    (fn [at m] (let [es (shape-errors at m fields required)] (if (seq es) es (more at m))))))
 
+(defn- list-errors [at xs check]
+  (if (sequential? xs)
+    (mapcat (fn [i x] (check (str at "[" i "]") x)) (range) xs)
+    [(str at " must be a list")]))
+
+(defn- needs-data [at e]
+  (when-not (or (contains? e "data") (contains? e "dataVar"))
+    [(str at " needs data or dataVar")]))
+
+(def ^:private event-fields {"data" :any "dataVar" :string "event" :template "id" :template})
+
+(defn- events-check
+  "The check of a stream's scripted `k` (events or messages), each with `fields`."
+  [k fields]
+  (fn [at s] (when (contains? s k) (list-errors (str at "." k) (get s k) (fields-check fields #{} needs-data)))))
+
 (def ^:private keyed {"collection" :name "key" :template "as" :name "status" :status "miss" response-fields})
 (def ^:private paged {"after" :template "limit" :template "link" :template})
 
@@ -735,7 +841,8 @@
   "Every effect verb in the order a request runs it. `:check` returns the problems
    with a spec as messages, and `:collections` names the fields that name a
    collection. The terminal verbs come last, collection verbs first: an effect has
-   exactly one, or `store` then `respond`."
+   exactly one, or `store` then `respond`. A `:stream` terminal answers with a stream;
+   `publish` runs after the terminal."
   [{:verb "bind"    :run run-bind    :check bind-errors}
    {:verb "limit"   :run run-limit
     :check (fields-check {"bucket" :name "key" :template "max" :number "window" :number "miss" response-fields} #{"bucket"})}
@@ -782,12 +889,32 @@
    {:verb "store"    :terminal :handshake
     :check (fields-check {"bucket" :name "key" :template "value" :template "valueVar" :string "ttl" :number}
                          #{"bucket" "key"})}
-   {:verb "respond"  :terminal :handshake :check (fields-check response-fields #{})}])
+   {:verb "respond"  :terminal :handshake :check (fields-check response-fields #{})}
+   {:verb "sse"       :terminal :stream :run run-sse
+    :check (fields-check {"events" :any "channel" :name "retry" :ms "keepAlive" :ms "headers" :object} #{}
+                         (fn [at s]
+                           (if-not (or (contains? s "events") (contains? s "channel"))
+                             [(str at " needs events, a channel or both")]
+                             ((events-check "events" (assoc event-fields "delay" :ms)) at s))))}
+   {:verb "websocket" :terminal :stream :run run-websocket
+    :check (fields-check {"messages" :any "channel" :name} #{}
+                         (events-check "messages" {"data" :any "dataVar" :string "delay" :ms}))}
+   {:verb "publish"   :after true :run run-publish
+    :check (fn [at x] (each-errors at x (fields-check (assoc event-fields "channel" :name) #{"channel"} needs-data)))}])
 
 (def ^:private verb-names (mapv :verb verbs))
-(def ^:private reads (vec (remove :terminal verbs)))
-(def ^:private collection-verbs (filterv #(= :collection (:terminal %)) verbs))
+(def ^:private reads (vec (remove #(or (:terminal %) (:after %)) verbs)))
+(def ^:private ends
+  "The terminals that form the whole answer themselves: the collection verbs and the streams."
+  (filterv #(#{:collection :stream} (:terminal %)) verbs))
+(def ^:private stream-verbs (filterv #(= :stream (:terminal %)) verbs))
+(def ^:private afters (filterv :after verbs))
 (def ^:private by-name (into {} (map (juxt :verb identity)) verbs))
+
+(defn stream-verb
+  "The stream terminal `effect` answers with (sse or websocket), or nil."
+  [effect]
+  (some #(when (get effect %) %) (map :verb stream-verbs)))
 
 (defn errors
   "Every problem with `effect` as a message naming the field, or empty."
@@ -795,16 +922,19 @@
   (if-not (map? effect)
     ["effect must be an object of verbs"]
     (let [unknown  (sort (remove (set verb-names) (keys effect)))
-          terminal (filter #(get effect %) (map :verb collection-verbs))]
+          terminal (sort (filter #(get effect %) (map :verb ends)))]
       (vec
        (concat
         (for [k unknown] (str "effect: unknown verb " k " (use " (str/join ", " verb-names) ")"))
         (cond
           (and (empty? terminal) (not (get effect "respond")))
-          [(str "effect has no `respond` or collection action ("
-                (str/join "/" (map :verb collection-verbs)) ")")]
+          [(str "effect has no `respond` or terminal action (" (str/join "/" (map :verb ends)) ")")]
           (> (count terminal) 1)
-          [(str "effect has more than one collection action (" (str/join ", " terminal) ")")])
+          [(str "effect has more than one terminal action (" (str/join ", " terminal) ")")]
+          (and (get effect "respond") (stream-verb effect))
+          [(str "respond and " (stream-verb effect) " both answer; keep one")]
+          (and (get effect "store") (seq terminal))
+          [(str "store runs only before respond, so " (first terminal) " would skip it")])
         (mapcat (fn [[k v]] (when-let [{:keys [check]} (by-name k)] (check k v))) (sort effect)))))))
 
 (defn collection-errors
@@ -845,17 +975,22 @@
 
 (defn run
   "Answer `request` (the map the server builds) with `effect`, over the imposter's JS
-   `state`. `settings` are the imposter's `state` settings and `verbs` the JS object of
-   its custom verbs. Returns {statusCode headers body}; throws when a verb fails."
-  [effect {:keys [state request settings verbs]}]
+   `state`. `settings` are the imposter's `state` settings, `verbs` the JS object of
+   its custom verbs and `channels` its channel map. Returns {statusCode headers body},
+   plus `stream` for a stream answer; throws when a verb fails."
+  [effect {:keys [state request settings verbs channels]}]
   (init-state! state effect settings)
-  (let [ctx {:state state :req (clj->js request) :vars (dict) :settings settings :verbs verbs}]
-    (js->clj
-     (or (some (fn [{:keys [verb run]}] (when-let [spec (get effect verb)] (run ctx spec))) reads)
-         (if-let [{:keys [verb run]} (some #(when (get effect (:verb %)) %) collection-verbs)]
-           (run ctx (get effect verb))
-           (do (when-let [s (get effect "store")] (store! ctx s))
-               (response ctx (or (get effect "respond") {"status" 200}))))))))
+  (let [ctx    {:state state :req (clj->js request) :vars (dict) :settings settings :verbs verbs :channels channels}
+        missed (some (fn [{:keys [verb run]}] (when-let [spec (get effect verb)] (run ctx spec))) reads)
+        answer (or missed
+                   (if-let [{:keys [verb run]} (some #(when (get effect (:verb %)) %) ends)]
+                     (run ctx (get effect verb))
+                     (do (when-let [s (get effect "store")] (store! ctx s))
+                         (response ctx (or (get effect "respond") {"status" 200})))))]
+    (when-not missed
+      (doseq [{:keys [verb run]} afters :let [spec (get effect verb)] :when spec]
+        (run (assoc ctx :answer answer) spec)))
+    (js->clj answer)))
 
 ;; --- the virtual clock ---------------------------------------------------------------------
 

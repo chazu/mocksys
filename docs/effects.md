@@ -24,8 +24,9 @@ There are two families of verbs:
   and pagination — a REST resource like Okta users.
 
 An operation ends **either** in a `respond` (handshake) **or** in exactly one terminal
-collection verb (`create`/`get`/`update`/`remove`/`list`, plus the relation/render verbs
-`link`/`unlink`/`listJoin`/`render`). Read-phase verbs that populate a variable and then
+verb: a collection verb (`create`/`get`/`update`/`remove`/`list`, plus the relation/render verbs
+`link`/`unlink`/`listJoin`/`render`), or a stream (`sse`, `websocket`; see
+[Streams](#streams-sse-websocket-and-publish)). Read-phase verbs that populate a variable and then
 fall through to a `respond` — `resolve`, `find`, `sign`, `call` — are *not* terminal, so an op may
 use several. The relation, lookup, signing, and render verbs are covered in
 [Joins, lookups, signing, rendering](#joins-lookups-signing-rendering-extended-verbs).
@@ -46,8 +47,10 @@ the order you write the keys:
 7. `mint` — generate fresh ids (after reads, so a minted id can't be clobbered).
 8. `sign` — build JWTs (after `mint`, so a minted `jti` can be signed).
 9. **Terminal:** either a collection verb (`create`/`get`/`update`/`remove`/`list`/
-   `link`/`unlink`/`listJoin`/`render`) which forms and returns its own response, **or**
-   `store` (write a bucket) followed by `respond`.
+   `link`/`unlink`/`listJoin`/`render`) which forms and returns its own response, a
+   stream (`sse`, `websocket`), **or** `store` (write a bucket) followed by `respond`.
+10. `publish` — hand events to a channel's open streams. It runs only when the
+    terminal ran and answered below 400, so a miss or a refused write publishes nothing.
 
 `state` persists for the imposter's lifetime. Reposting the imposter (every `run`/`conform`)
 starts fresh and reseeds.
@@ -543,8 +546,83 @@ JSON).
 
 Every verb is one entry in the `verbs` table in `src/mocksys/effect.cljs`: its name,
 `:check` (its field checks, which both `validate` and the daemon's post run), `:run`, and
-for a terminal verb `:terminal`. The table's order is the order a request runs the
-verbs. A new verb is that entry and a section in this doc.
+for a terminal verb `:terminal`, or `:after` for one that runs after the terminal. The
+table's order is the order a request runs the verbs. A new verb is that entry and a
+section in this doc.
+
+## Streams: `sse`, `websocket` and `publish`
+
+Two terminal verbs answer with a stream that stays open, and `publish` feeds open
+streams from other requests. [contracts.md](contracts.md#streams-server-sent-events-and-websockets)
+covers the wire: SSE framing, `Last-Event-ID`, and how an inbound WebSocket message
+becomes a `MESSAGE` request and its reply becomes outbound messages.
+
+### `sse` — a server-sent event stream (terminal)
+
+```yaml
+sse:
+  retry: 3000                     # optional: the client's reconnect delay, sent first (ms)
+  events:                         # optional: scripted, in order
+    - { event: status, id: "1", data: { state: "{state}" } }
+    - { event: tick, id: "2", data: "half way", delay: 500 }   # 500 ms after the previous one
+  channel: "job-{id}"             # optional: then every event published here
+  keepAlive: 15000                # optional: ms between ": keep-alive" comments; 0 turns them off
+  headers: { Access-Control-Allow-Origin: "*" }   # optional, interpolated
+```
+
+`sse` needs `events`, a `channel` or both, and cannot answer a `MESSAGE`. Like any
+terminal, it cannot follow `store`. An event takes `data` or `dataVar`, and
+optionally `event`, `id` and `delay`. A string `data` is sent as written after
+interpolation; any other value is sent as JSON with every string in it interpolated.
+`dataVar: msg` sends variable `msg` (a string as is, anything else as JSON). A line
+break in the data becomes a second `data:` line, which the client joins back. Without a
+`channel` the stream ends after its last event.
+
+### `websocket` — accept a WebSocket (terminal)
+
+```yaml
+websocket:
+  messages:                       # optional: sent on connect, in order
+    - { data: { type: welcome, room: "{room}" } }
+    - { data: "ready", delay: 100 }
+  channel: "room-{room}"          # optional: then every event published here
+```
+
+A `websocket` operation's request method is `GET`, the only one an upgrade uses. A
+message takes `data` or `dataVar`, and optionally `delay`. Each message the client
+sends then runs through the contract as a `MESSAGE` request, so a `MESSAGE` operation's
+effect handles it with the same verbs, state and channels as any other.
+
+### `publish` — send to a channel (after the terminal)
+
+```yaml
+publish: { channel: "room-{room}", event: message, id: "{mid}", dataVar: msg }
+# or a list of them
+```
+
+`channel` is required, with `data` or `dataVar`; `event` and `id` are optional. A
+`publish` runs after the terminal and sees the variables it set, so `create ... as: msg`
+then `dataVar: msg` publishes the stored row. It publishes nothing when the answer is
+400 or above, or when a read missed. The answer counted is the effect's: a `websocket`
+answer is 101 and an `sse` answer 200 even when the client then gets something else,
+such as a 426 for a plain `GET` to a `websocket` operation. An SSE subscriber receives the whole event; a
+WebSocket subscriber receives its data as one message. Nothing is buffered: a stream
+that is not open when the event is published never sees it. `publish` needs something
+to answer the request, usually `respond: { status: 202 }` or a collection verb.
+
+**Channels** belong to one imposter, so two running scenarios never share one, and
+reposting a scenario starts with none. A name may not be `__proto__`, `constructor` or
+`prototype`. A stream subscribes as it opens, in the same turn of the daemon's event
+loop, so a client that has its headers (SSE) or its open event (WebSocket) misses
+nothing published after. When a client leaves, its subscription and timers go with it;
+a client that left while the answer waited on a `wait` behavior is never subscribed.
+
+**Time.** `delay`, `keepAlive` and `retry` are whole wall-clock milliseconds, at most
+2147483647, the longest a timer keeps. The [virtual
+clock](#the-virtual-clock) neither drives a stream nor is moved by one. A `{now}` bind in
+a scripted event reads the clock when the stream opens; in a `publish`, when the
+publishing request runs. A `limit` counts a stream's connect as one request, and each
+inbound WebSocket message against its own `MESSAGE` operation.
 
 ## Custom verbs (`call`)
 
@@ -716,8 +794,11 @@ On a request, `effect/run` seeds the collections into `state` if they are not th
 (so every operation on the imposter sees the same data), then runs the verbs in a fixed
 order whatever order the effect lists them in: `bind`, `limit`, `consume`, `lookup`,
 `resolve`, `find`, `call`, `mint`, `sign`, then the one terminal verb (a collection verb,
-or `store` and `respond`). A read that misses ends the request with its `miss`
-response. A `call` reaches the verbs the daemon loaded from the imposter's modules.
+a stream, or `store` and `respond`), then `publish`. A read that misses ends the request
+with its `miss` response. A `call` reaches the verbs the daemon loaded from the
+imposter's modules. A stream answer carries the interpolated script and the channel
+name, and the server serves it; `publish` reaches the imposter's channel map, a
+null-prototype object from channel name to the open streams' subscriptions.
 
 ## Building twins this way
 

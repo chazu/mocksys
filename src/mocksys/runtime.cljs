@@ -1,7 +1,8 @@
 (ns mocksys.runtime
   "The mocksys daemon. An admin API on 127.0.0.1 creates, lists, reads and deletes
   imposters; each imposter is an HTTP(S) server on the loopback addresses that answers
-  through `mocksys.runtime.imposter`. The admin routes are exactly the ones
+  through `mocksys.runtime.imposter`, and serves stream answers and WebSocket upgrades
+  through `mocksys.runtime.stream`. The admin routes are exactly the ones
   `mocksys.mb` calls, and all but GET / need `Authorization: Bearer <token>`:
 
     GET    /                                  identify the daemon: {name version pid}
@@ -20,6 +21,8 @@
             ["node:path" :as path]
             [mocksys.runtime.imposter :as imposter]
             [mocksys.runtime.grpc :as grpc]
+            [mocksys.runtime.stream :as stream]
+            ["ws" :refer [WebSocketServer]]
             [mocksys.version :refer [version]]))
 
 (def identity-name "mocksys")
@@ -135,25 +138,74 @@
     (.write socket (js/Buffer.from "Htijy%@tWXJ/hQ#[Q:7G@dH4\"gu[QaX&" "utf-8")))
   (.destroy socket))
 
+(defn- response-error [e] {"errors" [{"code" "response error" "message" (ex-message e)}]})
+
 (defn- serve! [imp ^js node-req ^js res]
   (-> (p/let [body (read-body node-req)
               out  (imposter/respond imp (request-of node-req body)
                                      {:proxy! #(proxy-to! %1 %2 (.-url node-req))})
               _    (when (pos? (:wait out 0)) (p/delay (:wait out)))]
-        (if-let [kind (:fault out)]
-          (fault! (.-socket node-req) kind)
-          (do (.writeHead res (:status out) (clj->js (:headers out)))
-              (.end res (:body out) (:encoding out)))))
-      (p/catch (fn [e] (write-json! res 500 {"errors" [{"code" "response error" "message" (ex-message e)}]})))))
+        (cond
+          (:fault out)  (fault! (.-socket node-req) (:fault out))
+          (:stream out) (stream/serve-http! imp res out)
+          :else         (do (.writeHead res (:status out) (clj->js (:headers out)))
+                            (.end res (:body out) (:encoding out)))))
+      (p/catch (fn [e] (write-json! res 500 (response-error e))))))
+
+(defn- write-raw!
+  "Write `out` as a whole HTTP response on a socket the server handed over for an
+   upgrade, then close it. Each header is checked as writeHead checks it, so a value
+   from the request cannot split the response; a bad one throws before anything is
+   written."
+  [^js socket {:keys [status headers body encoding]}]
+  (let [buf  (js/Buffer.from (or body "") (or encoding "utf8"))
+        hs   (-> (into {} (remove (fn [[k _]] (#{"content-length" "connection"} (str/lower-case k)))) headers)
+                 (assoc "Content-Length" (.-length buf) "Connection" "close"))]
+    (doseq [[k v] hs, v (if (vector? v) v [v])]
+      (http/validateHeaderName k)
+      (http/validateHeaderValue k (str v)))
+    (.write socket (str "HTTP/1.1 " status " " (or (aget http/STATUS_CODES status) "") "\r\n"
+                        (apply str (for [[k v] hs, v (if (vector? v) v [v])] (str k ": " v "\r\n")))
+                        "\r\n"))
+    (.end socket buf)))
+
+(defn- upgrade!
+  "A request to switch protocols goes through the imposter like any other. A
+   `websocket` answer accepts it; any other answer is written back as plain HTTP, so a
+   gate in front of the websocket refuses with its own status."
+  [imp ^js wss ^js node-req ^js socket head]
+  (let [request (request-of node-req "")]
+    (-> (p/let [out (imposter/respond imp request {:proxy! #(proxy-to! %1 %2 (.-url node-req))})
+                _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
+          (cond
+            (:fault out)
+            (fault! socket (:fault out))
+            (= "websocket" (get-in out [:stream "kind"]))
+            (.handleUpgrade wss node-req socket head #(stream/websocket! imp % request out))
+            :else
+            (write-raw! socket out)))
+        (p/catch (fn [e] (write-raw! socket {:status 500 :headers {"Content-Type" "application/json"}
+                                             :body (js/JSON.stringify (clj->js (response-error e)))}))))))
+
+(defn- websocket-upgrade? [^js node-req]
+  (= "websocket" (str/lower-case (or (.. node-req -headers -upgrade) ""))))
 
 (defn- tracked-server
   "An HTTP server, or HTTPS with `tls` ({cert key} PEM), that remembers its open
-   sockets, so stopping it can cut them (a response may be parked in a long `wait`)."
-  [handler & [tls]]
-  (let [^js server (if tls
-                     (https/createServer #js {:cert (get tls "cert") :key (get tls "key")} handler)
-                     (http/createServer handler))
+   sockets, so stopping it can cut them (a response may be parked in a long `wait`).
+   With `on-upgrade`, a WebSocket upgrade goes there. Any other Upgrade request, such
+   as curl's h2c, stays an ordinary request with its body, except on a node without
+   shouldUpgradeCallback (before 22.21 and 24.9), which hands it to `on-upgrade` with
+   its body unread."
+  [handler {:keys [tls on-upgrade]}]
+  (let [opts       (cond-> {}
+                     tls        (assoc :cert (get tls "cert") :key (get tls "key"))
+                     on-upgrade (assoc :shouldUpgradeCallback websocket-upgrade?))
+        ^js server (if tls
+                     (https/createServer (clj->js opts) handler)
+                     (http/createServer (clj->js opts) handler))
         sockets    (atom #{})]
+    (when on-upgrade (.on server "upgrade" on-upgrade))
     (.on server "connection"
          (fn [^js s]
            (swap! sockets conj s)
@@ -184,7 +236,10 @@
   [imp]
   (let [port    (imposter/port imp)
         handler (fn [rq rs] (serve! imp rq rs))
-        server  #(tracked-server handler (imposter/tls imp))]
+        wss     (WebSocketServer. #js {:noServer true :clientTracking false :maxPayload stream/max-payload})
+        server  #(tracked-server handler {:tls        (imposter/tls imp)
+                                          :on-upgrade (when (imposter/websockets? imp)
+                                                        (fn [rq socket head] (upgrade! imp wss rq socket head)))})]
     (-> (p/let [v4 (listen! (server) port "127.0.0.1")]
           (-> (listen! (server) port "::1")
               (p/then (fn [v6] [v4 v6]))
@@ -343,7 +398,8 @@
                      (reset! registry {})
                      (close! @admin)))]
     (reset! admin (tracked-server (admin-handler registry {:max-requests max-requests} token
-                                                 #(p/then (stop!) (or on-stop identity)))))
+                                                 #(p/then (stop!) (or on-stop identity)))
+                                  {}))
     (p/let [_ (listen! @admin port host)]
       (when token-file (write-token! token-file token))
       {:port  (.-port (.address ^js (:server @admin)))

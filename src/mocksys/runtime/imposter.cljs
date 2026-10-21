@@ -11,7 +11,9 @@
     stub       predicates (see mocksys.runtime.match), responses
     response   exactly one of
                  is      {statusCode headers body _mode}
-                 effect  an operation's effect map, run over the imposter's state
+                 effect  an operation's effect map, run over the imposter's state;
+                         its answer may be a stream (sse or websocket, http only,
+                         served by mocksys.runtime.stream)
                  clock   true: read or move the virtual clock (/_mocksys/clock)
                  proxy   {to, mode proxyOnce, predicateGenerators [{matches {field true}}]}
                  fault   CONNECTION_RESET_BY_PEER | RANDOM_DATA_THEN_CLOSE
@@ -19,8 +21,8 @@
                request field into a ${token})
 
   `respond` turns one request into an outcome for the server to write. Everything
-  here is pure data except the modules' verbs and the proxy fetch, which the caller
-  passes in."
+  here is pure data except the modules' verbs, the proxy fetch, which the caller
+  passes in, and the channels, whose subscribers are the open streams."
   (:require [clojure.string :as str]
             [promesa.core :as p]
             ["node:path" :as path]
@@ -168,6 +170,8 @@
       (check-response! (str path ".responses[" j "]") r)
       (when-let [es (seq (effect/collection-errors (get r "effect") (get spec "state")))]
         (bad (str path ".responses[" j "].effect") (str/join "; " es)))
+      (when-let [verb (and (not= "http" (get spec "protocol")) (effect/stream-verb (get r "effect")))]
+        (bad (str path ".responses[" j "].effect") (str verb " needs protocol http")))
       (when (and (contains? r "clock") (not (number? (get-in spec ["state" "clock"]))))
         (bad (str path ".responses[" j "]") "a clock response needs the imposter's state.clock")))))
 
@@ -205,6 +209,7 @@
             :dropped      0
             :count        0
             :state        (effect/new-state)
+            :channels     (effect/new-channels)
             :verbs        (verbs-of spec)}))))
 
 ;; --- behaviors -----------------------------------------------------------------
@@ -269,8 +274,8 @@
 (defn- finish
   "The wire form of a response, with Mountebank's defaults: status 200, an empty body,
    an object body as 4-space JSON, `Connection: close`, and any declared
-   Content-Length recomputed."
-  [{:strs [statusCode headers body _mode]}]
+   Content-Length recomputed. A stream answer keeps its `stream`."
+  [{:strs [statusCode headers body _mode stream]}]
   (let [encoding (if (= "binary" _mode) "base64" "utf8")
         body     (cond
                    (or (map? body) (vector? body)) (js/JSON.stringify (clj->js body) nil 4)
@@ -279,12 +284,13 @@
                    :else                           (str body))
         headers  (or headers {})
         cl       (header-key headers "Content-Length")]
-    {:status   (if (js/Boolean statusCode) (js/parseInt statusCode 10) 200)
-     :headers  (cond-> headers
-                 (not (contains? headers (header-key headers "Connection"))) (assoc "Connection" "close")
-                 (contains? headers cl) (assoc cl (.byteLength js/Buffer body encoding)))
-     :body     body
-     :encoding encoding}))
+    (cond-> {:status   (if (js/Boolean statusCode) (js/parseInt statusCode 10) 200)
+             :headers  (cond-> headers
+                         (not (contains? headers (header-key headers "Connection"))) (assoc "Connection" "close")
+                         (contains? headers cl) (assoc cl (.byteLength js/Buffer body encoding)))
+             :body     body
+             :encoding encoding}
+      stream (assoc :stream stream))))
 
 ;; --- serving ---------------------------------------------------------------------
 
@@ -331,7 +337,7 @@
 
 (defn respond
   "One request through the imposter: record it, pick the stub, resolve its next
-   response. Returns a promise of {:status :headers :body :encoding :wait} or
+   response. Returns a promise of {:status :headers :body :encoding :wait :stream} or
    {:fault kind}. `proxy!` (cfg request) -> promise of an `is` map fetches upstream."
   [imp request {:keys [proxy!]}]
   (p/do
@@ -346,8 +352,9 @@
         (out (get config "is"))
 
         (contains? config "effect")
-        (let [{:keys [spec state verbs]} @imp]
-          (out (effect/run (get config "effect") {:state state :request request :settings (get spec "state") :verbs verbs})))
+        (let [{:keys [spec state verbs channels]} @imp]
+          (out (effect/run (get config "effect") {:state state :request request :settings (get spec "state")
+                                                  :verbs verbs :channels channels})))
 
         (contains? config "clock")
         (out (effect/clock (:state @imp) (get-in @imp [:spec "state" "clock"]) request))
@@ -370,6 +377,13 @@
 (defn port [imp] (get-in @imp [:spec "port"]))
 (defn protocol [imp] (get-in @imp [:spec "protocol"]))
 (defn tls [imp] (get-in @imp [:spec "tls"]))
+(defn channels [imp] (:channels @imp))
+
+(defn websockets?
+  "Whether any of the imposter's stubs can answer with a WebSocket."
+  [imp]
+  (boolean (some #(= "websocket" (effect/stream-verb (get % "effect")))
+                 (for [s (:stubs @imp), r (get-in s [:spec "responses"])] r))))
 
 (defn to-json
   "The imposter as the admin API shows it. `:list?` is the summary row; the full

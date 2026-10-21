@@ -57,7 +57,7 @@ scenarios that list `modules`, the only code a scenario can run.
 | `inspect <name>` | Agent-readable summary: calls, matchers, redactions, volatile fields. Shows friendly `/users/{id}` paths. |
 | `doctor <name> [--fix]` | Lint matcher hygiene / frozen volatile values. `--fix` scrubs the contract's response headers and recompiles. Overfit is only flagged on recorded scenarios. |
 | `requests <name> [--clear]` | What the running mock received (`--clear` resets). The mock keeps the newest requests, and the header says how many older ones were dropped. |
-| `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss, saying so when older requests were dropped from the log and the call may have been one of them. A gRPC call is `POST /pkg.Service/Method`, as `requests` shows it. |
+| `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss, saying so when older requests were dropped from the log and the call may have been one of them. A gRPC call is `POST /pkg.Service/Method`, as `requests` shows it. A message a client sends on a WebSocket is `MESSAGE /path`, the upgrade's path. |
 | `ls` | All scenarios + which are live. |
 | `stop <name> \| --all` | Tear down a running scenario (or all). |
 | `daemon stop` | Stop the mocksys daemon. Every mock it serves stops with it. The next command that serves a mock starts a new daemon. |

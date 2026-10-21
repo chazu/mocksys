@@ -90,6 +90,22 @@
   (is (nil? (rejects (spec [{"responses" [{"effect" {"create" {"collection" "users"}}}]}]
                            "state" {"collections" {"users" {}}})))))
 
+(deftest a-stream-answer-is-checked-on-post
+  (is (= "stubs[0].responses[0].effect: sse: unknown field replay (use channel, events, headers, keepAlive, retry)"
+         (rejects (spec [{"responses" [{"effect" {"sse" {"channel" "c" "replay" true}}}]}]))))
+  (is (= "stubs[0].responses[0].effect: websocket needs protocol http"
+         (rejects (spec [{"responses" [{"effect" {"websocket" {"channel" "c"}}}]}] "protocol" "grpc" "descriptor" {}))))
+  (is (nil? (rejects (spec [{"responses" [{"effect" {"sse" {"channel" "c"}}}]}
+                            {"responses" [{"effect" {"publish" {"channel" "c" "data" "x"} "respond" {}}}]}])))))
+
+(deftest a-stream-answer-is-an-outcome
+  (async done
+    (done-after done
+      (p/let [i (imp/create (spec [{"responses" [{"effect" {"sse" {"channel" "c" "events" [{"data" "x"}]}}}]}]))
+              o (imp/respond i (req) {})]
+        (is (= 200 (:status o)))
+        (is (= {"kind" "sse" "channel" "c" "events" [{"data" "x"}] "keepAlive" 15000} (:stream o)))))))
+
 (deftest a-proxy-target-is-a-bare-origin
   (let [proxy-to (fn [to] (rejects (spec [{"responses" [{"proxy" {"to" to "mode" "proxyOnce"}}]}])))]
     (testing "a path, query or fragment would be dropped on the way upstream, so it is refused"

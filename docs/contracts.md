@@ -447,6 +447,97 @@ outside the scenario directory and names the file to copy in.
 gRPC clients take. `clock` reaches a grpc twin's virtual clock: every grpc mock also
 serves the `/_mocksys/clock` control method, with JSON messages.
 
+## Streams: server-sent events and WebSockets
+
+An operation answers with a stream when its effect ends in `sse` or `websocket` (the
+fields are in [effects.md](effects.md#streams-sse-websocket-and-publish)). Because the
+stream is an effect, the verbs before it apply: `bind` names the channel, and a
+`lookup` or `find` miss answers with its own status, such as 401 or 404, instead of
+opening the stream. Other operations push to an open stream with `publish`. Streams need
+`protocol: http`; a `websocket` operation's method is `GET`, and `sse` cannot answer a
+`MESSAGE`.
+
+```yaml
+operations:
+  - id: job-events                            # GET /jobs/j1/events -> text/event-stream
+    request: { method: GET, path: "/jobs/{id}/events" }
+    effect:
+      bind: { id: { pathRegex: "/jobs/([^/]+)/" } }
+      find: { collection: jobs, key: "{id}", as: job }     # 404 for an unknown job
+      sse:
+        retry: 3000
+        events:                               # scripted, sent first, in order
+          - { event: status, id: "0", data: { id: "{id}", state: "{job.state}" } }
+        channel: "job-{id}"                   # then whatever is published here
+  - id: job-progress                          # POST /jobs/j1/progress {"pct":40}
+    request: { method: POST, path: "/jobs/{id}/progress" }
+    effect:
+      bind: { id: { pathRegex: "/jobs/([^/]+)/" }, pct: { body: pct } }
+      publish: { channel: "job-{id}", event: progress, data: { pct: "{pct}" } }
+      respond: { status: 202 }
+```
+
+**SSE.** The stream answers `200 text/event-stream`, then sends `retry:` when set, the
+scripted events, and every event published on its channel. A stream with no `channel`
+ends after its last scripted event; one with a channel stays open until the client
+leaves. A `: keep-alive` comment goes out every 15 seconds (`keepAlive`, in ms; `0`
+turns it off). A client that stops reading is disconnected once 1 MiB is waiting for it,
+so a stalled reader does not hold every publish in memory. A client that reconnects with `Last-Event-ID` resumes the script after
+the event with that id. The id is compared with each scripted `id` as the reconnecting
+request renders it. An id built from a value that differs between the two requests,
+such as a query parameter the client changed, matches nothing, and the whole script is
+sent again. When two scripted events share an id, the stream resumes after the first.
+Channel events are not replayed.
+
+**WebSockets.** A `websocket` answer accepts the upgrade on the operation's path.
+Each message the client sends is then a request through the same contract:
+
+| Request field | Value |
+|---|---|
+| method | `MESSAGE` |
+| path, query, headers | those of the upgrade request |
+| body | the message text |
+
+An operation with `request.method: MESSAGE` handles it. Body conditions route the
+messages, and every message is recorded, so `assert --saw 'MESSAGE /rooms/*/socket'`
+works. The reply becomes outbound messages:
+
+| Reply | Sent to the client |
+|---|---|
+| status below 400, empty body | nothing |
+| status below 400, JSON array body | one message per element (a string as written, anything else as JSON) |
+| status below 400, any other body | the body as one message |
+| status 400 or above | the socket closes with code 4000 + status, the body as the reason |
+
+Messages are handled one at a time, in the order they arrive. An inbound message over
+1 MiB closes the socket with `1009`. A client with 1000 messages already waiting for
+their replies is sending faster than the mock answers: its next message closes the
+socket with `1008` (policy violation), and the waiting messages are dropped unanswered.
+`1008` rather than `4413`, because a `4xxx` code always means an operation's reply.
+
+```yaml
+  - id: room-socket
+    request: { method: GET, path: "/rooms/{room}/socket" }
+    effect:
+      bind: { room: { pathRegex: "/rooms/([^/]+)/" } }
+      websocket:
+        messages: [ { data: { type: welcome, room: "{room}" } } ]
+        channel: "room-{room}"
+  - id: socket-ping
+    request: { method: MESSAGE, path: "/rooms/{room}/socket", body: { "$.type": ping } }
+    effect:
+      respond: { json: { type: pong } }
+```
+
+The upgrade request is itself recorded as a `GET`. An upgrade that reaches any other
+answer gets that answer as plain HTTP, and a plain `GET` that reaches a `websocket`
+answer gets `426 Upgrade Required`. Only `Upgrade: websocket` is taken over; any other
+upgrade, such as curl's `h2c`, stays an ordinary request with its body. A mock with no
+`websocket` answer takes over no upgrade at all. On node before 22.21 (or 24.9 on the
+24 line), a mock with a `websocket` answer cannot tell the upgrades apart, so another
+upgrade reaches the contract without its body. [`examples/chat.yaml`](../examples/chat.yaml) is a
+chat room served both ways.
+
 ## TLS
 
 `tls: true` serves the mock as HTTPS, or a grpc mock as gRPC over TLS, on the same
@@ -513,7 +604,10 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
   param (a required param set to `null` is missing), or a `genes:` entry that is not a
   one-key map; two operations with one `id`, whether authored or from genes; a collection
   that two genes declare; no operations; a request missing
-  `method` or an absolute `path`; an `effect` with no `respond` and no collection verb; a response `status` that
+  `method` or an absolute `path`; an `effect` with no `respond` and no terminal verb
+  (a collection verb, `sse` or `websocket`); a `store` beside a terminal verb, which would
+  skip it; a stream answer in a grpc contract, a `websocket` on a method other than
+  `GET`, or an `sse` on a `MESSAGE`; a response `status` that
   isn't a number; an operation with nothing to serve (no selected example, no
   `bodySchema`, no effect); an operation that fails to compile (for example a JSONPath
   selector that isn't a plain path, or a non-numeric status, `ttl` or `window`); a

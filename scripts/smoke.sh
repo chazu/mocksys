@@ -386,6 +386,44 @@ check "an insecure client cannot connect" UNAVAILABLE "$(node "$G/client.js" "lo
 check "publish commits no file of the CA" 0 "$(git -C "$MOCKSYS_HOME" ls-files | grep -c '^tls/' || true)"
 "$MS" stop demo/https >/dev/null
 
+echo "# streams"
+SP=$((PORT + 6))
+mkdir -p "$MOCKSYS_HOME/demo/chat"
+cp "$ROOT/examples/chat.yaml" "$MOCKSYS_HOME/demo/chat/contract.yaml"
+"$MS" run demo/chat --port $SP >/dev/null
+curl -sN --max-time 1 "localhost:$SP/rooms/lobby/events" > "$WORK/sse1.out" || true
+check "an SSE stream sends its scripted event" 'retry: 3000||event: joined|data: {"room":"lobby"}|' \
+  "$(head -4 "$WORK/sse1.out" | tr '\n' '|')"
+curl -sN "localhost:$SP/rooms/lobby/events" > "$WORK/sse2.out" &
+SSE_PID=$!
+for _ in $(seq 60); do grep -q joined "$WORK/sse2.out" && break; sleep 0.05; done
+curl -s -o /dev/null -X POST "localhost:$SP/rooms/lobby/messages" -d '{"from":"ann","text":"hi"}'
+for _ in $(seq 60); do grep -q '"text":"hi"' "$WORK/sse2.out" && break; sleep 0.05; done
+kill $SSE_PID 2>/dev/null; wait $SSE_PID 2>/dev/null || true
+check "a POST publishes to an open SSE stream" 1 "$(grep -c '^data: {"id":"msg_[0-9a-f]*","room":"lobby","from":"ann","text":"hi"}$' "$WORK/sse2.out")"
+check "a plain GET on a WebSocket operation is told to upgrade" 426 "$(status_of "localhost:$SP/rooms/lobby/socket")"
+out="$(node -e '
+const w = new WebSocket(`ws://localhost:${process.argv[1]}/rooms/lobby/socket`), got = [];
+w.onmessage = (e) => {
+  got.push(e.data);
+  if (got.length === 1) w.send(JSON.stringify({ type: "ping" }));
+  else { console.log(got.join("|")); w.close(); }
+};
+setTimeout(() => { console.log("timed out: " + got.join("|")); process.exit(1); }, 3000).unref();' "$SP")"
+check "a WebSocket says welcome, then answers a ping" '{"type":"welcome","room":"lobby"}|{"type":"pong"}' "$out"
+"$MS" assert demo/chat --saw 'MESSAGE /rooms/lobby/socket' >/dev/null && code=0 || code=$?
+check "assert sees the inbound message" 0 "$code"
+out="$(node -e '
+const port = process.argv[1], w = new WebSocket(`ws://localhost:${port}/rooms/lobby/socket`);
+w.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (m.type === "welcome") fetch(`http://localhost:${port}/rooms/lobby/messages`, { method: "POST", body: JSON.stringify({ from: "bo", text: "hey" }) });
+  else { console.log(m.text); w.close(); }
+};
+setTimeout(() => { console.log("timed out"); process.exit(1); }, 3000).unref();' "$SP")"
+check "a POST publishes to an open WebSocket" hey "$out"
+"$MS" stop demo/chat >/dev/null
+
 echo "# daemon stop"
 "$MS" daemon stop >/dev/null
 check "daemon stop frees the admin port" 000 "$(status_of "$ADMIN/")"

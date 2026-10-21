@@ -40,6 +40,10 @@ share — not a one-off blob:
 - **gRPC as well as HTTP.** A contract with `protocol: grpc` and a `.proto` serves its
   RPCs, unary and streaming, statefully, through the same effects, matching and `assert`,
   and serves reflection so `grpcurl` needs no proto.
+- **Server-sent events and WebSockets.** An operation can answer with an SSE stream
+  or accept a WebSocket. Each message a client sends on the socket is a request
+  through the same contract, and one `publish` verb pushes an event from any request
+  to every open stream and socket on a channel ([`examples/chat.yaml`](examples/chat.yaml)).
 - **HTTPS and gRPC over TLS.** `tls: true` serves a mock with a certificate for
   localhost from a local CA, so a client that insists on TLS keeps verifying:
   `export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"`.
@@ -320,8 +324,8 @@ This README is the quick start. The full reference manual lives in [`docs/`](doc
 
 - [docs/walkthrough.md](docs/walkthrough.md) — **start here:** a friendly end-to-end tour that builds an Okta twin and explains every part.
 - [docs/architecture.md](docs/architecture.md) — modules, the contract→imposter→daemon pipeline, the store, the runtime.
-- [docs/contracts.md](docs/contracts.md) — the `contract.yaml` format: matching, responses, examples, templating, faults, validation.
-- [docs/effects.md](docs/effects.md) — the stateful `effect` language: state buckets and resource collections, every verb, the SCIM filter grammar, pagination.
+- [docs/contracts.md](docs/contracts.md) — the `contract.yaml` format: matching, responses, examples, templating, streams, faults, validation.
+- [docs/effects.md](docs/effects.md) — the stateful `effect` language: state buckets and resource collections, every verb, the SCIM filter grammar, pagination, streams and `publish`.
 - [docs/twins.md](docs/twins.md) — building digital twins: kits, genes, the `okta` anatomy, and the `conform` fidelity loop.
 - [docs/cli.md](docs/cli.md) — the complete command reference.
 

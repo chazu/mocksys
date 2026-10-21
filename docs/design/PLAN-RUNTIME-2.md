@@ -185,6 +185,65 @@ Built on E.
 - Publishing is one effect verb that SSE and WebSockets share.
 - Both must run in the bun binary.
 
+**As built.** Streams are effect answers, not a new imposter response type, so a
+stream gets `bind`, `limit`, `lookup` and `find` in front of it (a 404 for an unknown
+job, a 401 for a bad token) and names its channel with the same `{var}` interpolation
+as everything else.
+- **Answers.** `sse` and `websocket` are terminal verbs beside the collection verbs:
+  an effect ends in exactly one terminal, or in `store` then `respond`.
+  `sse: {events, channel, retry, keepAlive, headers}` needs `events`, a `channel` or
+  both. `websocket: {messages, channel}` accepts the upgrade. An event is
+  `{data | dataVar, event, id, delay}`; a message is `{data | dataVar, delay}`. A
+  string `data` is sent as written after interpolation, any other value as JSON, and
+  `dataVar` sends a variable. `delay` is whole milliseconds of wall time after the
+  previous event, at most 2147483647 (a longer timer fires at once). Both need
+  `protocol: http`; `lower` and the daemon refuse them in a grpc imposter. `lower` also
+  refuses `websocket` on a method other than GET, `sse` on a MESSAGE, and `store`
+  beside any terminal verb, which would skip it.
+- **SSE on the wire.** `200 text/event-stream`, then `retry:` when set, then the
+  scripted events, then whatever the channel carries. A stream without a channel ends
+  after its last event; one with a channel stays open until the client leaves. A
+  `: keep-alive` comment goes out every `keepAlive` ms (default 15000, 0 turns it off).
+  When a write finds more than 1 MiB unsent (`writableLength`), the client is not
+  reading: the response is destroyed, which unsubscribes it.
+  `Last-Event-ID` resumes the script after the first event whose id, as the
+  reconnecting request renders it, equals the header; an id that renders differently
+  on reconnect replays the whole script. Channel events are live only, never replayed.
+- **WebSockets.** Only an imposter with a `websocket` answer listens for `upgrade`,
+  and only for `Upgrade: websocket` (`shouldUpgradeCallback`), so an h2c upgrade keeps
+  its body. Node before 22.21 and 24.9 ignores `shouldUpgradeCallback`; there an
+  imposter with a `websocket` answer gets every upgrade, and a non-WebSocket one
+  arrives without its body. The upgrade request
+  goes through the imposter as `GET <path>`; an answer other than `websocket` is
+  written back as a plain HTTP response, so a gate refuses the upgrade with its own
+  status. A plain GET that reaches a `websocket` answer gets 426. Each inbound message
+  goes through the imposter, in order, as `MESSAGE <path>` with the upgrade's query
+  and headers and the message text as the body, so `request: {method: MESSAGE}`
+  operations, body predicates, effects, state and `assert --saw 'MESSAGE /path'`
+  apply. A 1xx–3xx reply sends a JSON array body as one message per element, any
+  other non-empty body as one message, an empty body as none. A 4xx/5xx reply closes
+  the socket with code 4000 + status and the body as the reason. An inbound message
+  over 1 MiB closes with 1009 (`maxPayload`). A 1001st message waiting behind
+  unfinished replies closes with 1008 and drops the queue; not 4413, which would read
+  as an operation's 413. `ws` serves the
+  upgrade; it runs under node, bun and the bun binary.
+- **`publish`.** `publish: {channel, data | dataVar, event, id}`, or a list, runs
+  after the terminal and only when the effect's answer is below 400, so a miss or a
+  rejected write publishes nothing; it sees the variables the terminal set (`as`).
+  An SSE subscriber gets the whole event; a WebSocket subscriber gets the data.
+- **Channels.** Per imposter, a null-prototype map from name to subscribers that the
+  imposter holds next to its `state`; reposting starts empty. A stream subscribes in
+  the same event-loop turn that sends its headers or its 101, so a client that has
+  them misses nothing published after. A closed SSE response or socket unsubscribes and clears
+  its timers, and an empty channel is removed. Deleting the imposter cuts its sockets,
+  which runs the same cleanup.
+- **Recorded.** The SSE GET (with its `Last-Event-ID`), the upgrade GET, every inbound
+  message as `MESSAGE`, and every publishing request. Outbound events are not.
+- **Clock and limits.** A connect is one request against its operation's `limit`, as
+  is each inbound message against its own. Delays and keep-alives are wall time; the
+  virtual clock neither drives nor is moved by a stream. `{now}` in a scripted event
+  reads the clock at connect, in a publish at the publishing request.
+
 ## Verification for every work item
 
 `npm test`, `npm run build` with 0 warnings, and `scripts/smoke.sh` on node. A change

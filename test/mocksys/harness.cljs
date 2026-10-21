@@ -10,7 +10,7 @@
 (defn settings-of
   "The imposter `state` settings that `opts` describe: :seed, :collections,
    :clock-start, :issuer and :random-seed, all optional. :verbs is the JS object of
-   custom verbs a `call` reaches."
+   custom verbs a `call` reaches, and :channels the channel map a `publish` reaches."
   [{:keys [seed collections clock-start issuer random-seed]}]
   (cond-> {}
     seed        (assoc "seed" seed)
@@ -41,7 +41,8 @@
   (let [settings (settings-of opts)]
     (is (= [] (effect/errors (get op "effect")) (effect/collection-errors (get op "effect") settings))
         (str (get op "id") ": the effect validates"))
-    (effect/run (get op "effect") {:state state :request request :settings settings :verbs (:verbs opts)})))
+    (effect/run (get op "effect") {:state state :request request :settings settings :verbs (:verbs opts)
+                                   :channels (:channels opts)})))
 
 (defn clock!
   "Send `body` (a map) to the twin's clock control over `state`, whose clock starts
@@ -63,7 +64,7 @@
          ct      (get headers "Content-Type" "")
          json    (when (and (string? body) (seq body) (str/includes? ct "json"))
                    (try (js->clj (js/JSON.parse body)) (catch :default _ nil)))]
-     {:status (get r "statusCode") :headers headers :body body :json json})))
+     {:status (get r "statusCode") :headers headers :body body :json json :stream (get r "stream")})))
 
 (defn contract-opts
   "The run opts for an effective contract: each collection's seed name resolved to
