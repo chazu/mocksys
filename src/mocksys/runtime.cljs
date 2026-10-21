@@ -28,21 +28,22 @@
        (.on node-req "end" #(resolve (.toString (js/Buffer.concat chunks) "utf8")))
        (.on node-req "error" reject)))))
 
+(defn- multi-map
+  "[k v] pairs as a map; a repeated key collects its values in a vector."
+  [pairs]
+  (reduce (fn [m [k v]]
+            (let [cur (get m k)]
+              (assoc m k (cond (nil? cur) v (vector? cur) (conj cur v) :else [cur v]))))
+          {}
+          pairs))
+
 (defn- headers-of
   "Headers keyed as the client sent them; a repeated header becomes a vector."
   [raw]
-  (reduce (fn [m [k v]]
-            (let [cur (get m k)]
-              (assoc m k (cond (nil? cur) v (vector? cur) (conj cur v) :else [cur v]))))
-          {}
-          (partition 2 (array-seq raw))))
+  (multi-map (partition 2 (array-seq raw))))
 
 (defn- query-of [^js url]
-  (reduce (fn [m [k v]]
-            (let [cur (get m k)]
-              (assoc m k (cond (nil? cur) v (vector? cur) (conj cur v) :else [cur v]))))
-          {}
-          (map vec (array-seq (js/Array.from (.entries (.-searchParams url)))))))
+  (multi-map (array-seq (js/Array.from (.entries (.-searchParams url))))))
 
 (defn- request-of [^js node-req body]
   (let [url (js/URL. (.-url node-req) "http://localhost")]
