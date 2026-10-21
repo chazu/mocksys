@@ -114,3 +114,16 @@
       (if-not (fs/existsSync file)
         [file]
         (vec (remove #(str/starts-with? % dir) (:files (read-proto file))))))))
+
+(defn files-inside
+  "The local files a grpc contract's proto reads that are under `dir`: the proto and
+   its imports there. When the proto does not load, the proto alone if it exists.
+   Empty for an http contract."
+  [contract dir]
+  (if-not (grpc? contract)
+    []
+    (let [file  (contract-file contract dir)
+          dir   (str (path/resolve dir) path/sep)
+          files (try (:files (read-proto file))
+                     (catch :default _ (when (fs/existsSync file) [file])))]
+      (vec (filter #(str/starts-with? % dir) files)))))

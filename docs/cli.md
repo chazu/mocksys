@@ -42,7 +42,7 @@ stateful scenarios.
 
 | Command | Notes |
 |---|---|
-| `run <name> [--port N] [--env VAR] [--watch]` | Host the mock; prints the port + export lines. `--watch` recompiles+reloads on `contract.yaml` edits. An explicit `--port` is pinned onto the contract. A grpc mock's address is `localhost:PORT`, with no scheme, in `run`, `env` and `up`. |
+| `run <name> [--port N] [--env VAR] [--watch]` | Host the mock; prints the port + export lines. `--watch` recompiles+reloads on edits to `contract.yaml` and, for a grpc contract, its proto and the imports inside the scenario directory. An explicit `--port` is pinned onto the contract. A grpc mock's address is `localhost:PORT`, with no scheme, in `run`, `env` and `up`. |
 | `env <name> [--json \| --tilt] [--port N] [--env VAR]` | Wire a consumer to the mock. Default: eval-safe `export` lines (`eval "$(mocksys env NAME)"`). `--json`: `{scenario, port, url, <vars>}`. `--tilt`: a Tiltfile `local_resource` (pins a port; doesn't start). |
 | `inspect <name>` | Agent-readable summary: calls, matchers, redactions, volatile fields. Shows friendly `/users/{id}` paths. |
 | `doctor <name> [--fix]` | Lint matcher hygiene / frozen volatile values. `--fix` scrubs the contract's response headers and recompiles. Overfit is only flagged on recorded scenarios. |

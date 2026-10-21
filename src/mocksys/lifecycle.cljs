@@ -4,6 +4,9 @@
   legacy/recorded imposter into a contract on demand; `ensure-running!` posts it
   to the mocksys daemon."
   (:require [promesa.core :as p]
+            [clojure.string :as str]
+            ["node:fs" :as fs]
+            ["node:path" :as path]
             [mocksys.mb :as mb]
             [mocksys.store :as store]
             [mocksys.service :as service]
@@ -100,24 +103,49 @@
             (store/write-contract! scenario (assoc contract "port" port)))
           port)))))
 
-(defn watch-scenario!
-  "Recompile + reload `scenario` whenever its contract.yaml changes (debounced).
-   Keeps the process alive — the Tilt-style save-and-reload dev loop."
+(defn- watched-files
+  "What a scenario's mock is built from: contract.yaml and, for a grpc contract, the
+   proto and its imports inside the scenario directory."
   [scenario]
-  (let [timer (atom nil)]
-    (println (str "  ⊙ watching contract.yaml — edits recompile + reload (Ctrl-C to stop)"))
-    (store/watch-contract!
-     scenario
-     (fn []
-       (when @timer (js/clearTimeout @timer))
-       (reset! timer
-               (js/setTimeout
-                (fn []
-                  (-> (ensure-running! scenario nil)
-                      (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ " (address scenario port)))))
-                      (p/catch (fn [e] (binding [*print-fn* *print-err-fn*]
-                                         (println (str "  ✗ reload failed: " (.-message e))))))))
-                150))))))
+  (let [dir      (store/scenario-dir scenario)
+        contract (try (store/read-contract scenario) (catch :default _ nil))]
+    (into [(path/join dir "contract.yaml")] (proto/files-inside contract dir))))
+
+(defn watch-scenario!
+  "Recompile + reload `scenario` whenever a file it is built from changes
+   (debounced). The files are listed again after each reload, so an import added to
+   the proto is watched from then on, and a file an editor replaced on save is
+   watched again. Keeps the process alive (the Tilt-style save-and-reload dev
+   loop). Returns an object whose .close stops watching."
+  [scenario]
+  (let [timer    (atom nil)
+        watchers (atom {})]
+    (letfn [(drop! [f]
+              (some-> ^js (get @watchers f) .close)
+              (swap! watchers dissoc f))
+            (rearm! []
+              (let [want (set (filter #(fs/existsSync %) (watched-files scenario)))]
+                (run! drop! (remove want (keys @watchers)))
+                (doseq [f want :when (not (contains? @watchers f))]
+                  (let [^js w (fs/watch f (fn [event _] (changed f event)))]
+                    (.on w "error" (fn [_] (drop! f)))
+                    (swap! watchers assoc f w)))))
+            (reload! []
+              (-> (ensure-running! scenario nil)
+                  (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ " (address scenario port)))))
+                  (p/catch (fn [e] (binding [*print-fn* *print-err-fn*]
+                                     (println (str "  ✗ reload failed: " (.-message e))))))
+                  (p/finally (fn [] (rearm!)))))
+            (changed [f event]
+              (when (= "rename" event) (drop! f))
+              (when @timer (js/clearTimeout @timer))
+              (reset! timer (js/setTimeout reload! 150)))]
+      (rearm!)
+      (println (str "  ⊙ watching " (str/join ", " (sort (map #(path/basename %) (keys @watchers))))
+                    " — edits recompile + reload (Ctrl-C to stop)"))
+      #js {:close (fn []
+                    (when @timer (js/clearTimeout @timer))
+                    (run! drop! (keys @watchers)))})))
 
 (defn scenario-port-pin!
   "The scenario's pinned port, allocating+persisting a free one if it has none.

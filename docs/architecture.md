@@ -96,7 +96,8 @@ a contract lifted from its static responses; any `inject` in it is dropped.
 (so `requests`/`assert`/`conform` have data). Port resolution order: explicit `--port` >
 the already-running port > a port **pinned** on the contract > a fresh free port. An
 explicit `--port` is persisted onto the contract as a pin. `run --watch` recompiles and
-reloads on every `contract.yaml` change (the Tilt-style save-and-reload loop).
+reloads on every change to `contract.yaml` and, for a grpc contract, to its proto and the
+imports inside the scenario directory (the Tilt-style save-and-reload loop).
 
 **The daemon.** `mb/ensure-up!` checks `GET /` on the admin port, which answers with
 the daemon's name, mocksys version and pid. If nothing answers, it spawns a detached
