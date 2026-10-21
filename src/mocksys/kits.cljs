@@ -664,20 +664,28 @@
    (update-vals builtin-yaml #(parse-kit % "built-in" nil))))
 
 (defn with-user-kits
-  "The built-in kits plus the user kits in `files` ([[path text] ...]), as
-   {:kits name->kit :warnings [...]}. A user kit named like a built-in replaces it,
-   with a warning; an unreadable one is skipped, with a warning."
+  "The built-in kits plus the user kits in `files` ([[path text] ...], or [path nil
+   reason] for a file that could not be read), as {:kits name->kit :warnings [...]}.
+   A user kit named like a built-in replaces it; of two user kits with one name,
+   the later file wins. Both warn. A file that cannot be read or parsed is skipped,
+   with a warning."
   [files]
-  (reduce (fn [acc [file text]]
-            (try
-              (let [kit (parse-kit text file (str/replace file #"^.*/|\.yaml$" ""))
-                    n   (:name kit)]
-                (cond-> (assoc-in acc [:kits n] kit)
-                  (contains? builtin-kits n)
-                  (update :warnings conj (str "user kit '" n "' (" file ") shadows the built-in kit"))))
-              (catch :default e
-                (update acc :warnings conj (str "skipped kit " file ": "
-                                                (first (str/split-lines (.-message e))))))))
+  (reduce (fn [acc [file text unreadable]]
+            (let [skip #(update acc :warnings conj (str "skipped kit " file ": " %))]
+              (if unreadable
+                (skip unreadable)
+                (try
+                  (let [kit   (parse-kit text file (str/replace file #"^.*/|\.ya?ml$" ""))
+                        n     (:name kit)
+                        prior (get-in acc [:kits n :source])]
+                    (cond-> (assoc-in acc [:kits n] kit)
+                      (contains? builtin-kits n)
+                      (update :warnings conj (str "user kit '" n "' (" file ") shadows the built-in kit"))
+                      (and prior (not= prior "built-in"))
+                      (update :warnings conj (str "user kit '" n "' is declared by " prior " and " file
+                                                  "; using " file))))
+                  (catch :default e
+                    (skip (first (str/split-lines (.-message e)))))))))
           {:kits builtin-kits :warnings []}
           files))
 

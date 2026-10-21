@@ -68,9 +68,11 @@ contract:                  # any contract; usually a list of genes
   `summary` in the template, the kit's `doc` is used. `contract.yaml` keeps the template's
   `genes:` form.
 
-Put your kits in `$MOCKSYS_HOME/kits/*.yaml`. A kit without `name` is named after its
-file. A user kit with a built-in's name replaces the built-in, and `kit` and `kits` print a
-warning saying so. A kit file that does not parse is skipped with a warning.
+Put your kits in `$MOCKSYS_HOME/kits/`, as `*.yaml` or `*.yml` files. A kit without
+`name` is named after its file. A user kit with a built-in's name replaces the built-in,
+and `kit` and `kits` print a warning saying so. When two user files declare one name, the
+file that sorts last wins, and the warning names both files. A kit file that cannot be
+read or parsed is skipped with a warning.
 [`examples/kits/directory.yaml`](../examples/kits/directory.yaml) is a complete user kit.
 
 The built-in `oauth2` kit is a YAML file (`src/mocksys/kits/oauth2.yaml`), inlined into the

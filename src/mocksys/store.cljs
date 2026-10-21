@@ -181,14 +181,23 @@
 
 (def kits-dir (path/join root "kits"))
 
+(defn- read-kit-file
+  "[file text], or [file nil reason] when `file` is not a readable regular file."
+  [file]
+  (try
+    (if (.isFile (fs/statSync file))
+      [file (fs/readFileSync file "utf8")]
+      [file nil "not a file"])
+    (catch :default e [file nil (.-message e)])))
+
 (defn kit-files
-  "[[path text] ...] for every *.yaml file in `dir`, sorted by name. Empty when
-   `dir` does not exist."
+  "[[path text] ...] for every *.yaml and *.yml entry in `dir`, sorted by name; an
+   entry that cannot be read is [path nil reason]. Empty when `dir` does not exist."
   [dir]
   (if-not (fs/existsSync dir)
     []
     (->> (fs/readdirSync dir)
          (map str)
-         (filter #(str/ends-with? % ".yaml"))
+         (filter #(re-find #"\.ya?ml$" %))
          sort
-         (mapv (fn [f] (let [file (path/join dir f)] [file (fs/readFileSync file "utf8")]))))))
+         (mapv #(read-kit-file (path/join dir %))))))
