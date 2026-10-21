@@ -361,10 +361,11 @@
 (defn to-json
   "The imposter as the admin API shows it. `:list?` is the summary row;
    `:replayable?` drops requests and proxy timings; `:remove-proxies?` drops proxy
-   responses and any stub left with none."
+   responses and any stub left with none. Every form but the summary keeps `modules`
+   and `calls`, so a replayable imposter posts back as it was."
   [imp {:keys [list? replayable? remove-proxies?]}]
   (let [{:keys [spec stubs requests] n :count} @imp
-        header (cond-> (select-keys spec ["protocol" "port" "name"])
+        header (cond-> (select-keys spec ["protocol" "port" "name" "modules" "calls"])
                  (not replayable?) (assoc "numberOfRequests" n))
         strip  (fn [r] (cond-> r (contains? r "is") (update "is" dissoc "_proxyResponseTime")))
         proxy? (fn [r] (contains? r "proxy"))
@@ -373,7 +374,7 @@
                  remove-proxies? (mapv #(update % "responses" (partial filterv (complement proxy?))))
                  remove-proxies? (filterv #(seq (get % "responses"))))]
     (cond
-      list?       header
+      list?       (dissoc header "modules" "calls")
       replayable? (assoc header "recordRequests" (boolean (get spec "recordRequests")) "stubs" stubs)
       :else       (assoc header "recordRequests" (boolean (get spec "recordRequests"))
                          "requests" requests "stubs" stubs))))
