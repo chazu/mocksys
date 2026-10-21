@@ -8,7 +8,7 @@
             [mocksys.bundle :as bundle]
             [mocksys.git :as git]
             [mocksys.lifecycle :as lifecycle]
-            [mocksys.cli.util :refer [die]]))
+            [mocksys.cli.util :refer [die modules-notice]]))
 
 (defn cmd-pack [{:keys [pos opts]}]
   (let [scenario (first pos)]
@@ -30,8 +30,7 @@
       (doseq [n names]
         (println (str "  run it with:  mocksys run " n))
         (when-let [ms (seq (get (try (store/read-contract n) (catch :default _ nil)) "modules"))]
-          (println (str "  ! " n " runs JavaScript from its modules (" (str/join ", " ms)
-                        ") in the mocksys daemon when you `run` it; read them first")))))))
+          (println (modules-notice n ms)))))))
 
 (defn cmd-home [_]
   (let [{:keys [root repo? branch remote dirty?]} (git/info)]

@@ -17,6 +17,12 @@
         (recur (rest args) (conj pos a) opts))
       {:pos pos :opts opts})))
 
+(defn modules-notice
+  "The line `kit` and `unpack` print for a scenario that will run module code."
+  [scenario modules]
+  (str "  ! " scenario " runs JavaScript from its modules (" (str/join ", " modules)
+       ") in the mocksys daemon when you `run` it; read them first"))
+
 (defn die [msg]
   (binding [*print-fn* *print-err-fn*] (println "error:" msg))
   (js/process.exit 1))

@@ -767,11 +767,11 @@
               [k value])))))
 
 (defn unsupported-flags
-  "The options in `opts` that `kit` does not declare, in sorted order. `scenario`
-   and `port` belong to the `kit` command itself."
+  "The options in `opts` that `kit` does not declare, in sorted order. `scenario`,
+   `port` and `force` belong to the `kit` command itself."
   [kit opts]
   (->> (keys opts)
        (remove #(contains? (:flags kit) %))
-       (remove #{:scenario :port})
+       (remove #{:scenario :port :force})
        sort
        vec))

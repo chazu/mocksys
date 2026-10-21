@@ -66,8 +66,8 @@ contract:
 (deftest a-kit-rejects-flags-it-does-not-declare
   (testing "an undeclared flag is reported"
     (is (= [:bogus] (kits/unsupported-flags t {:bogus "1" :ttl "5"}))))
-  (testing "scenario and port belong to `kit` itself"
-    (is (empty? (kits/unsupported-flags t {:scenario "x/y" :port "9000"}))))
+  (testing "scenario, port and force belong to `kit` itself"
+    (is (empty? (kits/unsupported-flags t {:scenario "x/y" :port "9000" :force true}))))
   (testing "a code kit rejects them too"
     (is (= [:bogus] (kits/unsupported-flags (get kits/builtin-kits "okta") {:bogus true :token-ttl "60"})))))
 

@@ -12,7 +12,8 @@
             [mocksys.conform :as conform]
             [mocksys.kits :as kits]
             [mocksys.lifecycle :as lifecycle]
-            [mocksys.cli.util :refer [die running-imposter]]))
+            [mocksys.modules :as modules]
+            [mocksys.cli.util :refer [die running-imposter modules-notice]]))
 
 (defn cmd-conform
   "Replay a request corpus at the twin and diff it against reality — the fidelity
@@ -170,13 +171,29 @@
                        (default-scenario-for kind (or (:provider flags) (get-in kit [:flags :provider :default]))))
           built    (cond-> ((:build kit) scenario flags)
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))
-          _        (when-let [errs (seq (:errors (contract/validate built)))]
+          kit-dir  (:dir kit)
+          sdir     (store/scenario-dir scenario)
+          plan     (try (when kit-dir
+                          (modules/copy-plan kit-dir sdir
+                                             (modules/scenario-paths kit-dir (get built "modules") "kit directory")))
+                        (catch :default e (die (str "kit " kind ": " (.-message e) "; nothing was written"))))
+          _        (when-let [errs (seq (:errors (contract/validate built kit-dir)))]
                      (die (str "kit " kind " generated an invalid contract; nothing was written\n  "
                                (str/join "\n  " errs))))
+          changed  (for [[p state] plan :when (= state :changed)] p)
+          _        (when (and (seq changed) (not (:force opts)))
+                     (die (str (str/join ", " changed) " in " sdir (if (next changed) " differ" " differs")
+                               " from the kit's copy; nothing was written. "
+                               "Rerun with --force to replace it, or pick another --scenario")))
           expanded (contract/expand built)]
       (store/write-contract! scenario built)
+      (modules/copy! kit-dir sdir plan)
       (lifecycle/compile! scenario)
       (println (str "✦ generated '" scenario "' from kit '" kind "'"))
+      (doseq [p changed]
+        (println (str "  replaced " p ", which differed from the kit's copy")))
+      (when-let [ms (seq (get built "modules"))]
+        (println (modules-notice scenario ms)))
       (when (inject/contract-stateful? expanded)
         (println "  (stateful: served by the mocksys daemon, started automatically by `run`)"))
       (doseq [op (get expanded "operations")]
@@ -191,9 +208,12 @@
    flags, their types and their defaults:  kits"
   [_]
   (let [registry (load-kits)]
-    (println (str "# kits (mocksys kit <name> [--flag VALUE ...]); yours go in " store/kits-dir "/*.yaml"))
-    (doseq [[kname {:keys [doc source flags]}] (sort registry)]
-      (println (str "  · " kname "  " doc "  [" source "]"))
+    (println (str "# kits (mocksys kit <name> [--flag VALUE ...]); yours go in " store/kits-dir
+                  "/*.yaml, or <name>/kit.yaml beside the modules it ships"))
+    (doseq [[kname {:keys [doc source flags modules]}] (sort registry)]
+      (println (str "  · " kname "  " doc "  [" source "]"
+                    (when modules
+                      (str "  ships modules: " (if (sequential? modules) (str/join ", " modules) modules)))))
       (println (str "      " (if (empty? flags)
                                  "(no flags)"
                                  (str/join "  " (for [[f {:keys [default type]}] (sort flags)]
