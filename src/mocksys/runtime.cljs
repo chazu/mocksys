@@ -259,7 +259,7 @@
   (contains? #{"127.0.0.1" "localhost"} (str/replace (or host "") #":\d+$" "")))
 
 (defn- admin-handler
-  "The admin API takes code (injections) and runs it, so only local, non-browser
+  "The admin API loads code (an imposter's modules) and runs it, so only local, non-browser
    callers may use it: a request carrying an Origin, or addressed to any host other
    than the loopback name, is refused. That stops a web page from posting an
    imposter directly or through DNS rebinding."

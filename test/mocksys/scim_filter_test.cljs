@@ -1,5 +1,5 @@
 (ns mocksys.scim-filter-test
-  "The `list` verb's SCIM filter, run through the generated injection: quoted
+  "The `list` verb's SCIM filter, run the way the daemon runs it: quoted
    values may contain keywords, the comparison ops Okta clients use for incremental
    sync work, and a malformed filter is a 400 instead of an empty page."
   (:require [clojure.test :refer [deftest testing is]]

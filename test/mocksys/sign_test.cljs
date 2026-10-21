@@ -6,7 +6,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
             [mocksys.harness :as h]
-            [mocksys.inject :as inject]
+            [mocksys.effect :as effect]
             ["crypto" :as crypto]))
 
 (def ^:private kp (.generateKeyPairSync crypto "rsa" #js {:modulusLength 2048}))
@@ -51,7 +51,7 @@
 
 (deftest sign-forces-the-clock
   (testing "an op that signs is treated as clock-using (else iat/exp date to 1970)"
-    (is (true? (inject/contract-uses-clock? {"operations" [sign-op]})))))
+    (is (true? (effect/contract-uses-clock? {"operations" [sign-op]})))))
 
 (deftest sign-produces-a-verifiable-rs256-jwt
   (let [r   (h/run sign-op

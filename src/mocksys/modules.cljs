@@ -3,7 +3,7 @@
   `module.exports = { verbs: { name(ctx) { ... } } }` and an effect runs a verb with
   `call`. The CLI only resolves the paths and never runs a module. The daemon loads
   the files on each post, checks the verbs the imposter calls, and hands them to the
-  generated injections."
+  effect interpreter."
   (:require [clojure.string :as str]
             ["node:fs" :as fs]
             ["node:path" :as path]

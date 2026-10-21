@@ -265,7 +265,7 @@
 ;; {{request.query.X}} / {{request.headers.X}} / {{request.body.X}} / {{request.path}}
 ;; / {{request.method}}. Each becomes a `copy` behavior that splices the
 ;; live request value into the response at serve time — dynamic responses with no
-;; injection (e.g. echo `state` back on a redirect Location).
+;; effect (e.g. echo `state` back on a redirect Location).
 
 (def ^:private template-re
   #"\{\{\s*request\.(query|headers|body|path|method)(?:\.([^}\s]+))?\s*\}\}")

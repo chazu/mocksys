@@ -1,6 +1,6 @@
 (ns mocksys.verbs-test
   "Custom verbs: a contract lists CommonJS `modules` that export `verbs`, and an effect
-   runs one with `call`. Covers the generated injection (through the harness), what
+   runs one with `call`. Covers the effect interpreter (through the harness), what
    `lower` and `validate` accept, and the daemon loading modules on each post."
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
@@ -16,7 +16,7 @@
             [mocksys.cli.author :as author]
             [mocksys.runtime :as runtime]))
 
-;; --- the generated injection ---------------------------------------------------
+;; --- the interpreter -----------------------------------------------------------
 
 (defn- verbs [m] (clj->js m))
 

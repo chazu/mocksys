@@ -12,7 +12,6 @@
                  is      {statusCode headers body _mode}
                  effect  an operation's effect map, run over the imposter's state
                  clock   true: read or move the virtual clock (/_mocksys/clock)
-                 inject  \"function (request, state, logger) {...}\" over a per-imposter state
                  proxy   {to, mode proxyOnce, predicateGenerators [{matches {field true}}]}
                  fault   CONNECTION_RESET_BY_PEER | RANDOM_DATA_THEN_CLOSE
                plus optional behaviors: wait (ms) and copy (regex or jsonpath from a
@@ -55,16 +54,8 @@
       (doseq [re (leaves (get pred "matches"))]
         (try (js/RegExp. re) (catch :default _ (bad path (str "invalid regex " (pr-str re)))))))))
 
-(def ^:private response-types #{"is" "effect" "clock" "inject" "proxy" "fault"})
+(def ^:private response-types #{"is" "effect" "clock" "proxy" "fault"})
 (def ^:private faults #{"CONNECTION_RESET_BY_PEER" "RANDOM_DATA_THEN_CLOSE"})
-
-(defn compile-injection
-  "The function an injection source evaluates to. It runs in this process with
-   `require` in scope, the way Mountebank evaluated it, and `verbs`, the custom verbs
-   of the imposter's modules."
-  ([src] (compile-injection src nil))
-  ([src verbs]
-   ((js/Function. "require" "verbs" (str "return (" src "\n);")) js/require verbs)))
 
 (defn proxy-target-error
   "Why `to` cannot be a proxy target, or nil; `field` names it in the message. The
@@ -114,19 +105,15 @@
 
 (defn- check-response! [path r]
   (when-not (map? r) (bad path "a response must be an object"))
+  (only-keys! path r (conj response-types "behaviors"))
   (let [types (filter response-types (keys r))]
     (when-not (= 1 (count types))
       (bad path (str "a response needs exactly one of " (str/join ", " (sort response-types)))))
-    (only-keys! path r (conj response-types "behaviors"))
     (let [v (get r (first types))]
       (case (first types)
         "is"     (check-is! path v)
         "effect" (when-let [es (seq (effect/errors v))] (bad (str path ".effect") (str/join "; " es)))
         "clock"  (when-not (true? v) (bad path "clock must be true"))
-        "inject" (do (when-not (string? v) (bad path "inject must be a function source"))
-                     (let [f (try (compile-injection v)
-                                  (catch :default e (bad path (str "injection does not compile: " (ex-message e)))))]
-                       (when-not (fn? f) (bad path "inject must be a function"))))
         "proxy"  (do (when-not (map? v) (bad path "proxy must be an object"))
                      (only-keys! path v #{"to" "mode" "predicateGenerators"})
                      (when-let [e (proxy-target-error "proxy.to" (get v "to"))] (bad path e))
@@ -175,10 +162,6 @@
 
 ;; --- construction ------------------------------------------------------------
 
-(defn- injections-of [stubs verbs]
-  (into {} (for [s stubs, r (get s "responses") :let [src (get r "inject")] :when src]
-             [src (compile-injection src verbs)])))
-
 (defn- calls-in
   "The custom verbs the spec's effects call, in stub order."
   [spec]
@@ -199,28 +182,13 @@
   [spec]
   (validate! spec)
   (let [stubs (vec (get spec "stubs"))]
-    (atom {:spec       (dissoc spec "stubs")
-           :stubs      (vec (map-indexed (fn [i s] {:id i :spec s :cursor 0}) stubs))
-           :next-id    (count stubs)
-           :requests   []
-           :count      0
-           :state      #js {}
-           :verbs      (verbs-of spec)
-           :injections (injections-of stubs nil)})))
-
-;; --- injection ---------------------------------------------------------------
-
-(def ^:private logger
-  (let [noop (fn [& _])] #js {:debug noop :info noop :warn noop :error noop}))
-
-(defn run-injection
-  "Call an injected function the way Mountebank's legacy signature does,
-   `f(request, state, logger)`, and return its response as a map."
-  [f request state]
-  (let [r (.call f nil (clj->js request) state logger)]
-    (when-not (and r (= "object" (goog/typeOf r)))
-      (throw (js/Error. "injection returned no response object")))
-    (js->clj r)))
+    (atom {:spec     (dissoc spec "stubs")
+           :stubs    (vec (map-indexed (fn [i s] {:id i :spec s :cursor 0}) stubs))
+           :next-id  (count stubs)
+           :requests []
+           :count    0
+           :state    #js {}
+           :verbs    (verbs-of spec)})))
 
 ;; --- behaviors -----------------------------------------------------------------
 
@@ -362,9 +330,6 @@
 
         (contains? config "clock")
         (out (effect/clock (:state @imp) (get-in @imp [:spec "state" "clock"]) request))
-
-        (contains? config "inject")
-        (out (run-injection (get-in @imp [:injections (get config "inject")]) request (:state @imp)))
 
         (contains? config "proxy")
         (let [cfg   (get config "proxy")
