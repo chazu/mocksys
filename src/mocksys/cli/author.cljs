@@ -150,7 +150,7 @@
        [--when-query 'k=v,present']   only match when these query conditions hold
        [--when-header 'k=v,present']  only match when these header conditions hold
    Request conditions let several operations share a path and branch on content;
-   order operations specific-first (mountebank serves the first matching stub)."
+   order operations specific-first (the daemon serves the first matching stub)."
   [{:keys [pos opts]}]
   (let [scenario (first pos)
         request  (:request opts)]

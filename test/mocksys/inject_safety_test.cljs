@@ -1,7 +1,7 @@
 (ns mocksys.inject-safety-test
-  "Contract values that reach code in the Mountebank daemon must be rejected at
-   compile time, and `validate` must report them: numbers spliced unquoted into
-   generated JS, and JSONPath selectors (jsonpath-plus evaluates script expressions)."
+  "Contract values that reach code in the daemon must be rejected at compile time,
+   and `validate` must report them: numbers spliced unquoted into generated JS, and
+   JSONPath selectors richer than a plain path."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
             [mocksys.inject :as inject]

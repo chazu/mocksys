@@ -4,11 +4,6 @@ class Mocksys < Formula
   version "0.1.0"
   license "MIT"
 
-  # mocksys is a self-contained binary, but it drives Mountebank as an external
-  # daemon (so a recorded mock survives across separate CLI invocations). Mountebank
-  # runs on Node, which we provision into libexec and point mocksys at via MOCKSYS_MB.
-  depends_on "node"
-
   on_macos do
     on_arm do
       url "https://github.com/chazu/mocksys/releases/download/v0.1.0/mocksys-darwin-arm64.tar.gz"
@@ -32,21 +27,9 @@ class Mocksys < Formula
   end
 
   def install
-    # Each release tarball contains a single binary named `mocksys`.
-    libexec.install "mocksys"
-
-    # Provision Mountebank (+ its deps) alongside, so mocksys never has to fetch it.
-    # (std_npm_args is for a formula's own package.json; here we vendor a separate pkg.)
-    system "npm", "install", "--prefix", libexec, "mountebank@2.9.1"
-
-    # Wrapper points mocksys at the bundled mb and keeps the user's cwd (so .mocks/
-    # and $MOCKSYS_HOME resolve in their project, not here).
-    (bin/"mocksys").write <<~SH
-      #!/bin/bash
-      export MOCKSYS_MB="#{libexec}/node_modules/.bin/mb"
-      exec "#{libexec}/mocksys" "$@"
-    SH
-    chmod 0755, bin/"mocksys"
+    # Each release tarball contains a single binary named `mocksys`. It is the CLI
+    # and, as `mocksys daemon`, the runtime that serves the mocks.
+    bin.install "mocksys"
   end
 
   test do

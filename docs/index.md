@@ -2,7 +2,7 @@
 
 mocksys is an agent-native CLI for authoring reusable mock fixtures — and full
 **digital twins** — of external systems. You describe an API as a canonical
-**contract**; mocksys hosts it as a local mock (over Mountebank) that your app or test
+**contract**; mocksys hosts it as a local mock (served by its own daemon) that your app or test
 hits instead of the real thing, and asserts against it like a test oracle.
 
 This is the reference manual. For installation and a 60-second tour, see the
@@ -16,7 +16,7 @@ that builds a digital twin of Okta and explains every part as it goes.
 | Doc | What it covers |
 |---|---|
 | [walkthrough.md](walkthrough.md) | **Start here.** A narrated tour: stand up an Okta twin (CRUD, filtering, OIDC, rate limits, expiring tokens) and understand each piece. |
-| [architecture.md](architecture.md) | The system: modules, the contract→imposter→Mountebank pipeline, the on-disk store, the runtime, stateless vs stateful. |
+| [architecture.md](architecture.md) | The system: modules, the contract→imposter→daemon pipeline, the on-disk store, the runtime, stateless vs stateful. |
 | [contracts.md](contracts.md) | The `contract.yaml` format: operations, request matching, responses, named examples, response templating, transport faults, validation. |
 | [effects.md](effects.md) | The declarative **stateful** layer — the `effect` language. State buckets and resource **collections**, every verb, the SCIM filter grammar, pagination, the **virtual clock** + TTL, **rate limiting**, and the generated-injection model. |
 | [twins.md](twins.md) | Building **digital twins**: kits, composable **genes**, the `okta` twin anatomy, and the `conform` fidelity loop. |
@@ -34,7 +34,7 @@ status) lives in [`design/`](design/): [idea.md](design/idea.md),
 ## The shape of the system in one paragraph
 
 A **scenario** (named `service/name`) is described by a `contract.yaml` — the single
-source of truth. mocksys *compiles* it to a Mountebank `imposter.json` (a build
+source of truth. mocksys *compiles* it to an `imposter.json` (a build
 artifact) and serves it. A contract operation is either **static** (a status + headers
 + a selected example body, optionally templated from the request) or **stateful** (a
 declarative `effect` that mocksys compiles to a generated JavaScript injection running

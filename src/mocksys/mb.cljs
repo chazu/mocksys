@@ -1,16 +1,35 @@
 (ns mocksys.mb
-  "Thin client over the Mountebank admin API (and its lifecycle).
+  "Client for the mocksys daemon's admin API, and the daemon's lifecycle.
 
-  We never write Mountebank config files. We drive a live `mb` daemon over its
-  REST admin API on :2525 — create proxy imposters, pull recorded responses
-  back, repost frozen imposters. Mountebank is the runtime, not the interface."
+  mocksys never writes runtime config files. It drives a live daemon
+  (`mocksys daemon`, see mocksys.runtime) over its admin API on 127.0.0.1: create
+  proxy imposters, pull recorded responses back, post compiled imposters. The
+  namespace keeps its historical name; its API mirrors the Mountebank admin calls
+  the daemon implements."
   (:require [promesa.core :as p]
+            [clojure.string :as str]
             ["node:child_process" :as cp]
+            ["node:fs" :as fs]
             ["node:net" :as net]
-            ["node:path" :as path]))
+            ["node:path" :as path]
+            [mocksys.store :as store]
+            [mocksys.version :refer [version]]))
 
-(def admin-port 2525)
-(def base (str "http://localhost:" admin-port))
+(def default-admin-port 2626)
+
+(defn admin-port
+  "The daemon's admin port: $MOCKSYS_ADMIN_PORT, else 2626 (not Mountebank's 2525,
+   so a real Mountebank is never mistaken for the daemon)."
+  []
+  (let [v (.-MOCKSYS_ADMIN_PORT js/process.env)]
+    (if (and v (not= v ""))
+      (let [n (js/Number v)]
+        (if (and (js/Number.isInteger n) (< 0 n 65536))
+          n
+          (throw (js/Error. (str "MOCKSYS_ADMIN_PORT must be a port number, got " (pr-str v))))))
+      default-admin-port)))
+
+(defn- base [] (str "http://127.0.0.1:" (admin-port)))
 
 ;; --- HTTP -----------------------------------------------------------------
 
@@ -23,104 +42,149 @@
                    :headers #js {"Content-Type" "application/json"}}]
      (when (some? body)
        (set! (.-body opts) (js/JSON.stringify (clj->js body))))
-     (p/let [res  (js/fetch (str base path) opts)
+     (p/let [res  (js/fetch (str (base) path) opts)
              text (.text res)]
        {:status (.-status res)
         :body   (when (seq text) (js->clj (js/JSON.parse text)))}))))
 
 ;; --- Lifecycle ------------------------------------------------------------
 
+(declare list-imposters)
+
+(defn- daemon-status
+  "What answers on the admin port: {:state :up :version :pid} for the mocksys
+   daemon, {:state :foreign} for something else, {:state :down} for nothing."
+  []
+  ;; a bad MOCKSYS_ADMIN_PORT must surface, not be read as "down" by the catch below
+  (admin-port)
+  (-> (fetch-json "GET" "/")
+      (p/then (fn [{:keys [body]}]
+                (if (and (map? body) (= "mocksys" (get body "name")))
+                  {:state :up :version (get body "version") :pid (get body "pid")}
+                  {:state :foreign})))
+      (p/catch (fn [e] {:state (if (instance? js/SyntaxError e) :foreign :down)}))))
+
 (defn up?
-  "True if an mb admin API is answering on :2525."
+  "True if the mocksys daemon is answering on the admin port."
   []
-  (-> (js/fetch (str base "/"))
-      (p/then (constantly true))
-      (p/catch (constantly false))))
+  (p/let [s (daemon-status)] (= :up (:state s))))
 
-(defn- on-path?
-  "Whether `cmd` resolves on PATH (POSIX `command -v`)."
-  [cmd]
-  (zero? (.-status (cp/spawnSync "sh" #js ["-c" (str "command -v " cmd)]
-                                 #js {:stdio "ignore"}))))
+(defn- foreign-error []
+  (js/Error. (str "port " (admin-port) " is taken by something that is not the mocksys "
+                  "daemon; free it or set MOCKSYS_ADMIN_PORT")))
 
-(defn- bundled-mb
-  "mountebank's bin script from our own npm dependency, or nil when there is none.
-   Node only: in the bun binary process.execPath is mocksys itself, not a runtime."
-  []
-  (when-not (.. js/process -versions -bun)
-    (try (path/join (path/dirname (.resolve js/require "mountebank/package.json")) "bin" "mb")
-         (catch :default _ nil))))
-
-(defn mb-launcher
-  "How to start mountebank, as [cmd extra-args]:
-     $MOCKSYS_MB (a path/command) if set  ->  use it directly
-     else `mb` on PATH (e.g. a Homebrew install)
-     else the mountebank npm dependency, run with this node (the npm install path)."
-  []
-  (let [env (.-MOCKSYS_MB js/process.env)]
+(defn- wait-down [deadline pid]
+  (p/let [running (up?)]
     (cond
-      (and env (not= env "")) [env []]
-      (on-path? "mb")         ["mb" []]
-      :else
-      (if-let [bin (bundled-mb)]
-        [(.-execPath js/process) [bin]]
-        (throw (js/Error. (str "Mountebank not found: install it (`npm install -g mountebank`) "
-                               "or point MOCKSYS_MB at an `mb` executable")))))))
+      (not running)              true
+      (> (js/Date.now) deadline) (throw (js/Error. (str "the mocksys daemon (pid " pid ") did not stop; kill " pid)))
+      :else                      (p/do (p/delay 100) (wait-down deadline pid)))))
 
-(defn- spawn-daemon!
-  "Start the mb daemon. With `allow-injection?` it is launched with --allowInjection
-   so stateful scenarios (generated response injections) can run."
-  ([] (spawn-daemon! false))
-  ([allow-injection?]
-   ;; `mb start` double-forks into a backgrounded daemon and returns; the child we
-   ;; spawn just triggers it, so we detach + unref and poll for readiness.
-   ;; --localOnly: the admin API accepts imposters carrying injected JS, so it must
-   ;; never be reachable from another machine.
-   (let [[cmd extra] (mb-launcher)
-         args  (cond-> (concat extra ["start" "--port" (str admin-port) "--localOnly"])
-                 allow-injection? (concat ["--allowInjection"]))
-         child (.spawn cp cmd (clj->js args) #js {:detached true :stdio "ignore"})]
-     (.unref child))))
-
-(defn- kill-daemon!
-  "Stop whatever is listening on the admin port (so we can relaunch it with a
-   different flag). POSIX-only; mocksys targets darwin/linux."
+(defn stop-daemon!
+  "Stop the daemon on the admin port. Resolves the mocks it was serving, as
+   [{:port :name}], or nil when no daemon was running."
   []
-  (cp/spawnSync "sh" #js ["-c" (str "lsof -ti tcp:" admin-port " -sTCP:LISTEN | xargs kill -9")]
-                #js {:stdio "ignore"}))
+  (p/let [{:keys [state pid]} (daemon-status)]
+    (case state
+      :down    nil
+      :foreign (throw (foreign-error))
+      :up      (p/let [running          (list-imposters)
+                       {:keys [status]} (fetch-json "DELETE" "/")
+                       _                (when-not (= 200 status)
+                                          (throw (js/Error. (str "the mocksys daemon (pid " pid ") is too old to be "
+                                                                 "stopped this way; stop it with: kill " pid))))
+                       _                (wait-down (+ (js/Date.now) 10000) pid)]
+                 running))))
 
-(defn- wait-up [tries]
+(defn daemon-command
+  "How to re-run mocksys as the daemon, as [cmd args], from the running process's
+   {:exec-path :script :bun?}. A bun-compiled binary is its own runtime and keeps a
+   virtual script path under /$bunfs/; node, or bun running a script, re-runs the
+   script."
+  [{:keys [exec-path script bun?]}]
+  (if (and bun? (str/starts-with? (str script) "/$bunfs/"))
+    [exec-path ["daemon"]]
+    [exec-path [script "daemon"]]))
+
+(defn- this-process []
+  {:exec-path (.-execPath js/process)
+   :script    (aget (.-argv js/process) 1)
+   :bun?      (some? (.. js/process -versions -bun))})
+
+(defn log-path
+  "Where the daemon's output goes, truncated on each start."
+  []
+  (path/join store/root "daemon.log"))
+
+(defn spawn-daemon!
+  "Start `[cmd args]` detached with its stdout and stderr in `log`. Returns an atom
+   that receives the reason if the process cannot start or exits."
+  [[cmd args] log]
+  (fs/mkdirSync (path/dirname log) #js {:recursive true})
+  (let [fd    (fs/openSync log "w")
+        ended (atom nil)
+        child (cp/spawn cmd (clj->js args) #js {:detached true :stdio #js ["ignore" fd fd]})]
+    (fs/closeSync fd)
+    (.on child "error" (fn [^js e] (reset! ended (str "could not start (" cmd "): " (.-message e)))))
+    (.on child "exit" (fn [code signal]
+                        (reset! ended (str "exited " (if signal (str "on " signal) (str "with status " code))
+                                           " before it came up"))))
+    (.unref child)
+    ended))
+
+(defn- log-tail [log]
+  (let [text (try (fs/readFileSync log "utf8") (catch :default _ ""))
+        tail (take-last 10 (remove str/blank? (str/split-lines text)))]
+    (when (seq tail)
+      (str "\n" (str/join "\n" (map #(str "  " %) tail)) "\n(full log: " log ")"))))
+
+(defn- startup-error [reason log]
+  (js/Error. (str "the mocksys daemon " reason (or (log-tail log) (str " (its log, " log ", is empty)")))))
+
+(defn- wait-up [ended log deadline]
   (p/let [ok (up?)]
     (cond
-      ok            true
-      (zero? tries) (throw (js/Error. "Mountebank did not come up on :2525"))
-      :else         (p/do (p/delay 300) (wait-up (dec tries))))))
+      ok                         true
+      (some-> ended deref)       (throw (startup-error @ended log))
+      (> (js/Date.now) deadline) (throw (startup-error (str "did not come up on 127.0.0.1:" (admin-port)) log))
+      :else                      (p/do (p/delay 100) (wait-up ended log deadline)))))
+
+(defn- start-daemon! [{:keys [spawn! log timeout-ms]}]
+  (wait-up (spawn! log) log (+ (js/Date.now) timeout-ms)))
+
+(defn- restart-notice [old-version mocks]
+  (str "mocksys: replacing the daemon on 127.0.0.1:" (admin-port) " (it runs "
+       (if old-version (str "mocksys " old-version) "an older mocksys") ", this is " version "); "
+       (if (seq mocks)
+         (str "its " (count mocks) " running mock(s) stop: " (str/join ", " (keep :name mocks))
+              ". Run them again.")
+         "it had no running mocks.")))
 
 (defn ensure-up!
-  "Make sure an mb daemon is listening; start one if not. `allow-injection?` only
-   takes effect when *starting* a fresh daemon (an already-running one keeps its
-   flags — see `restart-injecting!` for forcing the flag on)."
-  ([] (ensure-up! false))
-  ([allow-injection?]
-   (p/let [ok (up?)]
-     (if ok
-       true
-       (do (spawn-daemon! allow-injection?)
-           (wait-up 25))))))
-
-(defn restart-injecting!
-  "Kill the running daemon and relaunch it with --allowInjection. Needed when a
-   stateful imposter must be posted but the live daemon was started without the
-   flag. Drops other running imposters (they re-post on their next `run`)."
-  []
-  (kill-daemon!)
-  (p/do (p/delay 300)
-        (spawn-daemon! true)
-        (wait-up 25)))
+  "Make sure this mocksys version's daemon is listening. Start one if none is;
+   replace one from another version, saying so on stderr, since its mocks are lost.
+   `opts` replaces the effects, for tests: :spawn! (fn [log] ended-atom-or-nil),
+   :log, :timeout-ms and :warn! (fn [line])."
+  ([] (ensure-up! {}))
+  ([opts]
+   (let [opts (merge {:log        (log-path)
+                      :spawn!     #(spawn-daemon! (daemon-command (this-process)) %)
+                      :timeout-ms 10000
+                      :warn!      #(binding [*print-fn* *print-err-fn*] (println %))}
+                     opts)]
+     (p/let [{:keys [state] :as s} (daemon-status)]
+       (case state
+         :up      (if (= version (:version s))
+                    true
+                    (p/let [mocks (stop-daemon!)]
+                      ((:warn! opts) (restart-notice (:version s) mocks))
+                      (start-daemon! opts)))
+         :foreign (throw (foreign-error))
+         :down    (start-daemon! opts))))))
 
 (defn free-port
   "Ask the OS for a free ephemeral port (bind :0, read the assignment, release).
-   Small TOCTOU window before mb claims it — fine for a local dev tool."
+   Small TOCTOU window before the daemon claims it, fine for a local dev tool."
   []
   (js/Promise.
    (fn [resolve reject]
@@ -145,20 +209,8 @@
   (p/let [{:keys [status body]} (fetch-json "POST" "/imposters" imposter)]
     (if (= 201 status)
       body
-      (throw (js/Error. (str "mb rejected imposter (" status "): "
+      (throw (js/Error. (str "the daemon rejected the imposter (" status "): "
                              (js/JSON.stringify (clj->js body))))))))
-
-(defn post-imposter-injecting!
-  "Like `post-imposter!`, but if the daemon rejects the imposter because injection
-   is disabled, relaunch it with --allowInjection and retry once."
-  [imposter]
-  (-> (post-imposter! imposter)
-      (p/catch
-       (fn [err]
-         (if (re-find #"(?i)allowInjection|injection is not allowed" (or (.-message err) ""))
-           (p/do (restart-injecting!)
-                 (post-imposter! imposter))
-           (throw err))))))
 
 (defn delete-imposter!
   "Remove the imposter on `port` if present (idempotent — frees the port)."
@@ -166,7 +218,7 @@
   (fetch-json "DELETE" (str "/imposters/" port)))
 
 (defn list-imposters
-  "Live imposters as [{:port :name}] (empty if mb is down). `name` carries the
+  "Live imposters as [{:port :name}] (empty if the daemon is down). `name` carries the
    scenario id, so the catalog can track a scenario regardless of its port."
   []
   (p/let [running (up?)]

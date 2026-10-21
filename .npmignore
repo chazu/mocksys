@@ -9,5 +9,4 @@ packaging/
 PLAN.md
 *.mock.tgz
 *.log
-mb.pid
 .mocks/

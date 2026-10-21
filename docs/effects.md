@@ -544,9 +544,8 @@ create/get/del/list helper, JSON/form body parsing, deep interpolation, one-leve
 the per-operation code is thin glue that binds, reads/writes, and returns. The seed and
 collection declarations are embedded as literals, so the function is dependency-free.
 Collections are seeded once into `state` (idempotent), so every operation on the imposter
-sees the same data. Stateful imposters require Mountebank's `--allowInjection`, which
-mocksys turns on automatically. With `MOCKSYS_NO_INJECTION` set, `run` refuses to start a
-stateful scenario.
+sees the same data. The daemon runs the function in its own process with `require` in
+scope. With `MOCKSYS_NO_INJECTION` set, `run` refuses to start a stateful scenario.
 
 ## Building twins this way
 

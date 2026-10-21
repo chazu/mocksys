@@ -8,6 +8,7 @@
             [mocksys.service :as service]
             [mocksys.contract :as contract]
             [mocksys.lifecycle :as lifecycle]
+            [mocksys.runtime.imposter :refer [proxy-target-error]]
             [mocksys.cli.util :refer [die]]))
 
 (defn cmd-init [{:keys [pos]}]
@@ -30,6 +31,11 @@
         target   (or (:target opts) (:target prof))]
     (when-not scenario (die "record needs a scenario: record <service/name> [--target URL]"))
     (when-not target   (die "record needs --target URL (or a service template with a default)"))
+    (when-let [e (proxy-target-error (if (:target opts) "--target" (str "the " (:service prof) " service's default target"))
+                                     target)]
+      (die (str e " (got " target ")"
+                (when-let [origin (re-find #"^https?://[^/?#]+" (str target))]
+                  (str "; record from the origin, --target " origin ", and send the full path to the proxy")))))
     (p/let [_    (mb/ensure-up!)
             port (if (:port opts) (js/parseInt (:port opts)) (mb/free-port))]
       (mb/delete-imposter! port)

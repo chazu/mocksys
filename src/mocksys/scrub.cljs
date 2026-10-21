@@ -8,7 +8,7 @@
 
   Pure: the caller supplies the redact/volatile sets (base ∪ service template),
   so this module has no policy of its own. Imposters keep string keys to
-  round-trip Mountebank's shape exactly."
+  round-trip the imposter's shape exactly."
   (:require [clojure.string :as str]))
 
 (defn- clean-headers [headers redact-set volatile-set]

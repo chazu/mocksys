@@ -24,7 +24,7 @@
 (defn compose
   "Merge gene fragments into one contract. Each fragment may carry :operations
    (concatenated, in order), :collections and :seed. Earlier wins throughout, as
-   Mountebank serves the first matching stub: `base` keeps its own collections and
+   the daemon serves the first matching stub: `base` keeps its own collections and
    seed arrays over a fragment's of the same name."
   [base & fragments]
   (reduce (fn [c {:keys [operations collections seed]}]

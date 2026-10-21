@@ -15,9 +15,9 @@ cursor pagination, plus auth handshakes — generated in one command from a **ki
 validated against the real service with `conform`. `mocksys kit okta` stands up an Okta
 twin (users & groups CRUD + OIDC) you can drive at high volume, deterministically.
 
-It's a thin, opinionated wrapper over Mountebank: Mountebank is the runtime, kept
-entirely behind the CLI. You work in agent vocabulary — *service, scenario,
-contract, example, matcher, fault, assertion* — never in imposters and stubs.
+mocksys serves the mocks from its own daemon, which it starts for you and keeps
+behind the CLI. You work in agent vocabulary (*service, scenario, contract,
+example, matcher, fault, assertion*), never in imposters and stubs.
 
 ```sh
 mocksys new acme/get-widget                            # scaffold a contract to edit
@@ -40,14 +40,15 @@ share — not a one-off blob:
 - **Mocks are test oracles.** `assert` checks what the running mock actually received
   and exits non-zero on a miss, so it drops straight into a test script.
 - **Secrets never hit disk.** When you *do* record, raw traffic lives only inside the
-  running Mountebank daemon; `freeze` redacts auth headers and strips volatile headers
+  running mocksys daemon; `freeze` redacts auth headers and strips volatile headers
   (`Date`, `ETag`, request-ids) **in memory** before writing anything.
 - **One shared library.** Every scenario lives in a git-backed store at `~/.mocksys`
   that's the same from every project, and shareable with a remote.
 - **Shared mocks can't smuggle in code.** Stateful mocks run generated JavaScript inside
-  Mountebank, so mocksys only posts what it compiled from a contract: a pulled or
-  unpacked `imposter.json` is rebuilt before use, contract values reach the generated
-  code only as escaped literals, and the daemon accepts connections from localhost only.
+  the daemon, so mocksys only posts what it compiled from a contract. It rebuilds a
+  pulled or unpacked `imposter.json` before use, and contract values reach the
+  generated code only as escaped literals. The daemon listens on loopback addresses
+  only, and its admin API refuses browser requests.
 
 ## Install
 
@@ -57,7 +58,7 @@ share — not a one-off blob:
 brew install chazu/mocksys/mocksys
 ```
 
-A self-contained binary; the formula provisions Mountebank (it only needs `node`).
+A self-contained binary. It needs no Node or other runtime.
 
 ### npm
 
@@ -65,10 +66,25 @@ A self-contained binary; the formula provisions Mountebank (it only needs `node`
 npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 ```
 
-Requires **Node 18+** (for global `fetch`). Mountebank installs as a dependency.
-`mocksys` starts the Mountebank daemon for you (and leaves it running); you never run `mb` directly.
-Point `MOCKSYS_MB` at an `mb` executable to override how it's launched (otherwise it
-uses `mb` on your `PATH`, falling back to the `mountebank` package installed alongside mocksys).
+Requires **Node 18+** (for global `fetch`).
+`mocksys` starts its daemon for you on first use and leaves it running. The daemon's
+admin API listens on `127.0.0.1:2626`. Set `MOCKSYS_ADMIN_PORT` to use another port.
+`mocksys daemon stop` stops the daemon and every mock it serves. After an upgrade, the
+first command that serves a mock replaces a daemon from the old version and prints
+which mocks stopped. The daemon logs to `$MOCKSYS_HOME/daemon.log` (else
+`~/.mocksys/daemon.log`).
+
+### Upgrading from a version that used Mountebank
+
+Earlier versions of mocksys served mocks from a Mountebank process on port 2525, and
+the upgrade does not stop that process. If it still runs, it holds the ports of the
+mocks it served. A scenario with a pinned `--port` then fails to start with
+`Port N is already in use`. To find the process that listens on 2525, and then stop it:
+
+```sh
+lsof -nP -iTCP:2525 -sTCP:LISTEN     # make sure it is the Mountebank that mocksys started
+kill <pid>
+```
 
 ## Develop / build
 
@@ -82,13 +98,13 @@ git clone https://github.com/chazu/mocksys.git
 cd mocksys
 mise install                # node, java, bun
 mise run test               # unit tests (compiles with shadow-cljs, runs on node)
-mise run smoke              # release build + end-to-end CLI checks against a real Mountebank
+mise run smoke              # release build + end-to-end CLI checks against a live daemon
 mise run watch              # recompiles out/mocksys.js on save (keep running)
 ./bin/mocksys help          # node shim over the compiled output
 ```
 
 `mise tasks` lists the rest. One-shot build: `mise run build`. A standalone binary (no
-Node/JVM at runtime, but it still drives Mountebank externally) is produced with
+Node or JVM at runtime; it runs its own daemon too) is produced with
 [bun](https://bun.sh):
 
 ```sh
@@ -131,7 +147,7 @@ mocksys requests github/create-issue         # everything the mock received
 ## Author from a spec, docs, or source — no recording
 
 Recording is one way in. The other is a **contract**: a human/agent-editable
-`contract.yaml` that mocksys *compiles* to the Mountebank imposter. The contract is
+`contract.yaml` that mocksys *compiles* to an imposter for the daemon. The contract is
 the source of truth; `imposter.json` is a build artifact that `run` recompiles
 automatically when the contract changes.
 
@@ -157,7 +173,7 @@ mocksys validate acme/list-widgets            # structural + example-vs-schema c
 ```
 
 Selecting examples is how you author variants: each `select: true` example becomes a
-response the mock serves (Mountebank round-robins multiple), so swapping the happy
+response the mock serves (the mock cycles through several), so swapping the happy
 path for an error is just `use ... --example <error> --only`. Transport faults layer
 on top and are stored on the contract, so they survive recompiles:
 
@@ -272,6 +288,7 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `parameterize <name> --path '/a/{var}/b'` | loosen exact paths to templates |
 | `pack <name> [--out FILE] \| --stdout` / `unpack <file>` | portable bundles |
 | `ls` / `stop <name> \| --all` | catalog of scenarios / tear down |
+| `daemon stop` | stop the daemon and every mock it serves |
 | `stack <name> <scenario>...` / `up <stack>` / `down <stack>` | define a named set of scenarios / bring it all up or down |
 | `rm <scenario\|service>` (alias `delete`) | delete from the store (stops it if live; commits the removal) |
 | `status` / `log [--n N]` | uncommitted changes / recent store history |
@@ -289,7 +306,7 @@ and `docs/` for depth).
 This README is the quick start. The full reference manual lives in [`docs/`](docs/index.md):
 
 - [docs/walkthrough.md](docs/walkthrough.md) — **start here:** a friendly end-to-end tour that builds an Okta twin and explains every part.
-- [docs/architecture.md](docs/architecture.md) — modules, the contract→imposter→Mountebank pipeline, the store, the runtime.
+- [docs/architecture.md](docs/architecture.md) — modules, the contract→imposter→daemon pipeline, the store, the runtime.
 - [docs/contracts.md](docs/contracts.md) — the `contract.yaml` format: matching, responses, examples, templating, faults, validation.
 - [docs/effects.md](docs/effects.md) — the stateful `effect` language: state buckets and resource collections, every verb, the SCIM filter grammar, pagination.
 - [docs/twins.md](docs/twins.md) — building digital twins: kits, genes, the `okta` anatomy, and the `conform` fidelity loop.
@@ -301,13 +318,14 @@ Runnable example contracts are in [`examples/`](examples/) (the ones the walkthr
 
 ClojureScript compiled with [shadow-cljs](https://github.com/thheller/shadow-cljs) to a
 Node script (`out/mocksys.js`), shipped as prebuilt JS over npm and as a
-`bun build --compile` binary via Homebrew — same Node runtime as Mountebank. Focused
+`bun build --compile` binary via Homebrew. Focused
 modules: `core` (entry point + command table), `cli.*` (one namespace per command
-group), `lifecycle` (compile/run a scenario), `mb` (admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
+group), `lifecycle` (compile/run a scenario), `mb` (admin-API client + daemon lifecycle), `runtime` (the daemon: admin API,
+imposter servers, predicate matching, injection), `store` (disk layout), `scrub`
 (redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
 (the canonical source format — compile/lift/validate/example selection), `inject` (the
 declarative stateful layer — handshakes + resource collections, compiled to generated
-Mountebank injections), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
+injections), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
 (differential fidelity vs reality), `openapi` (spec import, via
 `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle` (pack/unpack), `git` (the
 shared store). Design notes and plans live in [`docs/design/`](docs/design/).

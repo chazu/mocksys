@@ -1,5 +1,5 @@
 (ns mocksys.inject
-  "Compile a declarative `effect` spec on a contract operation into a Mountebank
+  "Compile a declarative `effect` spec on a contract operation into a
   *response injection* — a JS function that runs at serve time over a per-imposter
   `state` object. This is how mocksys expresses *stateful* mocks WITHOUT the agent
   ever writing JavaScript. The agent authors effects; mocksys generates the (vetted,
@@ -39,8 +39,8 @@
   (some? (get op "effect")))
 
 (defn contract-stateful?
-  "True if any operation in the contract is stateful (so the imposter needs the
-   Mountebank daemon launched with --allowInjection)."
+  "True if any operation in the contract is stateful (so the imposter runs generated
+   injections)."
   [contract]
   (boolean (some stateful? (get contract "operations"))))
 
@@ -109,7 +109,7 @@
       :else (str v "='';"))))
 
 (defn- resp-js
-  "JS expression building a Mountebank response object from a respond/miss spec."
+  "JS expression building an injection's response object from a respond/miss spec."
   [spec]
   (let [status  (num-lit "status" (or (get spec "status") 200))
         json?   (or (contains? spec "json") (contains? spec "jsonVar"))
@@ -604,7 +604,7 @@
   1)
 
 (defn gen
-  "The Mountebank inject function (as a JS source string) for one stateful op.
+  "The inject function (as a JS source string) for one stateful op.
    `opts`: :seed (handshake seed arrays) and :collections ({name {idField seed}}),
    embedded as literals so the function is self-contained; :clock-start, :issuer and
    :random-seed. Every declared collection is seeded once into shared `state`

@@ -31,7 +31,7 @@ intentional branching, not overfitting.
 
 ## Operations
 
-Each operation is one endpoint (one Mountebank stub). It has an `id`, an optional
+Each operation is one endpoint (one stub in the compiled imposter). It has an `id`, an optional
 `summary`, a `request` (how to match), and **either** `responses` (static) **or** an
 `effect` (stateful — see [effects.md](effects.md)).
 
@@ -73,11 +73,11 @@ query:
   ref:    { matches: "^v[0-9]" } # regex predicate
 ```
 
-Mountebank ANDs the predicates and serves the **first matching stub in contract order** —
+The daemon ANDs the predicates and serves the **first matching stub in contract order** —
 so order operations specific-first, with a fallback last. `body` uses JSONPath selectors
 (`{ "$.action": { equals: "opened" } }`) and fits JSON request bodies. Selectors must be
 plain paths (`$.a.b`, `$.items[0]`, `$['k']`, `[*]`); filter and script expressions
-(`[?(...)]`, `(...)`) are rejected at compile time because Mountebank would evaluate them.
+(`[?(...)]`, `(...)`) are rejected at compile time; the daemon evaluates plain paths only.
 
 > Authoring shortcut: `mocksys add <name> --request 'GET /authorize' --when-query 'login'`
 > appends a branch operation. See [cli.md](cli.md).
@@ -109,7 +109,7 @@ time — no injection, no state. Tokens:
 {{request.path}}            {{request.method}}
 ```
 
-Each compiles to a Mountebank `copy` behavior. Example — a redirect that echoes `state`
+Each compiles to a `copy` behavior. Example — a redirect that echoes `state`
 and a code back:
 
 ```yaml

@@ -22,7 +22,7 @@ depends = ["install"]
 run = "npm run build"
 
 [tasks.smoke]
-description = "End-to-end CLI checks against a real Mountebank (needs :2525 free)"
+description = "End-to-end CLI checks against the built CLI and its daemon"
 depends = ["build"]
 run = "scripts/smoke.sh"
 

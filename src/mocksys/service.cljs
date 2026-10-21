@@ -25,7 +25,7 @@
    "gitlab"
    {:service       "gitlab"
     :protocol      "http"
-    :default_target "https://gitlab.com/api/v4"
+    :default_target "https://gitlab.com"
     :base_url_env  ["GITLAB_API_URL" "CI_API_V4_URL"]
     :redact_headers   ["authorization" "private-token" "job-token"]
     :volatile_headers ["x-request-id" "ratelimit-reset"]}

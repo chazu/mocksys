@@ -2,7 +2,7 @@
   "The contract is mocksys' canonical source of truth. A scenario's contract.yaml
   describes its operations in agent vocabulary — method/path, the formal request &
   response *schemas*, and a set of *named, individually selectable examples*. The
-  Mountebank imposter.json is a build artifact: `lower` compiles a contract down to
+  imposter.json is a build artifact: `lower` compiles a contract down to
   it, `lift` reverse-engineers a contract from a recorded imposter.
 
   Shape (string keys throughout, so embedded JSON Schemas / bodies round-trip):
@@ -16,7 +16,7 @@
        \"responses\" [{\"status\" 201 \"headers\" {...} \"bodySchema\" {...}
                     \"examples\" {\"happy\" {\"select\" true \"body\" {...}}}}]}]}
 
-  Selected examples become the stub's responses (Mountebank round-robins a
+  Selected examples become the stub's responses (the daemon round-robins a
   multi-response stub), so authoring an unhappy path is just selecting an error
   example instead of the happy one."
   (:require [clojure.string :as str]
@@ -146,7 +146,7 @@
   (if (map? c) c {"equals" c}))
 
 (defn- field-predicates
-  "Compile a `{field condition}` map into Mountebank predicates scoped to
+  "Compile a `{field condition}` map into imposter predicates scoped to
    `selector` (\"query\" or \"headers\"). condition is `{present bool}`,
    `{equals v}`, `{matches regex}`, or a bare scalar (= equals)."
   [selector spec]
@@ -162,8 +162,8 @@
 
 (defn- jsonpath!
   "A JSONPath selector taken from the contract, if it is a plain path ($.a.b[0],
-   $['k'], [*]). Mountebank evaluates selectors with jsonpath-plus, whose filter and
-   script expressions run code, so nothing richer may reach it from a contract."
+   $['k'], [*]). The daemon's matcher evaluates only plain paths, and JSONPath filter
+   and script expressions run code in other engines, so nothing richer is accepted."
   [selector]
   (if (and (string? selector) (re-matches plain-jsonpath selector))
     selector
@@ -171,7 +171,7 @@
                            ": use a plain path such as $.user.id or $.items[0]")))))
 
 (defn- body-predicates
-  "Compile a `{jsonpath-selector condition}` map into Mountebank JSONPath body
+  "Compile a `{jsonpath-selector condition}` map into JSONPath body
    predicates (for JSON request bodies). Same condition vocabulary as above."
   [spec]
   (for [[selector c] spec
@@ -183,10 +183,10 @@
       :else                   {"equals"  {"body" (get c "equals")}            "jsonpath" {"selector" selector}})))
 
 (defn- predicates-for
-  "Build the Mountebank predicate array for an operation's request. `match`
+  "Build the predicate array for an operation's request. `match`
    selects which of method/path are matched (default both); `query`/`headers`/`body`
    add request-conditional predicates so multiple operations can share a path and
-   branch on request content (mountebank ANDs predicates; stub order = contract
+   branch on request content (the daemon ANDs predicates; stub order = contract
    order, first match wins)."
   [{:strs [method path match query headers body]}]
   (let [fields (set (or (seq match) ["method" "path"]))]
@@ -206,7 +206,7 @@
          (catch :default _ nil))))
 
 (defn- is-response
-  "Build an `{is {...}}` Mountebank response from a status, headers and body."
+  "Build an `{is {...}}` response from a status, headers and body."
   [status headers body]
   {"is" (cond-> {"statusCode" status}
           (seq headers)  (assoc "headers" headers)
@@ -224,7 +224,7 @@
      :body    (get ex "body")}))
 
 (defn- operation-responses
-  "Mountebank `responses` array for one operation: every selected example, or — if
+  "The `responses` array for one operation: every selected example, or — if
    none are selected — one sampled from the first response's schema."
   [{:strs [responses]}]
   (let [chosen (selected-examples responses)]
@@ -251,10 +251,10 @@
         ;; append, don't clobber — copy behaviors from templating may already be here
         wait (update "behaviors" (fnil conj []) {"wait" wait})))))
 
-;; --- response templating: {{request...}} -> Mountebank copy behaviors ----------
+;; --- response templating: {{request...}} -> copy behaviors ----------
 ;; A response body/header may reference the *incoming request* with
 ;; {{request.query.X}} / {{request.headers.X}} / {{request.body.X}} / {{request.path}}
-;; / {{request.method}}. Each becomes a Mountebank `copy` behavior that splices the
+;; / {{request.method}}. Each becomes a `copy` behavior that splices the
 ;; live request value into the response at serve time — dynamic responses with no
 ;; injection (e.g. echo `state` back on a redirect Location).
 
@@ -277,7 +277,7 @@
 (defn- walk-templates
   "Replace {{request...}} tokens in every string within `x`, recording the matching
    copy behavior into atom `acc` (keyed by token, so repeats dedup). Returns `x`
-   with each token literal swapped for its Mountebank ${...} replacement token."
+   with each token literal swapped for its ${...} replacement token."
   [x acc]
   (cond
     (string? x)
@@ -301,7 +301,7 @@
       (seq copies) (update "behaviors" (fnil into []) copies))))
 
 (defn lower
-  "Compile a contract into a Mountebank imposter. `port` is carried through if a
+  "Compile a contract into an imposter for the mocksys daemon. `port` is carried through if a
    prior artifact had one (ensure-running! reassigns at run time regardless)."
   ([contract] (lower contract nil))
   ([contract port]

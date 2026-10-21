@@ -1,5 +1,5 @@
 (ns mocksys.core
-  "mocksys: agent-native CLI over Mountebank. This namespace is only the entry
+  "mocksys: agent-native CLI for local mocks and digital twins. This namespace is only the entry
   point and the command table; each command lives in a `mocksys.cli.*` namespace
   and the scenario lifecycle in `mocksys.lifecycle`."
   (:require [promesa.core :as p]
@@ -55,7 +55,8 @@
    "pull"         share/cmd-pull
    "rm"           share/cmd-rm
    "delete"       share/cmd-rm
-   "prime"        help/cmd-prime})
+   "prime"        help/cmd-prime
+   "daemon"       serve/cmd-daemon})
 
 (defn -main [& args]
   (let [[cmd & more] args

@@ -1,0 +1,241 @@
+(ns mocksys.runtime-imposter-test
+  "One request through a native imposter: validation of the posted spec, stub
+   selection, `is`/`inject`/`proxy`/`fault` responses, behaviors, request recording
+   and proxyOnce recording. Asserts the outcome the server would write."
+  (:require [clojure.test :refer [deftest testing is async]]
+            [clojure.string :as str]
+            [promesa.core :as p]
+            [mocksys.contract :as contract]
+            [mocksys.kits :as kits]
+            [mocksys.runtime.imposter :as imp]))
+
+(defn- spec [stubs & {:as extra}]
+  (merge {"protocol" "http" "port" 4545 "stubs" stubs} extra))
+
+(defn- req [& {:as r}]
+  (merge {"method" "GET" "path" "/" "query" {} "headers" {} "body" ""} r))
+
+(defn- rejects [s]
+  (try (imp/create s) nil (catch :default e (ex-message e))))
+
+(defn- run-all
+  "Send `reqs` through `i` in order (the server handles one at a time per
+   connection, but sequencing here keeps cursor assertions deterministic)."
+  [i reqs opts]
+  (p/loop [rs reqs acc []]
+    (if (empty? rs)
+      acc
+      (p/let [o (imp/respond i (first rs) opts)]
+        (p/recur (rest rs) (conj acc o))))))
+
+(defn- done-after [done pr]
+  (-> pr
+      (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
+      (p/finally (fn [] (done)))))
+
+;; --- validation --------------------------------------------------------------
+
+(deftest every-imposter-mocksys-emits-validates
+  (testing "the okta twin, which uses every emitted feature but proxy"
+    (is (some? (imp/create (assoc (contract/lower (kits/okta "okta/okta" nil {})) "port" 4545)))))
+  (testing "a recording proxy"
+    (is (some? (imp/create {"protocol" "http" "port" 4545 "name" "r"
+                            "stubs" [{"responses" [{"proxy" {"to" "https://api.example.com"
+                                                             "mode" "proxyOnce"
+                                                             "predicateGenerators" [{"matches" {"method" true "path" true}}]}}]}]})))))
+
+(deftest anything-outside-the-inventory-is-rejected
+  (is (str/includes? (rejects (spec [] "protocol" "tcp")) "protocol"))
+  (is (str/includes? (rejects (dissoc (spec []) "port")) "port"))
+  (is (str/includes? (rejects (spec [{"predicates" [{"contains" {"path" "/x"}}]}])) "stubs[0].predicates[0]"))
+  (is (str/includes? (rejects (spec [{"predicates" [{"equals" {"path" "/x"} "caseSensitive" true}]}])) "caseSensitive"))
+  (is (str/includes? (rejects (spec [{"predicates" [{"equals" {"body" "x"} "jsonpath" {"selector" "$..a[?(@.b)]"}}]}])) "selector"))
+  (is (str/includes? (rejects (spec [{"predicates" [{"matches" {"path" "(["}}]}])) "regex"))
+  (is (str/includes? (rejects (spec [{"responses" [{"is" {} "inject" "function(){}"}]}])) "stubs[0].responses[0]"))
+  (is (str/includes? (rejects (spec [{"responses" [{"is" {} "behaviors" [{"decorate" "x"}]}]}])) "decorate"))
+  (is (str/includes? (rejects (spec [{"responses" [{"is" {} "repeat" 2}]}])) "repeat"))
+  (is (str/includes? (rejects (spec [{"responses" [{"fault" "SLOW_LORIS"}]}])) "fault"))
+  (is (str/includes? (rejects (spec [{"responses" [{"inject" "function ( {"}]}])) "injection"))
+  (is (str/includes? (rejects (spec [{"responses" [{"proxy" {"to" "https://x" "mode" "proxyAlways"}}]}])) "proxyOnce")))
+
+(deftest an-is-response-that-cannot-be-written-is-rejected
+  (let [is-of (fn [is] (rejects (spec [{"responses" [{"is" is}]}])))]
+    (testing "headers"
+      (is (str/includes? (is-of {"headers" "Content-Type: text/plain"}) "stubs[0].responses[0]: is.headers must be an object"))
+      (is (str/includes? (is-of {"headers" {"X-A" {"nested" 1}}}) "is.headers[\"X-A\"]"))
+      (is (str/includes? (is-of {"headers" {"X-A" nil}}) "is.headers[\"X-A\"]"))
+      (is (nil? (is-of {"headers" {"X-A" "1" "X-B" 2 "Set-Cookie" ["a=1" "b=2"]}}))))
+    (testing "statusCode"
+      (is (str/includes? (is-of {"statusCode" "abc"}) "stubs[0].responses[0]: is.statusCode"))
+      (is (str/includes? (is-of {"statusCode" 42}) "is.statusCode"))
+      (is (str/includes? (is-of {"statusCode" 200.5}) "is.statusCode"))
+      (is (nil? (is-of {"statusCode" 201})))
+      (is (nil? (is-of {"statusCode" "404"}))))))
+
+(deftest an-injection-must-be-a-function
+  (is (str/includes? (rejects (spec [{"responses" [{"inject" "42"}]}])) "stubs[0].responses[0]: inject must be a function"))
+  (is (str/includes? (rejects (spec [{"responses" [{"inject" "{statusCode: 200}"}]}])) "inject must be a function"))
+  (is (nil? (rejects (spec [{"responses" [{"inject" "(request) => ({statusCode: 200})"}]}])))))
+
+(deftest a-proxy-target-is-a-bare-origin
+  (let [proxy-to (fn [to] (rejects (spec [{"responses" [{"proxy" {"to" to "mode" "proxyOnce"}}]}])))]
+    (testing "a path, query or fragment would be dropped on the way upstream, so it is refused"
+      (is (str/includes? (proxy-to "https://api.example.com/v1") "stubs[0].responses[0]: proxy.to must not contain a path"))
+      (is (str/includes? (proxy-to "https://api.example.com/?page=2") "proxy.to must not contain a query"))
+      (is (str/includes? (proxy-to "https://api.example.com#top") "proxy.to must not contain a fragment")))
+    (testing "an origin, with or without the root slash, is accepted"
+      (is (nil? (proxy-to "https://api.example.com")))
+      (is (nil? (proxy-to "http://127.0.0.1:8080/"))))
+    (is (str/includes? (proxy-to "not a url") "proxy.to must be an http(s) URL"))))
+
+;; --- is responses ------------------------------------------------------------
+
+(deftest is-response-and-defaults
+  (async done
+    (let [i (imp/create (spec [{"predicates" [{"deepEquals" {"path" "/json"}}]
+                                "responses" [{"is" {"statusCode" 201 "headers" {"Content-Type" "application/json"}
+                                                    "body" {"a" [1 2]}}}]}
+                               {"predicates" [{"deepEquals" {"path" "/len"}}]
+                                "responses" [{"is" {"headers" {"Content-Length" "1"} "body" "héllo"}}]}]))]
+      (done-after done
+        (p/let [[j miss len] (run-all i [(req "path" "/json") (req "path" "/nope") (req "path" "/len")] {})]
+          (testing "an object body is served as indented JSON"
+            (is (= 201 (:status j)))
+            (is (= "{\n    \"a\": [\n        1,\n        2\n    ]\n}" (:body j)))
+            (is (= "application/json" (get-in j [:headers "Content-Type"]))))
+          (testing "every response closes its connection unless it says otherwise"
+            (is (= "close" (get-in j [:headers "Connection"]))))
+          (testing "no matching stub serves an empty 200"
+            (is (= 200 (:status miss)))
+            (is (= "" (:body miss)))
+            (is (= {"Connection" "close"} (:headers miss))))
+          (testing "a declared Content-Length is recomputed from the body"
+            (is (= 6 (get-in len [:headers "Content-Length"])))))))))
+
+(deftest first-matching-stub-wins-and-responses-cycle
+  (async done
+    (let [i (imp/create (spec [{"predicates" [{"deepEquals" {"path" "/a"}}]
+                                "responses" [{"is" {"body" "one"}} {"is" {"body" "two"}}]}
+                               {"responses" [{"is" {"body" "fallback"}}]}]))]
+      (done-after done
+        (p/let [os (run-all i (map #(req "path" %) ["/a" "/a" "/a" "/b"]) {})]
+          (is (= ["one" "two" "one" "fallback"] (mapv :body os))))))))
+
+;; --- behaviors ---------------------------------------------------------------
+
+(deftest copy-and-wait-behaviors
+  (async done
+    (let [lowered (contract/lower {"scenario" "t/copy"
+                                   "operations" [{"id" "cb" "request" {"method" "GET" "path" "/cb/{id}" "match" ["path"]}
+                                                  "responses" [{"status" 302
+                                                                "headers" {"Location" "https://app/cb?state={{request.query.state}}&h={{request.headers.X-Trace}}"}
+                                                                "examples" {"e" {"select" true
+                                                                                 "body" "{{request.method}} {{request.path}} {{request.body.user.name}}"}}}]}]
+                                   "fault" {"latency" "40"}})
+          i (imp/create (assoc lowered "port" 4545))]
+      (done-after done
+        (p/let [[o missing] (run-all i [(req "path" "/cb/7" "method" "POST" "query" {"state" "xyz"}
+                                             "headers" {"x-trace" "t1"} "body" "{\"user\":{\"name\":\"ann\"}}")
+                                        (req "path" "/cb/7")]
+                                     {})]
+          (testing "copy splices request values into headers and body"
+            (is (= 302 (:status o)))
+            (is (= "https://app/cb?state=xyz&h=t1" (get-in o [:headers "Location"])))
+            (is (= "POST /cb/7 ann" (:body o))))
+          (testing "a missing source yields Mountebank's literal undefined; a non-JSON body leaves the token"
+            (is (= "https://app/cb?state=undefined&h=undefined" (get-in missing [:headers "Location"])))
+            (is (str/ends-with? (:body missing) "${body_user_name}")))
+          (testing "wait is returned as a delay for the server"
+            (is (= 40 (:wait o)))))))))
+
+(deftest faults-are-outcomes
+  (async done
+    (let [i (imp/create (spec [{"responses" [{"fault" "CONNECTION_RESET_BY_PEER"}]}]))]
+      (done-after done
+        (p/let [o (imp/respond i (req) {})]
+          (is (= {:fault "CONNECTION_RESET_BY_PEER"} o)))))))
+
+;; --- injection ---------------------------------------------------------------
+
+(deftest injection-state-is-shared-and-persists
+  (async done
+    (let [counter "function (request, state, logger) { state.n = (state.n || 0) + 1;
+                     return { statusCode: 200, headers: {}, body: request.method + ' ' + request.path + ' ' + state.n }; }"
+          i (imp/create (spec [{"predicates" [{"deepEquals" {"path" "/a"}}] "responses" [{"inject" counter}]}
+                               {"predicates" [{"deepEquals" {"path" "/b"}}] "responses" [{"inject" counter}]}]))]
+      (done-after done
+        (p/let [os (run-all i [(req "path" "/a") (req "path" "/b") (req "path" "/a" "method" "POST")] {})]
+          (is (= ["GET /a 1" "GET /b 2" "POST /a 3"] (mapv :body os))))))))
+
+(deftest injection-sees-the-request-and-can-require
+  (async done
+    (let [src "function (request, state) {
+                 var h = require('crypto').createHash('sha256').update(request.body).digest('hex');
+                 return { statusCode: 200, headers: {}, body: [request.query.q, request.headers['X-A'], h.slice(0, 8)].join(',') }; }"
+          i (imp/create (spec [{"responses" [{"inject" src}]}]))]
+      (done-after done
+        (p/let [o (imp/respond i (req "query" {"q" "1"} "headers" {"X-A" "v"} "body" "abc") {})]
+          (is (= "1,v,ba7816bf" (:body o))))))))
+
+(deftest a-throwing-injection-rejects
+  (async done
+    (let [i (imp/create (spec [{"responses" [{"inject" "function () { throw new Error('boom'); }"}]}]))]
+      (-> (imp/respond i (req) {})
+          (p/then (fn [_] (is false "expected a rejection")))
+          (p/catch (fn [e] (is (str/includes? (ex-message e) "boom"))))
+          (p/finally (fn [] (done)))))))
+
+;; --- request recording -------------------------------------------------------
+
+(deftest requests-are-recorded-only-when-asked
+  (async done
+    (let [on  (imp/create (spec [] "recordRequests" true))
+          off (imp/create (spec []))]
+      (done-after done
+        (p/let [_ (run-all on [(req "path" "/x" "query" {"a" "1"}) (req "path" "/y" "method" "POST" "body" "b")] {})
+                _ (imp/respond off (req "path" "/x") {})]
+          (let [rs (get (imp/to-json on {}) "requests")]
+            (is (= [["GET" "/x" {"a" "1"} ""] ["POST" "/y" {} "b"]]
+                   (mapv (juxt #(get % "method") #(get % "path") #(get % "query") #(get % "body")) rs)))
+            (is (every? #(string? (get % "timestamp")) rs)))
+          (is (= 2 (get (imp/to-json on {}) "numberOfRequests")))
+          (is (= [] (get (imp/to-json off {}) "requests")))
+          (imp/clear-requests! on)
+          (is (= [] (get (imp/to-json on {}) "requests"))))))))
+
+;; --- proxyOnce recording -----------------------------------------------------
+
+(deftest proxy-once-records-then-replays
+  (async done
+    (let [calls  (atom [])
+          proxy! (fn [cfg request]
+                   (swap! calls conj [(get cfg "to") (get request "path")])
+                   (p/resolved {"statusCode" 200 "headers" {"Content-Type" "application/json" "X-Up" "1"}
+                                "body" {"path" (get request "path")} "_mode" "text"}))
+          i (imp/create {"protocol" "http" "port" 4545 "name" "github/rec" "recordRequests" true
+                         "stubs" [{"responses" [{"proxy" {"to" "https://api.example.com" "mode" "proxyOnce"
+                                                          "predicateGenerators" [{"matches" {"method" true "path" true}}]}}]}]})]
+      (done-after done
+        (p/let [os (run-all i [(req "path" "/repos") (req "path" "/repos" "query" {"page" "2"})
+                               (req "path" "/user") (req "method" "POST" "path" "/repos")]
+                            {:proxy! proxy!})]
+          (testing "each new method+path goes upstream once; a repeat replays the recording"
+            (is (= [["https://api.example.com" "/repos"] ["https://api.example.com" "/user"]
+                    ["https://api.example.com" "/repos"]]
+                   @calls))
+            (is (= (repeat 4 200) (map :status os)))
+            (is (str/includes? (:body (second os)) "/repos")))
+          (testing "replayable with proxies removed is the recorded stubs, in recording order"
+            (let [r (imp/to-json i {:replayable? true :remove-proxies? true})]
+              (is (= "github/rec" (get r "name")))
+              (is (nil? (get r "requests")))
+              (is (= [[{"deepEquals" {"method" "GET"}} {"deepEquals" {"path" "/repos"}}]
+                      [{"deepEquals" {"method" "GET"}} {"deepEquals" {"path" "/user"}}]
+                      [{"deepEquals" {"method" "POST"}} {"deepEquals" {"path" "/repos"}}]]
+                     (mapv #(get % "predicates") (get r "stubs"))))
+              (is (= {"statusCode" 200 "headers" {"Content-Type" "application/json" "X-Up" "1"}
+                      "body" {"path" "/repos"} "_mode" "text"}
+                     (get-in r ["stubs" 0 "responses" 0 "is"]))
+                  "no _proxyResponseTime in a replayable recording")))
+          (testing "without removeProxies the proxy stub stays last"
+            (is (contains? (get-in (imp/to-json i {}) ["stubs" 3 "responses" 0]) "proxy"))))))))

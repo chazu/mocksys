@@ -1,7 +1,7 @@
 (ns mocksys.store
   "On-disk scenario layout under the store `root` ($MOCKSYS_HOME, else ~/.mocksys).
 
-  Our own metadata is YAML (agent- and human-readable); the Mountebank imposter
+  Our own metadata is YAML (agent- and human-readable); the compiled imposter
   is kept as JSON, its native format, so it round-trips with zero translation."
   (:require [clojure.string :as str]
             ["node:fs" :as fs]

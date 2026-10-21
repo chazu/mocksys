@@ -29,7 +29,7 @@
     reqs))
 
 (defn recorded->corpus
-  "Reconstruct a corpus from a running mock's recorded requests (Mountebank shape),
+  "Reconstruct a corpus from a running mock's recorded requests (the daemon's shape),
    so `conform` can replay real traffic the twin already saw."
   [reqs]
   (mapv (fn [r]

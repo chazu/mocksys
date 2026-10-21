@@ -13,8 +13,8 @@
      "fixture up to a stateful *digital twin* (CRUD resources, auth flows, rate limits,"
      "expiring tokens). Vocabulary: a *scenario* (named `service/name`) is described by a"
      "canonical `contract.yaml` (method/path, response schemas, selectable *examples*, and"
-     "an optional declarative `effect` for stateful behavior); it compiles to a Mountebank"
-     "imposter automatically on `run`. You *author* a contract (or generate one with a"
+     "an optional declarative `effect` for stateful behavior); it compiles to an imposter"
+     "that the mocksys daemon serves, automatically on `run`. You *author* a contract (or generate one with a"
      "`kit`); recording live traffic is just one way to seed one, when you have creds."
      ""
      "## Stand up a digital twin in one command (the fastest path)"
@@ -77,6 +77,7 @@
      "  mocksys requests <name>    # what the running mock actually received"
      "  mocksys ls                 # all scenarios + which are live"
      "  mocksys stop <name>        # or --all"
+     "  mocksys daemon stop        # stop the daemon (and every running mock)"
      ""
      "## Store + sharing"
      "All scenarios live in one shared library at ~/.mocksys (a git repo; override"
@@ -127,6 +128,7 @@
   (println "  mocksys assert <name> --saw 'METHOD /path'")
   (println "  mocksys ls")
   (println "  mocksys stop <name> | --all")
+  (println "  mocksys daemon stop                             stop the daemon and every mock it serves")
   (println "  mocksys rm <scenario|service>                   delete from the store (stops it if live)")
   (println)
   (println "  SEED FROM LIVE TRAFFIC (optional — needs real access)")
