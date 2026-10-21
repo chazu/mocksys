@@ -58,6 +58,25 @@
   (is (str/includes? (rejects (spec [{"responses" [{"inject" "function ( {"}]}])) "injection"))
   (is (str/includes? (rejects (spec [{"responses" [{"proxy" {"to" "https://x" "mode" "proxyAlways"}}]}])) "proxyOnce")))
 
+(deftest an-is-response-that-cannot-be-written-is-rejected
+  (let [is-of (fn [is] (rejects (spec [{"responses" [{"is" is}]}])))]
+    (testing "headers"
+      (is (str/includes? (is-of {"headers" "Content-Type: text/plain"}) "stubs[0].responses[0]: is.headers must be an object"))
+      (is (str/includes? (is-of {"headers" {"X-A" {"nested" 1}}}) "is.headers[\"X-A\"]"))
+      (is (str/includes? (is-of {"headers" {"X-A" nil}}) "is.headers[\"X-A\"]"))
+      (is (nil? (is-of {"headers" {"X-A" "1" "X-B" 2 "Set-Cookie" ["a=1" "b=2"]}}))))
+    (testing "statusCode"
+      (is (str/includes? (is-of {"statusCode" "abc"}) "stubs[0].responses[0]: is.statusCode"))
+      (is (str/includes? (is-of {"statusCode" 42}) "is.statusCode"))
+      (is (str/includes? (is-of {"statusCode" 200.5}) "is.statusCode"))
+      (is (nil? (is-of {"statusCode" 201})))
+      (is (nil? (is-of {"statusCode" "404"}))))))
+
+(deftest an-injection-must-be-a-function
+  (is (str/includes? (rejects (spec [{"responses" [{"inject" "42"}]}])) "stubs[0].responses[0]: inject must be a function"))
+  (is (str/includes? (rejects (spec [{"responses" [{"inject" "{statusCode: 200}"}]}])) "inject must be a function"))
+  (is (nil? (rejects (spec [{"responses" [{"inject" "(request) => ({statusCode: 200})"}]}])))))
+
 (deftest a-proxy-target-is-a-bare-origin
   (let [proxy-to (fn [to] (rejects (spec [{"responses" [{"proxy" {"to" to "mode" "proxyOnce"}}]}])))]
     (testing "a path, query or fragment would be dropped on the way upstream, so it is refused"
