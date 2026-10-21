@@ -93,6 +93,54 @@
         added (last (get c "operations"))]
     (is (not (contains? (set (ids (contract/expand (dissoc with-genes "operations")))) (get added "id"))))))
 
+;; --- params: required, shaped, and no collisions ------------------------------
+
+(defn- errors-of [genes & [ops]]
+  (:errors (contract/validate (cond-> {"service" "demo" "scenario" "demo/x" "genes" genes}
+                                ops (assoc "operations" ops)))))
+
+(deftest a-required-param-set-to-null-is-missing
+  (is (= ["genes[0] crud-collection: missing required param 'base'"]
+         (errors-of [{"crud-collection" {"coll" "users" "base" nil}}]))))
+
+(deftest an-optional-param-set-to-null-is-unset
+  (is (empty? (errors-of [{"crud-collection" {"coll" "users" "base" "/a" "id-prefix" nil
+                                              "create-defaults" nil}}]))))
+
+(deftest a-param-of-the-wrong-shape-is-named
+  (testing "a number where a map belongs"
+    (is (= ["genes[0] crud-collection: param 'create-defaults' must be a map"]
+           (errors-of [{"crud-collection" {"coll" "users" "base" "/a" "create-defaults" 5}}]))))
+  (testing "a map where a string belongs"
+    (is (= ["genes[0] crud-collection: param 'base' must be a string"]
+           (errors-of [{"crud-collection" {"coll" "users" "base" {"x" 1}}}]))))
+  (testing "a string where a list belongs, in a later entry"
+    (is (= ["genes[1] oauth2-provider: param 'users' must be a list"]
+           (errors-of [{"membership" {}} {"oauth2-provider" {"users" "alice"}}]))))
+  (testing "compiling refuses it with the same message instead of crashing"
+    (is (thrown-with-msg? js/Error #"param 'create-defaults' must be a map"
+                          (contract/lower {"genes" [{"crud-collection" {"coll" "users" "base" "/a"
+                                                                        "create-defaults" 5}}]})))))
+
+(deftest two-genes-declaring-one-collection-is-an-error
+  (let [errs (errors-of [{"crud-collection" {"coll" "users" "base" "/a"}}
+                         {"crud-collection" {"coll" "users" "base" "/b"}}])]
+    (is (some #{"genes[1] crud-collection: collection 'users' is already declared by genes[0] crud-collection"}
+              errs))))
+
+(deftest duplicate-operation-ids-are-errors
+  (testing "two genes over the same collection mint the same ids"
+    (let [errs (errors-of [{"crud-collection" {"coll" "users" "base" "/a"}}
+                           {"crud-collection" {"coll" "users" "base" "/b"}}])]
+      (is (some #{"list-users: duplicate operation id (gene crud-collection, gene crud-collection)"} errs))))
+  (testing "an authored operation reusing a gene operation's id"
+    (let [errs (errors-of [{"crud-collection" {"coll" "users" "base" "/a"}}]
+                          [(assoc authored-list-users "id" "list-users")])]
+      (is (= ["list-users: duplicate operation id (authored, gene crud-collection)"] errs))))
+  (testing "two authored operations with one id"
+    (let [errs (:errors (contract/validate {"operations" [authored-list-users authored-list-users]}))]
+      (is (= ["my-list-users: duplicate operation id (authored, authored)"] errs)))))
+
 ;; --- the registry describes params truthfully ---------------------------------
 
 (def ^:private samples
@@ -111,12 +159,19 @@
 
 (deftest every-declared-param-changes-the-gene
   (doseq [[gname {:keys [params build]}] kits/genes
-          [k _doc] params]
+          [k _shape _doc] params]
     (testing (str gname " " (name k))
       (is (contains? samples k) "add a sample value for this param")
       (let [base (get minimal gname {})]
         (is (not= (build base) (build (assoc base k (get samples k))))
             "a declared param the gene ignores is not truthful")))))
+
+(deftest every-sample-fits-its-declared-shape
+  (doseq [[gname {:keys [params]}] kits/genes
+          [k shape _doc] params]
+    (testing (str gname " " (name k))
+      (is (contains? kits/param-shapes shape) "a param declares a known shape")
+      (is ((get kits/param-shapes shape) (get samples k)) "the sample value fits the declared shape"))))
 
 (deftest required-params-are-declared-params
   (doseq [[gname {:keys [params required]}] kits/genes]

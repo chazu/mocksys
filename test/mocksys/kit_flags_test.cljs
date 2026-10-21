@@ -24,3 +24,8 @@
       (is (= 60 (get-in tok ["effect" "store" "ttl"]))))
     (testing "the token response advertises expires_in"
       (is (= 60 (get-in tok ["effect" "respond" "json" "expires_in"]))))))
+
+(deftest every-built-in-kit-builds-a-valid-contract
+  (doseq [[kname {:keys [build]}] kits/builtin-kits]
+    (testing kname
+      (is (= [] (:errors (contract/validate (build (str kname "/" kname) {}))))))))
