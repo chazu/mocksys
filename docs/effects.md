@@ -570,7 +570,8 @@ sse:
   headers: { Access-Control-Allow-Origin: "*" }   # optional, interpolated
 ```
 
-`sse` needs `events`, a `channel` or both. An event takes `data` or `dataVar`, and
+`sse` needs `events`, a `channel` or both, and cannot answer a `MESSAGE`. Like any
+terminal, it cannot follow `store`. An event takes `data` or `dataVar`, and
 optionally `event`, `id` and `delay`. A string `data` is sent as written after
 interpolation; any other value is sent as JSON with every string in it interpolated.
 `dataVar: msg` sends variable `msg` (a string as is, anything else as JSON). A line
@@ -587,7 +588,8 @@ websocket:
   channel: "room-{room}"          # optional: then every event published here
 ```
 
-A message takes `data` or `dataVar`, and optionally `delay`. Each message the client
+A `websocket` operation's request method is `GET`, the only one an upgrade uses. A
+message takes `data` or `dataVar`, and optionally `delay`. Each message the client
 sends then runs through the contract as a `MESSAGE` request, so a `MESSAGE` operation's
 effect handles it with the same verbs, state and channels as any other.
 
@@ -601,7 +603,9 @@ publish: { channel: "room-{room}", event: message, id: "{mid}", dataVar: msg }
 `channel` is required, with `data` or `dataVar`; `event` and `id` are optional. A
 `publish` runs after the terminal and sees the variables it set, so `create ... as: msg`
 then `dataVar: msg` publishes the stored row. It publishes nothing when the answer is
-400 or above, or when a read missed. An SSE subscriber receives the whole event; a
+400 or above, or when a read missed. The answer counted is the effect's: a `websocket`
+answer is 101 and an `sse` answer 200 even when the client then gets something else,
+such as a 426 for a plain `GET` to a `websocket` operation. An SSE subscriber receives the whole event; a
 WebSocket subscriber receives its data as one message. Nothing is buffered: a stream
 that is not open when the event is published never sees it. `publish` needs something
 to answer the request, usually `respond: { status: 202 }` or a collection verb.
@@ -610,10 +614,11 @@ to answer the request, usually `respond: { status: 202 }` or a collection verb.
 reposting a scenario starts with none. A name may not be `__proto__`, `constructor` or
 `prototype`. A stream subscribes as it opens, in the same turn of the daemon's event
 loop, so a client that has its headers (SSE) or its open event (WebSocket) misses
-nothing published after. When a
-client leaves, its subscription and timers go with it.
+nothing published after. When a client leaves, its subscription and timers go with it;
+a client that left while the answer waited on a `wait` behavior is never subscribed.
 
-**Time.** `delay` and `keepAlive` are wall-clock milliseconds. The [virtual
+**Time.** `delay`, `keepAlive` and `retry` are whole wall-clock milliseconds, at most
+2147483647, the longest a timer keeps. The [virtual
 clock](#the-virtual-clock) neither drives a stream nor is moved by one. A `{now}` bind in
 a scripted event reads the clock when the stream opens; in a `publish`, when the
 publishing request runs. A `limit` counts a stream's connect as one request, and each

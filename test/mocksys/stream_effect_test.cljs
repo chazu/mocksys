@@ -27,6 +27,11 @@
     (is (str/includes? (errors-of {"sse" {"events" [{"data" "x" "delay" -1}]}}) "sse.events[0].delay must be a whole number of milliseconds"))
     (is (str/includes? (errors-of {"sse" {"channel" "c" "retry" 1.5}}) "sse.retry must be a whole number of milliseconds"))
     (is (str/includes? (errors-of {"sse" {"channel" "c" "keepAlive" "1s"}}) "sse.keepAlive must be a whole number of milliseconds")))
+  (testing "milliseconds stop where a timer does, so a huge keep-alive cannot fire every millisecond"
+    (is (str/includes? (errors-of {"sse" {"channel" "c" "keepAlive" 3000000000}}) "sse.keepAlive must be a whole number of milliseconds up to 2147483647"))
+    (is (= [] (effect/errors {"sse" {"channel" "c" "keepAlive" 2147483647}}))))
+  (testing "store runs only before respond, so a stream cannot take one"
+    (is (str/includes? (errors-of {"store" {"bucket" "b" "key" "k"} "sse" {"channel" "c"}}) "store runs only before respond")))
   (testing "a channel cannot take a name JavaScript gives meaning to"
     (is (str/includes? (errors-of {"sse" {"channel" "__proto__"}}) "sse.channel must be a string other than __proto__"))
     (is (str/includes? (errors-of {"publish" {"channel" "constructor" "data" "x"} "respond" {}}) "publish.channel must be a string other than")))
@@ -125,7 +130,12 @@
   (let [op (fn [req] {"id" "feed" "request" req "effect" {"sse" {"channel" "c"}}})]
     (is (= [] (:errors (contract/validate {"operations" [(op {"method" "GET" "path" "/feed"})]}))))
     (is (thrown-with-msg? js/Error #"^feed: sse needs protocol http"
-                          (contract/lower {"protocol" "grpc" "operations" [(op {"rpc" "a.B/Feed"})]})))))
+                          (contract/lower {"protocol" "grpc" "operations" [(op {"rpc" "a.B/Feed"})]})))
+    (is (= [] (:errors (contract/validate {"operations" [(op {"method" "POST" "path" "/feed"})]}))) "SSE may answer a POST")
+    (is (= ["feed: sse cannot answer a MESSAGE: a message's reply is sent on its socket"]
+           (:errors (contract/validate {"operations" [(op {"method" "MESSAGE" "path" "/feed"})]}))))
+    (is (= ["ws: websocket needs request.method GET, the only method a WebSocket upgrade uses"]
+           (:errors (contract/validate {"operations" [{"id" "ws" "request" {"method" "POST" "path" "/ws"} "effect" {"websocket" {}}}]}))))))
 
 (deftest a-failing-subscriber-does-not-fail-the-publisher
   (let [channels (effect/new-channels)

@@ -196,15 +196,18 @@ as everything else.
   `{data | dataVar, event, id, delay}`; a message is `{data | dataVar, delay}`. A
   string `data` is sent as written after interpolation, any other value as JSON, and
   `dataVar` sends a variable. `delay` is whole milliseconds of wall time after the
-  previous event. Both need `protocol: http`; `lower` and the daemon refuse them in a
-  grpc imposter.
+  previous event, at most 2147483647 (a longer timer fires at once). Both need
+  `protocol: http`; `lower` and the daemon refuse them in a grpc imposter. `lower` also
+  refuses `websocket` on a method other than GET, `sse` on a MESSAGE, and `store`
+  beside any terminal verb, which would skip it.
 - **SSE on the wire.** `200 text/event-stream`, then `retry:` when set, then the
   scripted events, then whatever the channel carries. A stream without a channel ends
   after its last event; one with a channel stays open until the client leaves. A
   `: keep-alive` comment goes out every `keepAlive` ms (default 15000, 0 turns it off).
   `Last-Event-ID` resumes the script after the event with that id; channel events are
   live only, never replayed.
-- **WebSockets.** The imposter's server takes the `upgrade` event. The upgrade request
+- **WebSockets.** The imposter's server takes the `upgrade` event for `Upgrade:
+  websocket` only (`shouldUpgradeCallback`), so an h2c upgrade keeps its body. The upgrade request
   goes through the imposter as `GET <path>`; an answer other than `websocket` is
   written back as a plain HTTP response, so a gate refuses the upgrade with its own
   status. A plain GET that reaches a `websocket` answer gets 426. Each inbound message

@@ -700,13 +700,17 @@
   (for [k (sort (keys m)) :when (reserved-names k)]
     (str at "." k ": a " what " cannot be named " k " (use a name " not-reserved ")")))
 
+(def ^:private max-timer-ms
+  "The longest delay a JS timer keeps; a longer one fires after 1 ms."
+  2147483647)
+
 (def ^:private kinds
   "field kind -> [test, what the error says it must be]"
   {:string   [string? "a string"]
    :template [scalar? "a string"]
    :name     [#(and (string? %) (not (reserved-names %))) (str "a string " not-reserved)]
    :number   [finite? "a number"]
-   :ms       [#(and (integer? %) (>= % 0)) "a whole number of milliseconds"]
+   :ms       [#(and (integer? %) (<= 0 % max-timer-ms)) (str "a whole number of milliseconds up to " max-timer-ms)]
    :status   [status? "an HTTP status from 100 to 599"]
    :object   [map? "an object"]
    :names    [#(and (sequential? %) (every? string? %)) "a list of variable names"]
@@ -928,7 +932,9 @@
           (> (count terminal) 1)
           [(str "effect has more than one terminal action (" (str/join ", " terminal) ")")]
           (and (get effect "respond") (stream-verb effect))
-          [(str "respond and " (stream-verb effect) " both answer; keep one")])
+          [(str "respond and " (stream-verb effect) " both answer; keep one")]
+          (and (get effect "store") (seq terminal))
+          [(str "store runs only before respond, so " (first terminal) " would skip it")])
         (mapcat (fn [[k v]] (when-let [{:keys [check]} (by-name k)] (check k v))) (sort effect)))))))
 
 (defn collection-errors

@@ -454,7 +454,8 @@ fields are in [effects.md](effects.md#streams-sse-websocket-and-publish)). Becau
 stream is an effect, the verbs before it apply: `bind` names the channel, and a
 `lookup` or `find` miss answers with its own status, such as 401 or 404, instead of
 opening the stream. Other operations push to an open stream with `publish`. Streams need
-`protocol: http`.
+`protocol: http`; a `websocket` operation's method is `GET`, and `sse` cannot answer a
+`MESSAGE`.
 
 ```yaml
 operations:
@@ -519,7 +520,8 @@ works. The reply becomes outbound messages:
 
 The upgrade request is itself recorded as a `GET`. An upgrade that reaches any other
 answer gets that answer as plain HTTP, and a plain `GET` that reaches a `websocket`
-answer gets `426 Upgrade Required`. [`examples/chat.yaml`](../examples/chat.yaml) is a
+answer gets `426 Upgrade Required`. Only `Upgrade: websocket` is taken over; any other
+upgrade, such as curl's `h2c`, stays an ordinary request with its body. [`examples/chat.yaml`](../examples/chat.yaml) is a
 chat room served both ways.
 
 ## TLS
@@ -589,7 +591,9 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
   one-key map; two operations with one `id`, whether authored or from genes; a collection
   that two genes declare; no operations; a request missing
   `method` or an absolute `path`; an `effect` with no `respond` and no terminal verb
-  (a collection verb, `sse` or `websocket`); a stream answer in a grpc contract; a response `status` that
+  (a collection verb, `sse` or `websocket`); a `store` beside a terminal verb, which would
+  skip it; a stream answer in a grpc contract, a `websocket` on a method other than
+  `GET`, or an `sse` on a `MESSAGE`; a response `status` that
   isn't a number; an operation with nothing to serve (no selected example, no
   `bodySchema`, no effect); an operation that fails to compile (for example a JSONPath
   selector that isn't a plain path, or a non-numeric status, `ttl` or `window`); a

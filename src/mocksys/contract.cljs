@@ -310,14 +310,21 @@
     (cond-> (assoc resp "is" is')
       (seq copies) (update "behaviors" (fnil into []) copies))))
 
+(def ^:private stream-method-error
+  "stream verb -> the problem with serving it to a request of `method`, or nil."
+  {"sse"       #(when (= "MESSAGE" %) "sse cannot answer a MESSAGE: a message's reply is sent on its socket")
+   "websocket" #(when (not= "GET" %) "websocket needs request.method GET, the only method a WebSocket upgrade uses")})
+
 (defn- check-effect!
   "Throw the first problem with `op`'s effect, which runs over `settings`. Whether a
    called verb exists is left to the daemon, the only process that runs module code."
   [op settings modules? protocol]
   (when-let [e (first (concat (effect/errors (get op "effect")) (effect/collection-errors (get op "effect") settings)))]
     (throw (js/Error. e)))
-  (when-let [verb (and (not= "http" protocol) (effect/stream-verb (get op "effect")))]
-    (throw (js/Error. (str verb " needs protocol http"))))
+  (when-let [verb (effect/stream-verb (get op "effect"))]
+    (when (not= "http" protocol) (throw (js/Error. (str verb " needs protocol http"))))
+    (when-let [e ((stream-method-error verb) (str/upper-case (get-in op ["request" "method"] "")))]
+      (throw (js/Error. e))))
   (when-let [verb (and (not modules?) (get (first (effect/calls-of (get op "effect"))) "verb"))]
     (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`")))))
 
