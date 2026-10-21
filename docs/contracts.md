@@ -304,7 +304,9 @@ the table applies.
 
 Response headers become the reply's initial metadata, lower-cased. `Content-Type`,
 `Content-Length`, `Connection` and other hop-by-hop headers, and `grpc-*` names, are
-dropped. Rate-limit headers from a `limit` effect therefore reach the client as
+dropped. A header whose name ends in `-bin` carries base64, which the client receives as
+bytes. A header grpc-js refuses as metadata (a name outside `0-9 a-z _ . -`, or a value
+that is not printable ASCII) is dropped, and the daemon log names it. Rate-limit headers from a `limit` effect therefore reach the client as
 `x-rate-limit-*` metadata.
 
 ### Static responses and examples

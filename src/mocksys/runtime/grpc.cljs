@@ -60,15 +60,22 @@
 
 (def ^:private hop-headers #{"connection" "content-length" "content-type" "transfer-encoding" "keep-alive" "te" "host"})
 
-(defn- headers->metadata [headers]
-  (let [md (grpc/Metadata.)]
+(defn- headers->metadata
+  "Response headers as metadata: [md refused], where `refused` are log lines for
+   the headers grpc-js does not accept (a key outside [0-9a-z_.-], a value that is
+   not printable ASCII)."
+  [headers]
+  (let [md      (grpc/Metadata.)
+        refused (atom [])]
     (doseq [[k v] headers
             :let [k (str/lower-case k)]
             :when (not (or (hop-headers k) (str/starts-with? k "grpc-") (str/starts-with? k ":")))
             v (if (vector? v) v [v])]
       (try (.add md k (if (str/ends-with? k "-bin") (js/Buffer.from (str v) "base64") (str v)))
-           (catch :default _ nil)))
-    md))
+           (catch :default e
+             (swap! refused conj (str "dropped response header " (pr-str k) ", which grpc-js refuses as metadata: "
+                                      (ex-message e))))))
+    [md @refused]))
 
 (defn- code-of [c]
   (let [n (cond (string? c) (get codes (str/upper-case c))
@@ -84,12 +91,17 @@
   (let [fields (filter #(and (.-repeated ^js %) (not (.-map ^js %))) (.-fieldsArray reply-type))]
     (when (= 1 (count fields)) (.-name ^js (first fields)))))
 
-(defn- internal [details] {:code (codes "INTERNAL") :details details :log? true})
+
+(defn- internal
+  "An INTERNAL answer for a mock whose reply cannot be sent; the daemon log says
+   the same, since the mock's author may not be the one reading the error."
+  [details]
+  {:error {:code (codes "INTERNAL") :details details} :log [details]})
 
 (defn- reply-of
   "The reply for a 2xx body `doc`, checked against `reply-type` (see
-   mocksys.runtime.proto-json): {:value} or {:error}, and :unknown, the keys no
-   field declares."
+   mocksys.runtime.proto-json): {:value :unknown}, where :unknown are the keys no
+   field declares, or an `internal` answer."
   [doc body ^js reply-type]
   (let [repeated (repeated-field reply-type)
         doc      (if (and (array? doc) repeated) (js-obj repeated doc) doc)
@@ -97,32 +109,34 @@
     (if (and (object? doc) (not (array? doc)))
       (let [{:keys [value problems unknown]} (pj/encode reply-type doc)]
         (if (seq problems)
-          {:error (internal (str "the mock's reply does not encode as " type ": " (str/join "; " problems)))}
+          (internal (str "the mock's reply does not encode as " type ": " (str/join "; " problems)))
           {:value value :unknown unknown}))
       (let [shown (if (= ::none doc) body (js/JSON.stringify doc))]
-        {:error (internal (str "the mock's reply is not a JSON object"
-                               (when (array? doc) (str " (a JSON array needs a reply type with one repeated field; " type " has "
-                                                       (if (seq (filter #(.-repeated ^js %) (.-fieldsArray reply-type))) "several" "none") ")"))
-                               ": " (subs shown 0 (min 80 (count shown)))))}))))
+        (internal (str "the mock's reply is not a JSON object"
+                       (when (array? doc) (str " (a JSON array needs a reply type with one repeated field; " type " has "
+                                               (if (seq (filter #(.-repeated ^js %) (.-fieldsArray reply-type))) "several" "none") ")"))
+                       ": " (subs shown 0 (min 80 (count shown)))))))))
 
 (defn- outcome->reply
   "The gRPC answer for an imposter outcome ({:status :headers :body} or {:fault}):
-   {:value reply-object :unknown [paths]} or {:error {:code :details :log?}}, with
-   :metadata (the response headers) and :log, lines for the daemon log. An error
-   with :log? is the mock's own fault, so it is logged too."
+   {:value reply-object :unknown [paths]} or {:error {:code :details}}, with
+   :metadata (the response headers) and :log, lines for the daemon log."
   [{:keys [status body fault headers]} reply-type]
-  (let [meta (when-not fault (headers->metadata headers))
-        doc  (if (str/blank? body) #js {} (parse body))]
+  (let [[meta refused] (when-not fault (headers->metadata headers))
+        doc            (if (str/blank? body) #js {} (parse body))]
     (cond
       fault
       {:error {:code (codes "UNAVAILABLE") :details (str "fault " fault)}}
 
       (<= 200 status 299)
-      (assoc (reply-of doc body reply-type) :metadata meta)
+      (-> (reply-of doc body reply-type)
+          (assoc :metadata meta)
+          (update :log #(into (vec refused) %)))
 
       :else
       (let [obj (when (and (object? doc) (not (array? doc))) (js->clj doc))]
         {:metadata meta
+         :log      refused
          :error {:code    (or (code-of (get obj "grpcCode")) (codes (get http->grpc status "UNKNOWN")))
                  :details (or (some #(when (string? %) %) [(get obj "message") (get obj "error")])
                               (when (and (= ::none doc) (not (str/blank? body))) body)
@@ -143,15 +157,15 @@
     (fn [^js call callback]
       (-> (p/let [out (imposter/respond imp (request-of call path) {:proxy! no-proxy})
                   _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
-            (let [{:keys [metadata value error unknown]} (outcome->reply out reply-type)
+            (let [{:keys [metadata value error unknown log]} (outcome->reply out reply-type)
                   keys (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
               (when (and (seq keys) (not (@warned keys)))
                 (swap! warned conj keys)
                 (say (str "dropped reply field(s) " (subs (.-fullName reply-type) 1) " does not declare: " (str/join ", " keys))))
-              (when (:log? error) (say (:details error)))
+              (run! say log)
               (when metadata (.sendMetadata call metadata))
               (if error
-                (callback (clj->js (dissoc error :log?)))
+                (callback (clj->js error))
                 (callback nil value))))
           (p/catch (fn [e] (callback #js {:code (codes "INTERNAL") :details (ex-message e)})))))))
 
