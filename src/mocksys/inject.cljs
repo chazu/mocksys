@@ -292,11 +292,11 @@
     (if (sequential? c) c [c])))
 
 (defn- call-js
-  "Run one verb (callVerb in the prelude). Its result binds to `as`, unless it is
-   {respond: {...}}, which ends the request with that response."
+  "Run one verb (callVerb in the prelude). Its result binds to `as`, unless it is what
+   ctx.respond returned, which ends the request with that response."
   [c]
   (str "{var _v=callVerb(" (js (get c "verb")) ",deepInterp(" (js (get c "args" {})) ",V));"
-       "if(_v&&typeof _v==='object'&&_v.respond){return verbResp(_v.respond);}"
+       "if(_v instanceof Respond){return verbResp(" (js (get c "verb")) ",_v.spec);}"
        (when-let [as (get c "as")] (str "V[" (js as) "]=_v;"))
        "}"))
 
@@ -621,17 +621,33 @@
    ;; --- custom verbs. `verbs` is a free variable that compile-injection binds. A verb
    ;; runs synchronously, so one request's read-modify-write of `state` cannot
    ;; interleave with another's.
+   ;; ctx.respond brands its spec as a Respond, a class private to this injection, so
+   ;; only a value it returned ends the request; a plain {respond} is just a value.
+   "function Respond(s){this.spec=s;}"
    "function callVerb(n,args){var f=(typeof verbs!=='undefined'&&verbs)?verbs[n]:undefined;"
    "if(typeof f!=='function')throw new Error(\"verb '\"+n+\"' is not exported by the scenario's modules\");"
-   "var r;try{r=f({request:request,state:state,vars:Object.assign({},V),args:args,now:now(state)});}"
+   "var r;try{r=f({request:request,state:state,vars:Object.assign({},V),args:args,now:now(state),"
+   "respond:function(s){return new Respond(s);}});}"
    "catch(e){throw new Error(\"verb '\"+n+\"' threw: \"+(e&&e.message!==undefined?e.message:String(e)),{cause:e});}"
    ;; a rejected Promise nobody awaits would crash the daemon, so swallow it
    "if(r&&typeof r.then==='function'){if(typeof r.catch==='function')r.catch(function(){});"
    "throw new Error(\"verb '\"+n+\"' returned a Promise; verbs must be synchronous\");}return r;}"
-   "function verbResp(r){var h=Object.assign({},r.headers||{}),json=('json' in r),ct=false,k;"
-   "for(k in h){if(k.toLowerCase()==='content-type')ct=true;}if(json&&!ct)h['Content-Type']='application/json';"
-   "return {statusCode:r.status||200,headers:withRl(h),"
-   "body:json?JSON.stringify(r.json):(r.body==null?'':typeof r.body==='string'?r.body:JSON.stringify(r.body))};}"
+   "function verbResp(n,r){function bad(m){throw new Error(\"verb '\"+n+\"': ctx.respond \"+m);}"
+   "if(!r||typeof r!=='object'||Array.isArray(r))bad('takes an object {status, headers, json | text | body}');"
+   "var ks=Object.keys(r),extra=ks.filter(function(k){return ['status','headers','json','text','body'].indexOf(k)<0;});"
+   "if(extra.length)bad('got unknown key(s) '+extra.sort().join(', ')+' (use status, headers, json, text or body)');"
+   "var kind=ks.filter(function(k){return k==='json'||k==='text'||k==='body';});"
+   "if(kind.length>1)bad('takes one of json, text or body');kind=kind[0];"
+   "if(kind==='json'&&r.json===undefined)bad('json is undefined');"
+   "if(r.status!==undefined&&!(Number.isInteger(r.status)&&r.status>=100&&r.status<=599))bad('status must be an HTTP status code');"
+   "if(r.headers!==undefined&&(!r.headers||typeof r.headers!=='object'||Array.isArray(r.headers)))bad('headers must be an object');"
+   "if(kind==='text'&&typeof r.text!=='string')bad('text must be a string');"
+   "var body='';if(kind==='text'||(kind==='body'&&typeof r.body==='string'))body=r[kind];"
+   "else if(kind&&r[kind]!=null){try{body=JSON.stringify(r[kind]);}catch(e){bad(kind+' does not serialize: '+e.message);}"
+   "if(body===undefined)bad(kind+' does not serialize: it is a '+typeof r[kind]);}"
+   "var h=Object.assign({},r.headers),ct=false,k;"
+   "for(k in h){if(k.toLowerCase()==='content-type')ct=true;}if(kind==='json'&&!ct)h['Content-Type']='application/json';"
+   "return {statusCode:r.status||200,headers:withRl(h),body:body};}"
    "function signJwt(header,claims,pem){var enc=b64url(JSON.stringify(header))+'.'+b64url(JSON.stringify(claims));"
    "var sig=require('crypto').createSign('RSA-SHA256').update(enc).sign(pem);return enc+'.'+b64url(sig);}"))
 

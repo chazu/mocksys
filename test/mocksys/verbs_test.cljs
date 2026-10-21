@@ -97,9 +97,9 @@
 
 (deftest a-respond-key-is-just-a-value
   (let [vs (verbs {"gate" (fn [_] (clj->js {"respond" {"status" 401}}))})
-        r  (hook gate-op vs "x")]
+        r  (hook (assoc-in gate-op ["effect" "respond"] {"status" 202 "jsonVar" "gated"}) vs "x")]
     (is (= 202 (:status r)) "a plain {respond} object does not end the request")
-    (is (= "{\"respond\":{\"status\":401}}" (get-in r [:json "gated"]))
+    (is (= {"respond" {"status" 401}} (:json r))
         "it is bound to `as` like any other value")))
 
 (deftest ctx-respond-skips-later-writes
