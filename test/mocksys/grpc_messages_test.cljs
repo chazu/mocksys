@@ -3,6 +3,7 @@
    request carries only the fields the caller set, and a reply is checked against
    its type before it is sent."
   (:require [clojure.test :refer [deftest testing is async]]
+            [clojure.string :as str]
             [promesa.core :as p]
             ["node:path" :as path]
             [mocksys.contract :as contract]
@@ -68,3 +69,68 @@
           (fx/close c)
           (is (= 201 (:status made)) (pr-str (:json made)))
           (is (= ["r1" "r2"] (map #(get % "id") (get-in lst [:ok "recs"]))) (pr-str lst)))))))
+
+(defn- get-by-id
+  "An imposter whose rec.Recs/Get answers request id k with a 200 and body v, for
+   each [k v] of `bodies`, and whose List answers `list-body`."
+  [bodies list-body]
+  {"protocol" "grpc" "name" "t/rec"
+   "stubs" (conj (vec (for [[k body] bodies]
+                        {"predicates" [{"deepEquals" {"path" "/rec.Recs/Get"}}
+                                       {"equals" {"body" k} "jsonpath" {"selector" "$.id"}}]
+                         "responses" [{"is" {"statusCode" 200 "body" body}}]}))
+                 {"predicates" [{"deepEquals" {"path" "/rec.Recs/List"}}]
+                  "responses" [{"is" {"statusCode" 200 "body" list-body}}]})})
+
+(def ^:private codes fx/status)
+
+(deftest a-reply-is-checked-against-its-type
+  (async done
+    (fx/with-daemon done
+      (fn [admin]
+        (p/let [bodies {"camel"  {"id" "camel" "displayName" "Rex"}
+                        "loose"  {"id" "loose" "count" "7" "version" 5 "tier" 1 "labels" {"k" "v"}
+                                  "child" {"id" "c" "tier" "PRO"} "at" "2026-10-21T10:00:00.5Z" "flag" nil}
+                        "flag"   {"id" "flag" "flag" "yes"}
+                        "count"  {"id" "count" "count" "seven"}
+                        "tier"   {"id" "tier" "tier" "GOLD"}
+                        "tags"   {"id" "tags" "tags" "a"}
+                        "child"  {"id" "child" "child" "c"}
+                        "at"     {"id" "at" "at" "yesterday"}
+                        "deep"   {"id" "deep" "child" {"child" {"count" 1.5}}}
+                        "extra"  {"id" "extra" "colour" "red" "child" {"id" "c" "size" 2}}}
+                [port c made] (serve-rec! admin (get-by-id bodies [{"id" "a"} {"id" "b" "flag" 1}]) {})
+                call  (fn [k] (fx/unary c "Get" {:id k}))
+                [rs log] (fx/capturing-stderr
+                          #(p/let [rs (p/all (map call ["camel" "loose" "flag" "count" "tier" "tags"
+                                                        "child" "at" "deep" "extra"]))
+                                   again (call "extra")
+                                   lst   (fx/unary c "List" {})]
+                             (conj (vec rs) again lst)))
+                [camel loose flag cnt tier tags child at deep extra again lst] rs]
+          (fx/close c)
+          (is (= 201 (:status made)) (pr-str (:json made)))
+          (testing "a field may be named as in the proto or in lowerCamelCase"
+            (is (= "Rex" (get-in camel [:ok "display_name"])) (pr-str camel)))
+          (testing "JSON forms proto3 allows encode: numeric strings, enum numbers, an RFC 3339 Timestamp, null"
+            (is (= {"count" 7 "version" "5" "tier" "PRO" "labels" {"k" "v"} "flag" false
+                    "at" {"seconds" "1792576800" "nanos" 500000000}}
+                   (select-keys (:ok loose) ["count" "version" "tier" "labels" "flag" "at"]))
+                (pr-str loose))
+            (is (= {"id" "c" "tier" "PRO"} (select-keys (get-in loose [:ok "child"]) ["id" "tier"]))))
+          (testing "a value of the wrong type is INTERNAL, naming the field and the problem"
+            (doseq [[r field problem] [[flag "flag" "bool"] [cnt "count" "integer"] [tier "tier" "GOLD"]
+                                       [tags "tags" "array"] [child "child" "object"] [at "at" "RFC 3339"]
+                                       [deep "child.child.count" "integer"]
+                                       [lst "recs[1].flag" "bool"]]]
+              (is (= (codes "INTERNAL") (:code r)) (pr-str field r))
+              (is (re-find (re-pattern (str "\\b" (str/replace field #"[.\[\]]" "\\$&") ": [^;]*" problem))
+                           (str (:details r)))
+                  (pr-str field r))
+              (is (str/includes? log (str (:details r))) (str "the daemon log has " field))))
+          (testing "a key no field declares is dropped, with one warning in the daemon log"
+            (is (= "extra" (get-in extra [:ok "id"])) (pr-str extra))
+            (is (= "extra" (get-in again [:ok "id"])))
+            (is (= 1 (count (re-seq #"colour" log))) log)
+            (is (str/includes? log "child.size"))
+            (is (str/includes? log (str port)) "the warning names the mock")))))))
