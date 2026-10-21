@@ -12,7 +12,7 @@ Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides
 
 | Command | Notes |
 |---|---|
-| `kit okta [--users FILE.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--scenario NAME] [--port N]` | Generate an Okta twin (users/groups CRUD + OIDC). `--rate-limit` adds 429s; `--token-ttl` expires OIDC tokens on the virtual clock. |
+| `kit okta [--users FILE.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--issuer URL] [--signing-key FILE.pem] [--scenario NAME] [--port N]` | Generate an Okta twin (users/groups CRUD + OIDC). `--rate-limit` adds 429s (window `--rate-window`, default 60s); `--token-ttl` expires OIDC tokens on the virtual clock. `--signing-key` signs JWTs with your PEM instead of a key generated per `kit` run; `--issuer` is the issuer used when a request has no `Host`. |
 | `kit oauth2 [--provider github\|codeberg] [--users FILE.json] [--scenario NAME] [--port N]` | Generate an OAuth2 provider twin. |
 | `genes` | List the behavioral genes a kit composes, and the kits available. |
 | `conform <name> --corpus FILE [--against URL] [--ignore k1,k2] [--headers] [--port N]` | Replay a corpus at the twin (and, with `--against`, the live service); diff; exit 1 on drift. Omit `--corpus` to replay recorded traffic. See [twins.md](twins.md). |

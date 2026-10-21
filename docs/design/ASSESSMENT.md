@@ -283,3 +283,5 @@ New modules: `src/mocksys/inject.cljs`, `src/mocksys/kits.cljs`. Touched:
   bodies are matched in stateful ops via the inject layer instead.
 - No automated test suite was added (verification was manual against live mb);
   worth adding `*_test` coverage for `inject`/`contract` compilation next.
+  _Update 2026-10-21: done. `test/mocksys/` now covers `inject`, `contract`, `conform`
+  and the kits; run it with `mise run test`._

@@ -150,3 +150,9 @@ twin instead of compiled regex.
   A `resolve-from-collection` variant would unify them.
 - Body predicates / SCIM filters are bounded (no parenthesized groups); enough for
   Okta's common `filter=field op "v"` shape.
+
+_Update 2026-10-21: both bullets above are stale. The okta kit's OIDC now reads the
+live `users` collection (`oidc-live-ops` in `kits.cljs`, per `PLAN-OKTA-DEEPEN.md`), so
+SCIM-created `ACTIVE` users can log in; `oidc_users` is gone. The SCIM filter is now a
+full RFC 7644 parser (`eq ne co sw ew gt ge lt le pr`, `and`/`or`/`not`, parentheses),
+and a malformed filter answers `400` (commit b753ce6)._

@@ -16,8 +16,9 @@ origin:   authored               # authored | recorded | openapi | kit  (provena
 summary:  "..."                  # optional human/agent description
 port:     9099                   # optional pinned port (honored by run/env/up)
 fault:    {}                     # optional transport fault overlay (see Faults)
+issuer:   "http://..."           # optional origin for baseUrl/JWT iss when a request has no Host header
 seed:     {}                     # named arrays for effects to read (see effects.md)
-state:    {}                     # bucket/collection declarations (see effects.md)
+state:    {}                     # collections, clock, randomSeed (see effects.md)
 operations:
   - { ... }                      # one or more operations
 ```
@@ -124,9 +125,9 @@ responses:
 
 ## Transport faults
 
-A `fault` overlay injects failure on top of an operation's normal response. It lives on
-the contract, so it survives recompiles, and (except connection/protocol faults) coexists
-with templating.
+A `fault` overlay injects failure on top of every static operation's normal response.
+Operations with an `effect` are not affected. It lives on the contract, so it survives
+recompiles, and (except connection/protocol faults) coexists with templating.
 
 ```yaml
 fault:
@@ -147,7 +148,8 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
 - **Errors** (block compile): no operations; a request missing `method` or an absolute
   `path`; an `effect` with no `respond` and no collection verb; a response `status` that
   isn't a number; an operation with nothing to serve (no selected example, no
-  `bodySchema`, no effect).
+  `bodySchema`, no effect); an operation that fails to compile (for example a JSONPath
+  selector that isn't a plain path, or a non-numeric status, `ttl` or `window`).
 - **Warnings** (advisory): a selected example whose body diverges from its response
   `bodySchema` (lightweight, ajv-free: top-level type, required object props, one-level
   recurse).

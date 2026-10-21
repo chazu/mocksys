@@ -66,7 +66,7 @@ npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 ```
 
 Requires **Node 18+** (for global `fetch`). Mountebank installs as a dependency.
-`mocksys` starts and stops the Mountebank daemon for you; you never run `mb` directly.
+`mocksys` starts the Mountebank daemon for you (and leaves it running); you never run `mb` directly.
 Point `MOCKSYS_MB` at an `mb` executable to override how it's launched (otherwise it
 uses `mb` on your `PATH`, falling back to the `mountebank` package installed alongside mocksys).
 
@@ -142,9 +142,9 @@ servers + security schemes:
 
 ```sh
 mocksys import openapi ./stripe.yaml --service stripe
-mocksys examples stripe/createCharge          # see the named examples; [x] = in play
-mocksys use stripe/createCharge --op createCharge --example card_declined --only
-mocksys run stripe/createCharge
+mocksys examples stripe/createcharge          # ids are the slugged operationId; [x] = in play
+mocksys use stripe/createcharge --op createcharge --example card_declined --only
+mocksys run stripe/createcharge
 ```
 
 **By hand, after reading API docs or source** — scaffold a contract and edit it, or
@@ -188,9 +188,9 @@ Okta error envelope on misses — all driven by a declarative `effect`, never ha
 JavaScript:
 
 ```sh
-curl localhost:PORT/api/v1/users?filter='status eq "ACTIVE"'   # SCIM filter
+curl -G localhost:PORT/api/v1/users --data-urlencode 'filter=status eq "ACTIVE"'   # SCIM filter
 curl -X POST localhost:PORT/api/v1/users -d '{"profile":{"login":"x@y.com"}}'   # 201, id minted
-curl localhost:PORT/api/v1/users?limit=50                       # paginated; Link: rel="next"
+curl 'localhost:PORT/api/v1/users?limit=2'                      # paginated; Link: rel="next"
 ```
 
 Author your own stateful resource by declaring a collection in `contract.yaml`:
@@ -207,8 +207,8 @@ operations:
 ```
 
 **Validate fidelity with `conform`** — the digital-twin loop. Replay a request corpus at
-the twin and (with credentials) the live service, diff the responses normalized by the
-service's volatile fields, and exit non-zero on drift:
+the twin and (with credentials) the live service, diff the responses (bodies canonicalized,
+`--ignore` keys masked, volatile headers dropped with `--headers`), and exit non-zero on drift:
 
 ```sh
 mocksys conform okta/okta --corpus calls.json                    # golden: each status vs its `expect`
@@ -248,7 +248,8 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 |---|---|
 | `init <service>` | materialize a service template |
 | `record <service/name> [--target URL] [--port N]` | start a recording proxy |
-| `freeze <name>` | scrub + save the recording as a fixture |
+| `freeze <name> [--draft]` | scrub + save the recording as a fixture (`--draft`: land for review) |
+| `promote <name>` | make a reviewed draft the canonical contract |
 | `run <name> [--port N] [--env VAR]` | host a fixture as a mock |
 | `env <name>` | `eval "$(...)"` — wire a shell to the mock |
 | `inspect <name>` | agent-readable fixture summary |
@@ -270,6 +271,7 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `parameterize <name> --path '/a/{var}/b'` | loosen exact paths to templates |
 | `pack <name> [--out FILE] \| --stdout` / `unpack <file>` | portable bundles |
 | `ls` / `stop <name> \| --all` | catalog of scenarios / tear down |
+| `stack <name> <scenario>...` / `up <stack>` / `down <stack>` | define a named set of scenarios / bring it all up or down |
 | `rm <scenario\|service>` (alias `delete`) | delete from the store (stops it if live; commits the removal) |
 | `status` / `log [--n N]` | uncommitted changes / recent store history |
 | `restore <name> \| --all` | discard uncommitted local changes |

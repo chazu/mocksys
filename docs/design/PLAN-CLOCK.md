@@ -62,6 +62,10 @@ All steps implemented and verified against a live Mountebank; the smoke oracle i
 **27/27** (the prior 21 + 6 new clock/rate-limit checks), with default `kit okta`/`oauth2`
 unchanged (no clock endpoint, not rate-limited).
 
+_Update 2026-10-21: `kit okta` now always carries a virtual clock (`state.clock`,
+because it signs JWTs), so it gets the `/_mocksys/clock` endpoint and 3600 s tokens by
+default. `cmd-clock` has moved from `core.cljs` to `cli/twins.cljs`._
+
 - `inject.cljs`: `now`/`readBucket` prelude; `now` bind source; `store.ttl` + TTL-expiry on
   `consume`/`lookup`; the `limit` verb (clock-windowed counter → 429 + `X-Rate-Limit-*`);
   `clock-control-stub`; `contract-uses-clock?`/`clock-start`. `gen` inits `__now`.

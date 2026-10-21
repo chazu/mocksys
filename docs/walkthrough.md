@@ -43,12 +43,15 @@ mocksys kit okta --rate-limit 100 --token-ttl 3600 --port 9200
   · POST /api/v1/users        · GET /api/v1/users      · GET /api/v1/users/{id}
   · POST /api/v1/users/{id}    · DELETE /api/v1/users/{id}
   · POST /api/v1/groups       · GET /api/v1/groups     · ... groups CRUD ...
+  · PUT /api/v1/groups/{gid}/users/{uid}  · ... group membership ...
   · GET /oauth2/v1/authorize  · POST /oauth2/v1/token  · GET /oauth2/v1/userinfo
+  · GET /oauth2/v1/keys       · GET /.well-known/openid-configuration  · ...
 ```
 
-One command produced ~14 endpoints on one stateful service: users CRUD, groups CRUD, and
-an OIDC login flow — with rate limiting (`--rate-limit 100`) and tokens that expire after
-an hour (`--token-ttl 3600`). Now run it:
+One command produced 21 operations on one stateful service: users CRUD, groups CRUD, group
+membership, and an OIDC login flow with signed JWTs, JWKS and discovery — with rate
+limiting (`--rate-limit 100`) and tokens that expire after an hour (`--token-ttl 3600`).
+Now run it:
 
 ```sh
 mocksys run okta/okta --port 9200
@@ -75,9 +78,9 @@ curl "$B/api/v1/users/nope"                               # 404 — Okta's error
 **Filter** with Okta's SCIM-style syntax — and combine clauses:
 
 ```sh
-curl "$B/api/v1/users?filter=status eq \"ACTIVE\""
-curl "$B/api/v1/users?filter=profile.email sw \"alice\""               # starts-with
-curl "$B/api/v1/users?filter=status eq \"ACTIVE\" and profile.lastName eq \"Lee\""
+curl -G "$B/api/v1/users" --data-urlencode 'filter=status eq "ACTIVE"'
+curl -G "$B/api/v1/users" --data-urlencode 'filter=profile.email sw "alice"'   # starts-with
+curl -G "$B/api/v1/users" --data-urlencode 'filter=status eq "ACTIVE" and profile.lastName eq "Lee"'
 ```
 
 **Create** one — the server mints the id (a client-sent `id` is ignored, just like the
@@ -106,13 +109,13 @@ filtering and pagination. It's the heart of the twin.
 ## Step 3 — A peek under the hood (you can skip this)
 
 How does `GET /api/v1/users/{id}` work? Here's the contract operation the kit generated —
-this is the whole thing:
+this is the whole thing, minus the rate-limit lines:
 
 ```yaml
-- id: get-user
+- id: get-users
   request: { method: GET, path: "/api/v1/users/{id}" }
   effect:
-    bind: { id: { pathRegex: "/users/([^/]+)$" } }     # pull the id out of the URL
+    bind: { id: { pathRegex: "/api/v1/users/([^/]+)$" } }   # pull the id out of the URL
     get:  { collection: users, key: "{id}",            # look it up in the `users` collection
             miss: { status: 404, json: { errorCode: "E0000007" } } }   # ...or 404
 ```
@@ -132,18 +135,18 @@ endpoints *share state*:
 ```sh
 # 1. authorize as a seeded user -> a 302 redirect carrying a single-use code
 LOC=$(curl -s -D - -o /dev/null \
-  "$B/oauth2/v1/authorize?redirect_uri=http://app/cb&state=s&login=alice@example.com" \
+  "$B/oauth2/v1/authorize?redirect_uri=http://app/cb&state=s&login=alice@example.com&uid=00u1" \
   | grep -i location)
 CODE=$(echo "$LOC" | sed -n 's/.*code=\([^&]*\).*/\1/p' | tr -d '\r')
 
 # 2. exchange the code for a token (the code is single-use — try it twice and the 2nd 400s)
 TOK=$(curl -s -X POST "$B/oauth2/v1/token" -d "code=$CODE&scope=openid")
-#   {"access_token":"mockoauth_…","token_type":"bearer","scope":"openid","expires_in":3600}
+#   {"access_token":"eyJ…","id_token":"eyJ…","token_type":"Bearer","expires_in":3600,"scope":"openid"}
 ACCESS=$(echo "$TOK" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 
 # 3. use the bearer token -> the bound user
 curl "$B/oauth2/v1/userinfo" -H "Authorization: Bearer $ACCESS"
-#   {"id":"00u1","login":"alice@example.com","email":"alice@example.com","name":"Alice Ng"}
+#   {"sub":"00u1","name":"Alice Ng",...,"preferred_username":"alice@example.com","email":"alice@example.com",...}
 ```
 
 The code minted in step 1 is consumed in step 2; the token minted in step 2 is recognized
@@ -169,7 +172,7 @@ curl -s -o /dev/null -w '%{http_code}\n' "$B/oauth2/v1/userinfo" -H "Authorizati
 
 mocksys clock okta/okta advance 2h          # move the clock forward two hours
 curl -s "$B/oauth2/v1/userinfo" -H "Authorization: Bearer $ACCESS"
-#   {"message":"Bad credentials"}            <- the token has expired
+#   {"errorCode":"E0000011","errorSummary":"Invalid token provided",...}   <- 401, the token has expired
 ```
 
 We passed `--rate-limit 100`, so each client gets 100 requests per 60-second window. Every
@@ -203,14 +206,15 @@ talks to the running twin and never resets its data.
 
 A twin is only useful if it behaves like the real thing. `conform` replays a request
 corpus at the twin and (when you have credentials) at the *live* service, then diffs the
-responses — ignoring volatile noise like timestamps and request-ids. It exits non-zero on
+responses, masking any body keys you pass to `--ignore` (timestamps, server-minted ids) and,
+with `--headers`, dropping volatile headers like request-ids. It exits non-zero on
 any drift, so it drops into CI.
 
 ```sh
 mocksys conform okta/okta --corpus examples/okta-corpus.json
 #   ✓ GET /api/v1/users            →  200 (expect 200)
 #   ✓ GET /api/v1/users/...        →  404 (expect 404)
-#   ✓ conformant — 6 request(s), 0 diffs
+#   ✓ conformant — 17 request(s), 0 diffs
 ```
 
 Point it at a real tenant to drive the twin toward zero observable delta:
@@ -226,20 +230,23 @@ This is the loop that keeps a twin honest over time.
 
 ## Step 7 — How it's all composed: genes
 
-You never wrote any of those 14 endpoints. The `okta` kit is *composed from* reusable
+You never wrote any of those 21 operations. The `okta` kit is *composed from* reusable
 **genes** — proven behavioral patterns:
 
 ```sh
 mocksys genes
 #   · crud-collection  — REST resource: create/list/get/update/delete, filter + pagination
 #   · oidc-handshake   — authorize (picker + single-use code), token exchange, bearer userinfo
+#   · membership       — group membership: assign/unassign + list either side
+#   · jwt-signing      — RS256-signed access/id JWTs, published JWKS + OIDC discovery
 #   · error-envelope   — provider-shaped error bodies
 #   · rate-limit       — per-client budget over a virtual-clock window -> 429
 #   · virtual-clock    — deterministic, advanceable time
 ```
 
 The Okta twin is just: `crud-collection` (users) + `crud-collection` (groups) +
-`oidc-handshake` + `error-envelope`, with `rate-limit` and `virtual-clock` switched on.
+`membership` + `oidc-handshake` + `jwt-signing` + `error-envelope`, with `rate-limit` and
+`virtual-clock` switched on.
 Building a twin of another service is the same move — compose the genes it needs. (The
 same `oidc-handshake` gene powers the standalone `kit oauth2`.) That's how you propagate a
 working pattern from one twin to the next.

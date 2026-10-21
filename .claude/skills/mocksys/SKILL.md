@@ -79,7 +79,7 @@ mocksys clock <twin> advance 1h                                    # move the de
 
 - Scenarios live in one git-backed store at `~/.mocksys` (override `MOCKSYS_HOME`; set
   `MOCKSYS_HOME=./.mocks` to scope to a project).
-- `mocksys` starts/stops Mountebank for you — never run `mb` directly.
+- `mocksys` starts Mountebank for you (and leaves it running) — never run `mb` directly.
 - **Quote any contract path containing `{param}`**: `path: "/users/{id}"` (unquoted YAML
   flow-parsing mis-reads `{...}` as a map).
 - `assert` / `validate` / `conform` exit non-zero on failure — they drop into CI.

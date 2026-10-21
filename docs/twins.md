@@ -22,7 +22,7 @@ mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use 
 
 | Kit | Options | Produces |
 |---|---|---|
-| `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--issuer URL` `--signing-key FILE.pem` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo minting **signed RS256 JWTs** with published JWKS + discovery — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` makes OIDC tokens expire on the virtual clock, `--signing-key` pins the JWT key, `--issuer` fixes the discovery/`iss` host. |
+| `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--issuer URL` `--signing-key FILE.pem` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo minting **signed RS256 JWTs** with published JWKS + discovery — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` sets the OIDC token lifetime on the virtual clock (default 3600 s), `--signing-key` pins the JWT key, `--issuer` sets the JWT `iss`/`aud` for requests that carry no `Host` header. |
 | `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
 
 The default scenario id is `oauth/<provider>` for `oauth2` and `okta/okta` for `okta`;
@@ -50,14 +50,22 @@ mocksys genes        # list the genes (and kits) available
 | `crud-collection` | A REST resource: create / list / get / update / delete, SCIM-ish filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). |
 | `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Sources users from a **seed array** (oauth2) or a **live collection** with a dynamic picker + `status`-gated issuance (okta). Optional token TTL. |
 | `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). |
+| `jwt-signing` | RS256-signed access + id JWTs via the [`sign`](effects.md#sign--issue-a-signed-jwt-non-terminal) verb, with a published JWKS and OIDC discovery. |
 | `error-envelope` | Provider-shaped error bodies for misses (e.g. Okta `errorCode`/`errorSummary`). |
 | `rate-limit` | A per-client request budget over a [virtual-clock](effects.md#the-virtual-clock) window → `429` + `X-Rate-Limit-*` headers. |
 | `virtual-clock` | Deterministic, advanceable time (TTL expiry, rate-limit windows, `now` binds); driven by `mocksys clock`. |
 
-Genes live in the `kits` module. Each is a function returning `{:operations :collections
-:seed}`; a kit merges fragments with `compose`. To extend mocksys with a new twin, write a
-builder that composes the genes it needs (and add any new gene there), then register it in
-the `kits` map — `oauth2` and `okta` are the worked examples.
+Genes live in the `kits` module, but not every gene is a function. `crud-collection`,
+`oidc-handshake` and `membership` are functions returning a fragment `{:operations
+:collections :seed}`, and a kit merges fragments with `compose`. The others are options or
+helpers on those: `rate-limit` is `crud-collection`'s `:rate-limit` option, `jwt-signing`
+is the `:jwt` entry of `oidc-handshake`'s `:user-source`, `error-envelope` is the
+`okta-error` body helper, and `virtual-clock` is the contract's `state.clock` (or turns on
+implicitly, see [effects.md](effects.md#the-virtual-clock)). The `genes` list that `mocksys
+genes` prints is display-only. To extend mocksys with a new twin, write a builder that
+composes the genes it needs, register it in the `kits` map, and parse any new flags in
+`cmd-kit` (`src/mocksys/cli/twins.cljs`), which passes them to every builder. `oauth2` and
+`okta` are the worked examples.
 
 ### Anatomy of the `okta` twin
 
@@ -93,7 +101,8 @@ curl "$B/.well-known/openid-configuration"                         # OIDC discov
 The token endpoint issues real RS256 JWTs that verify against the twin's published JWKS,
 so third-party validators (`jose`, `jsonwebtoken`, …) accept them. The keypair is generated
 once per `kit okta` invocation; pass `--signing-key FILE.pem` to pin one across
-invocations, or `--issuer URL` to fix the `iss`/discovery host when there's no `Host` header.
+invocations, or `--issuer URL` to fix the JWT `iss`/`aud` when there's no `Host` header.
+The discovery documents always template their host from the request `Host` header.
 
 > **Security:** the private signing key is embedded in the contract JSON and shipped with
 > the twin — this is a *mock*; the key is not secret and must never be reused for anything
@@ -173,8 +182,9 @@ mocksys kit okta --users my-users.json     # a JSON array of user objects, repla
 ## conform — the fidelity loop
 
 `conform` replays a request corpus at the twin and, when you have credentials, at the
-**live** service, then diffs the responses — normalized by the service's volatile fields
-so request-ids and timestamps don't read as drift. It exits non-zero on any divergence, so
+**live** service, then diffs the responses. Bodies are canonicalized and `--ignore` keys
+masked; with `--headers`, the service's volatile headers are dropped. Server-generated body
+fields such as timestamps need `--ignore`. It exits non-zero on any divergence, so
 it drops straight into CI. This is how you drive a twin toward zero observable delta.
 
 ```sh
@@ -210,7 +220,7 @@ A JSON array of requests (or `{"requests":[...]}`):
 | | Default | With `--headers` |
 |---|---|---|
 | Status code | ✓ | ✓ |
-| Body | ✓ (JSON canonicalized: keys sorted; `--ignore` keys masked) | ✓ |
+| Body | ✓ (JSON canonicalized: keys sorted; `--ignore` keys masked; compact JWTs compared by decoded claims minus `jti`/`iat`/`exp`/`auth_time`/`nbf`) | ✓ |
 | Headers | — | ✓ (volatile headers dropped) |
 
 `--ignore k1,k2` masks those JSON keys (recursively) in both bodies before comparing — for
@@ -235,13 +245,15 @@ mocksys run okta/okta
 mocksys clock okta/okta advance 2h                   # the token is now expired (401)
 ```
 
-- `--token-ttl S` makes OIDC tokens expire after `S` virtual seconds (`store.ttl` under the
-  hood). A `lookup` of an expired token misses → `401`.
+- `--token-ttl S` sets the OIDC token lifetime to `S` virtual seconds (`store.ttl` under the
+  hood, plus `expires_in` and the JWT `exp`). The `okta` kit defaults to 3600; `oauth2`
+  tokens never expire unless a TTL is set. A `lookup` of an expired token misses → `401`.
 - `--rate-limit N [--rate-window S]` gives each client `N` requests per `S`-second window
   (default 60); past the budget, `429` + `X-Rate-Limit-*`. Advancing the clock past the
   window resets the budget.
 
-Both compose — the rate-limit window is keyed on the virtual clock — and both are exposed
-as genes (`rate-limit`, `virtual-clock`) for your own twins. See
+Both compose — the rate-limit window is keyed on the virtual clock. For your own twins,
+`rate-limit` is `crud-collection`'s `:rate-limit` option (or a hand-written `limit`), and
+the clock is `state.clock` or any clock-using verb. See
 [effects.md](effects.md#the-virtual-clock) for the primitives and `mocksys clock` for
 driving time.

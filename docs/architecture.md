@@ -30,7 +30,7 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `contract` | The canonical contract format. `lower` compiles a contract → imposter; `lift` reverse-engineers a contract from a recorded imposter; plus validation, example selection, response templating, path/predicate compilation. |
 | `inject` | The **stateful** layer. Compiles a declarative `effect` into a generated, dependency-free Mountebank response injection over a shared `state` object — handshake buckets and resource collections. The agent never writes JavaScript. |
 | `kits` | **Kits** and composable **genes**. A gene is a parameterized contract fragment (an OIDC handshake, a CRUD resource, an error envelope); a kit composes genes into a full twin. Ships `oauth2` and `okta`. |
-| `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff responses normalized by volatility. |
+| `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff status and canonical bodies (`--ignore` keys masked; volatile headers dropped when headers are compared). |
 | `mb` | The Mountebank admin-API client and daemon lifecycle (start/relaunch with `--localOnly` and `--allowInjection`, free-port allocation, imposter CRUD, replayable pull). |
 | `store` | On-disk layout under `~/.mocksys`: contracts, imposters, drafts, recordings, services, stacks. YAML read/write. |
 | `service` | Service templates (github, gitlab, aws-s3, stripe, generic-http): redact/volatile headers, default target, the consumer's base-URL env var. Composed with the base sets in `analyze`. |
@@ -38,7 +38,7 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `analyze` | Pure analysis over an imposter — the base secret/volatile header sets, matcher-hygiene/overfit detection — feeding `inspect` and `doctor`. |
 | `openapi` | OpenAPI/Swagger import: one scenario per operation, schemas + named examples, a synthesized service profile. |
 | `bundle` | `pack`/`unpack` — a scenario as a single self-describing `.mock.tgz` (git-less sharing). |
-| `git` | The git-backed shared store (`publish`/`status`/`log`/`remote`/`push`/`pull`/`restore`). |
+| `git` | The git-backed shared store (`publish`/`status`/`log`/`remote`/`push`/`pull`/`restore`/`rm`). |
 
 ## The compile pipeline
 
@@ -52,7 +52,7 @@ contract.yaml ──lower──▶ imposter.json ──POST /imposters──▶ 
 - **Static operation** → predicates (from `request`) + a `responses` array. Each selected
   example becomes an `{is {...}}` response (Mountebank round-robins multiple). Response
   templating (`{{request.*}}`) lifts into Mountebank `copy` behaviors; a transport
-  `fault` overlays a `wait`/`fault` behavior.
+  `fault` adds a `wait` behavior or swaps in a Mountebank `fault` response.
 - **Stateful operation** (`effect` present) → a single `{inject "<generated JS>"}`
   response. `inject/gen` embeds the seed and collection declarations as literals and
   emits a self-contained function over `(request, state, logger)`.
@@ -71,7 +71,7 @@ else `~/.mocksys`. (Set `MOCKSYS_HOME=./.mocks` to scope mocks to a single proje
 ```
 ~/.mocksys/
   services/<service>.yaml          # service profile (redact/volatile/target/env)
-  stacks/<name>.yaml               # a named set of scenarios + ports
+  stacks/<name>.yaml               # a named set of scenarios
   <service>/<name>/
     contract.yaml                  # the source of truth
     contract.draft.yaml            # a recording awaiting `promote` (optional)
@@ -122,7 +122,7 @@ collections are reseeded — each `conform` run starts from a clean, determinist
 |  | Static operation | Stateful operation (`effect`) |
 |---|---|---|
 | Source | `responses` + selected `examples` | `effect` verbs + `state` |
-| Compiles to | `{is {...}}` (+ `copy`/`fault` behaviors) | `{inject "<generated JS>"}` |
+| Compiles to | `{is {...}}` (+ `copy`/`wait` behaviors), or a `fault` | `{inject "<generated JS>"}` |
 | Dynamic from request | response templating `{{request.*}}` | `bind` + `{var}` interpolation |
 | Cross-request memory | none | shared `state` (buckets + collections) |
 | Needs `--allowInjection` | no | yes (managed automatically) |

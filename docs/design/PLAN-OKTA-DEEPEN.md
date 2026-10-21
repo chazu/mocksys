@@ -1,10 +1,14 @@
 # PLAN — Deepening the Okta twin: group membership, JWT/JWKS/discovery, live userinfo
 
 Status: rev 4 — verb set finalized against the compiler; docs drafted; ready to implement
+
+_Update 2026-10-21: implemented. Membership, JWT/JWKS/discovery and live userinfo ship
+in `kits.cljs` and `inject.cljs`, covered by `test/mocksys/membership_gene_test.cljs`,
+`okta_jwt_test.cljs` and `oidc_live_test.cljs`._
 Scope: three extensions to the `okta` kit (`src/mocksys/kits.cljs`) and the effect
 runtime (`src/mocksys/inject.cljs`, `contract.cljs`, `conform.cljs`, `docs/effects.md`).
 
-> **The new effect verbs are specified in [`docs/effects.md`](docs/effects.md) →
+> **The new effect verbs are specified in [`docs/effects.md`](../effects.md) →
 > "Joins, lookups, signing, rendering".** This plan references them; that doc is the
 > contract. Final set (down from rev-1's eight, after reading the compiler):
 >

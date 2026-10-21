@@ -35,20 +35,23 @@ Within one request the generated function runs in **read-then-write** order, reg
 the order you write the keys:
 
 1. `bind` — pull request values into variables.
-2. `consume` / `lookup` — read (and for `consume`, delete) bucket entries. A miss
+2. `limit` — the rate-limit guard. Over budget short-circuits with `429`.
+3. `consume` / `lookup` — read (and for `consume`, delete) bucket entries. A miss
    short-circuits with the verb's `miss` response.
-3. `resolve` — find a seed-array item. A miss short-circuits.
-4. `mint` — generate fresh ids (after reads, so a minted id can't be clobbered).
-5. **Terminal:** either a collection verb (`create`/`get`/`update`/`remove`/`list`) which
-   forms and returns its own response, **or** `store` (write a bucket) followed by
-   `respond`.
+4. `resolve` — find a seed-array item. A miss short-circuits.
+5. `find` — read collection rows, in list order. A miss short-circuits.
+6. `mint` — generate fresh ids (after reads, so a minted id can't be clobbered).
+7. `sign` — build JWTs (after `mint`, so a minted `jti` can be signed).
+8. **Terminal:** either a collection verb (`create`/`get`/`update`/`remove`/`list`/
+   `link`/`unlink`/`listJoin`/`render`) which forms and returns its own response, **or**
+   `store` (write a bucket) followed by `respond`.
 
 `state` persists for the imposter's lifetime. Reposting the imposter (every `run`/`conform`)
 starts fresh and reseeds.
 
 ## Variables and interpolation
 
-`bind`/`mint`/`consume`/`lookup`/`resolve` write into named variables. Anywhere a spec
+`bind`/`mint`/`consume`/`lookup`/`resolve`/`find`/`sign` write into named variables. Anywhere a spec
 takes a template string, `{name}` (single brace) is replaced with that variable's value.
 Object templates (e.g. a `create` body, a `respond` json) are interpolated deeply.
 
@@ -211,7 +214,7 @@ continues to its real response, which inherits the budget headers.
 A twin can carry a **virtual clock**: a "now" that is *frozen* until you advance it, so any
 time-based behavior (TTL expiry, rate-limit windows, `iat`/`exp` claims) is perfectly
 deterministic. Enable it explicitly, or it turns on automatically whenever an op uses
-`store.ttl`, `limit`, or a `now` bind.
+`store.ttl`, `limit`, `sign`, or a `now` bind.
 
 ```yaml
 state:
@@ -527,9 +530,10 @@ JSON).
 ### Compiler surface for a new terminal verb
 
 `link`/`unlink`/`listJoin`/`render` are **terminal** collection verbs. Adding one touches
-three sites (the read-phase verbs `find`/`sign` do not, since they end in a normal
-`respond`): the validator's terminal whitelist, the terminal-dispatch table, and this doc.
-See `PLAN-OKTA-DEEPEN.md` §1.4.
+four sites (the read-phase verbs `find`/`sign` do not, since they end in a normal
+`respond`): the `collection-verbs` list and the terminal-dispatch `case` in `inject.cljs`,
+the validator's terminal list in `contract.cljs`, and this doc.
+See [`design/PLAN-OKTA-DEEPEN.md`](design/PLAN-OKTA-DEEPEN.md) §1.4.
 
 ## The generated injection (under the hood)
 
@@ -541,7 +545,8 @@ the per-operation code is thin glue that binds, reads/writes, and returns. The s
 collection declarations are embedded as literals, so the function is dependency-free.
 Collections are seeded once into `state` (idempotent), so every operation on the imposter
 sees the same data. Stateful imposters require Mountebank's `--allowInjection`, which
-mocksys turns on automatically (`MOCKSYS_NO_INJECTION=1` opts out).
+mocksys turns on automatically. With `MOCKSYS_NO_INJECTION` set, `run` refuses to start a
+stateful scenario.
 
 ## Building twins this way
 
