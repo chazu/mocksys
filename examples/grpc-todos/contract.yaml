@@ -1,0 +1,59 @@
+# A stateful gRPC twin of the todo.v1.Todos service in todo.proto.
+# Stand it up (the proto travels with the contract, in the scenario directory):
+#   export MOCKSYS_HOME=./.mocks
+#   mkdir -p .mocks/demo/todos && cp examples/grpc-todos/{contract.yaml,todo.proto} .mocks/demo/todos/
+#   mocksys run demo/todos --port 9150
+# Then call it with any gRPC client, for example the one next to this file:
+#   node examples/grpc-todos/client.js localhost:9150 GetTodo '{"id":"t1"}'
+#   node examples/grpc-todos/client.js localhost:9150 CreateTodo '{"title":"ship it"}'
+#   node examples/grpc-todos/client.js localhost:9150 UpdateTodo '{"id":"t1","title":"Rewrite the proto"}'
+#   node examples/grpc-todos/client.js localhost:9150 ListTodos '{"filter":"done eq false"}'
+service: todo
+scenario: demo/todos
+origin: authored
+summary: create, get (NOT_FOUND on a miss), update and list todos over gRPC
+protocol: grpc
+proto: ./todo.proto
+seed:
+  todos:
+    - { id: t1, title: "Write the proto", done: true }
+state:
+  collections:
+    todos: { idField: id, seed: todos }
+operations:
+  - id: create
+    summary: CreateTodo mints an id and stores the todo
+    request: { rpc: todo.v1.Todos/CreateTodo }
+    effect:
+      bind:   { incoming: { bodyJson: true } }
+      mint:   { tid: { prefix: "t_" } }
+      create: { collection: todos, merge: [incoming], body: { id: "{tid}", done: false } }
+
+  - id: get
+    summary: GetTodo reads one; a miss is a 404, which reaches the client as NOT_FOUND
+    request: { rpc: todo.v1.Todos/GetTodo }
+    effect:
+      bind: { id: { body: id } }
+      get:  { collection: todos, key: "{id}", miss: { status: 404, json: { message: "no todo {id}" } } }
+
+  - id: update
+    summary: UpdateTodo merges the fields the request sets; a request carries only those, so done survives a rename
+    request: { rpc: todo.v1.Todos/UpdateTodo }
+    effect:
+      bind:   { id: { body: id }, incoming: { bodyJson: true } }
+      update: { collection: todos, key: "{id}", mergeVar: incoming, miss: { status: 404, json: { message: "no todo {id}" } } }
+
+  - id: list
+    summary: ListTodos returns every todo, or those the filter matches; the array fills ListTodosResponse.todos
+    request: { rpc: todo.v1.Todos/ListTodos }
+    effect:
+      bind: { q: { body: filter } }
+      list: { collection: todos, filter: "{q}" }
+
+  - id: delete
+    summary: DeleteTodo is refused with an explicit gRPC code
+    request: { rpc: todo.v1.Todos/DeleteTodo }
+    responses:
+      - status: 403
+        examples:
+          denied: { select: true, body: { grpcCode: PERMISSION_DENIED, message: "todos are append-only in this mock" } }

@@ -1,7 +1,7 @@
 ---
 name: mocksys
 description: >-
-  Stand up local mocks and full digital twins of external HTTP APIs (GitHub, Stripe,
+  Stand up local mocks and full digital twins of external HTTP and gRPC APIs (GitHub, Stripe,
   Okta, OAuth/OIDC providers, internal services) for tests and local dev — no real
   credentials or network. Use when you need to fake an external dependency: a simple
   fixture, a stateful resource API (CRUD + SCIM-style filtering + pagination), an
@@ -99,6 +99,16 @@ mocksys new acme/widgets                                   # scaffold a contract
 mocksys add acme/widgets --request 'GET /widgets/1' --status 200 --text ok
 mocksys validate acme/widgets && mocksys run acme/widgets
 ```
+
+**gRPC.** Set `protocol: grpc` and `proto: ./x.proto` (a file in the scenario directory)
+and give each operation `request: { rpc: pkg.Service/Method }` in place of method and
+path. Unary RPCs only. A call is matched as `POST /pkg.Service/Method` with metadata as
+headers and the message as a JSON body, so effects and `assert` work unchanged. The body
+holds only the fields the caller set, so a `mergeVar` update keeps the rest. A 2xx
+JSON body is the reply, a 404 reaches the client as `NOT_FOUND`, and a body
+`{ grpcCode, message }` picks the code. The reply is checked against its type: a value
+of the wrong type is `INTERNAL` naming the field, and `daemon.log` says the same. `run`/`env` print `localhost:PORT`; connect with
+insecure credentials. See `docs/contracts.md#grpc-unary` and `examples/grpc-todos/`.
 
 The full effect-language reference is `docs/effects.md`; `docs/walkthrough.md` is a
 narrated tour that builds the Okta twin; runnable contracts are in `examples/`.

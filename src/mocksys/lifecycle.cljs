@@ -3,12 +3,15 @@
   artifact. `compile!` lowers one to the other; `ensure-contract!` lifts a
   legacy/recorded imposter into a contract on demand; `ensure-running!` posts it
   to the mocksys daemon."
-  (:require [clojure.string :as str]
-            [promesa.core :as p]
+  (:require [promesa.core :as p]
+            [clojure.string :as str]
+            ["node:fs" :as fs]
+            ["node:path" :as path]
             [mocksys.mb :as mb]
             [mocksys.store :as store]
             [mocksys.service :as service]
             [mocksys.contract :as contract]
+            [mocksys.proto :as proto]
             [mocksys.inject :as inject]
             [mocksys.modules :as modules]))
 
@@ -19,7 +22,7 @@
   (let [contract* (store/read-contract scenario)
         port      (when (store/exists? scenario)
                     (try (get (store/read-imposter scenario) "port") (catch :default _ nil)))
-        imposter  (contract/lower contract* port (store/scenario-dir scenario))
+        imposter  (proto/with-descriptor (contract/lower contract* port (store/scenario-dir scenario)) contract* (store/scenario-dir scenario))
         prof      (service/effective scenario)]
     (store/write-imposter! scenario imposter)
     (store/write-mock! scenario (merge (or (store/read-mock scenario) {})
@@ -41,6 +44,25 @@
               c    (contract/lift (store/read-imposter scenario) scenario (:service prof))]
           (store/write-contract! scenario c)
           c))))
+
+(defn validate
+  "`contract/validate` for a scenario's contract, plus, for a grpc contract, the
+   checks that need its proto on disk. nil when the scenario has no contract."
+  [scenario]
+  (when-let [c (ensure-contract! scenario)]
+    (let [result (contract/validate c (store/scenario-dir scenario))]
+      (if (seq (contract/gene-errors c))
+        result
+        (update result :errors into
+                (proto/contract-errors c (get (contract/expand c) "operations") (store/scenario-dir scenario)))))))
+
+(defn address
+  "Where a consumer reaches `scenario` on `port`: a URL for HTTP, and host:port for
+   gRPC, which is the form gRPC clients take as a target."
+  [scenario port]
+  (if (proto/grpc? (store/read-contract scenario))
+    (str "localhost:" port)
+    (str "http://localhost:" port)))
 
 (defn ensure-compiled!
   "Rebuild imposter.json from the contract (lifting one first for a legacy
@@ -90,24 +112,49 @@
             (store/write-contract! scenario (assoc contract "port" port)))
           port)))))
 
-(defn watch-scenario!
-  "Recompile + reload `scenario` whenever its contract.yaml changes (debounced).
-   Keeps the process alive — the Tilt-style save-and-reload dev loop."
+(defn- watched-files
+  "What a scenario's mock is built from: contract.yaml and, for a grpc contract, the
+   proto and its imports inside the scenario directory."
   [scenario]
-  (let [timer (atom nil)]
-    (println (str "  ⊙ watching contract.yaml — edits recompile + reload (Ctrl-C to stop)"))
-    (store/watch-contract!
-     scenario
-     (fn []
-       (when @timer (js/clearTimeout @timer))
-       (reset! timer
-               (js/setTimeout
-                (fn []
-                  (-> (ensure-running! scenario nil)
-                      (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ http://localhost:" port))))
-                      (p/catch (fn [e] (binding [*print-fn* *print-err-fn*]
-                                         (println (str "  ✗ reload failed: " (.-message e))))))))
-                150))))))
+  (let [dir      (store/scenario-dir scenario)
+        contract (try (store/read-contract scenario) (catch :default _ nil))]
+    (into [(path/join dir "contract.yaml")] (proto/files-inside contract dir))))
+
+(defn watch-scenario!
+  "Recompile + reload `scenario` whenever a file it is built from changes
+   (debounced). The files are listed again after each reload, so an import added to
+   the proto is watched from then on, and a file an editor replaced on save is
+   watched again. Keeps the process alive (the Tilt-style save-and-reload dev
+   loop). Returns an object whose .close stops watching."
+  [scenario]
+  (let [timer    (atom nil)
+        watchers (atom {})]
+    (letfn [(drop! [f]
+              (some-> ^js (get @watchers f) .close)
+              (swap! watchers dissoc f))
+            (rearm! []
+              (let [want (set (filter #(fs/existsSync %) (watched-files scenario)))]
+                (run! drop! (remove want (keys @watchers)))
+                (doseq [f want :when (not (contains? @watchers f))]
+                  (let [^js w (fs/watch f (fn [event _] (changed f event)))]
+                    (.on w "error" (fn [_] (drop! f)))
+                    (swap! watchers assoc f w)))))
+            (reload! []
+              (-> (ensure-running! scenario nil)
+                  (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ " (address scenario port)))))
+                  (p/catch (fn [e] (binding [*print-fn* *print-err-fn*]
+                                     (println (str "  ✗ reload failed: " (.-message e))))))
+                  (p/finally (fn [] (rearm!)))))
+            (changed [f event]
+              (when (= "rename" event) (drop! f))
+              (when @timer (js/clearTimeout @timer))
+              (reset! timer (js/setTimeout reload! 150)))]
+      (rearm!)
+      (println (str "  ⊙ watching " (str/join ", " (sort (map #(path/basename %) (keys @watchers))))
+                    " — edits recompile + reload (Ctrl-C to stop)"))
+      #js {:close (fn []
+                    (when @timer (js/clearTimeout @timer))
+                    (run! drop! (keys @watchers)))})))
 
 (defn scenario-port-pin!
   "The scenario's pinned port, allocating+persisting a free one if it has none.

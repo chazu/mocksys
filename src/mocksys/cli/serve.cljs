@@ -9,6 +9,7 @@
             [mocksys.analyze :as analyze]
             [mocksys.service :as service]
             [mocksys.contract :as contract]
+            [mocksys.proto :as proto]
             [mocksys.lifecycle :as lifecycle]
             [mocksys.runtime :as runtime]
             [mocksys.version :refer [version]]
@@ -48,9 +49,10 @@
     (when-not scenario (die "run needs a scenario: run <name>"))
     (let [prof (service/effective scenario)]
       (p/let [port (lifecycle/ensure-running! scenario (:port opts))]
-        (println (str "▶ running '" scenario "' at http://localhost:" port))
-        (doseq [v (env-vars-for scenario opts prof)]
-          (println (str "  export " v "=http://localhost:" port)))
+        (let [at (lifecycle/address scenario port)]
+          (println (str "▶ running '" scenario "' at " at (when (proto/grpc? (store/read-contract scenario)) " (gRPC)")))
+          (doseq [v (env-vars-for scenario opts prof)]
+            (println (str "  export " v "=" at))))
         (when (:watch opts) (lifecycle/watch-scenario! scenario))))))
 
 (defn- tilt-snippet
@@ -58,7 +60,7 @@
    Tiltfile to run the mock as part of a dev stack (cf. snooker's mockoauth)."
   [scenario port vars]
   (let [res (str/replace scenario "/" "-")
-        url (str "http://localhost:" port)]
+        url (lifecycle/address scenario port)]
     (str "# mocksys mock for " scenario " — add to your Tiltfile\n"
          "local_resource(\n"
          "    '" res "',\n"
@@ -86,7 +88,7 @@
 
         (:json opts)
         (p/let [port (lifecycle/ensure-running! scenario (:port opts))]
-          (let [url (str "http://localhost:" port)]
+          (let [url (lifecycle/address scenario port)]
             (println (js/JSON.stringify
                       (clj->js (into {"scenario" scenario "port" port "url" url}
                                      (map (fn [v] [v url]) vars)))
@@ -95,7 +97,7 @@
         :else
         (p/let [port (lifecycle/ensure-running! scenario (:port opts))]
           (doseq [v vars]
-            (println (str "export " v "=http://localhost:" port)))
+            (println (str "export " v "=" (lifecycle/address scenario port))))
           (println (str "export MOCKSYS_SCENARIO=" scenario)))))))
 
 (defn- call-line [{:keys [method path status]} i]
@@ -114,8 +116,8 @@
                         (map-indexed
                          (fn [i s]
                            (if-let [op (nth ops i nil)]
-                             (assoc s :method (get-in op ["request" "method"])
-                                      :path   (get-in op ["request" "path"]))
+                             (let [req (contract/http-request (get op "request"))]
+                               (assoc s :method (get req "method") :path (get req "path")))
                              s))))
           redacted (->> stubs
                         (mapcat (fn [s] (keep (fn [[k v]] (when (= "REDACTED" v) k)) (:headers s))))
@@ -196,11 +198,11 @@
               (println (str "  " (inc i) ". " (get r "method") " " (get r "path")
                             (when (seq q) (str " ?" (str/join "&" (map (fn [[k v]] (str k "=" v)) q))))))))))) ))
 
-(defn- glob->re
+(defn glob->re
   "METHOD-PATH glob: `*` matches any run of chars; everything else is literal."
   [g]
   (re-pattern (str "^" (-> g
-                           (str/replace #"[.+?^${}()|\[\]\\]" "\\\\$&")
+                           (str/replace #"[.+?^${}()|\[\]\\]" "\\$&")
                            (str/replace #"\*" ".*"))
                    "$")))
 
@@ -305,10 +307,10 @@
         (p/then
          (fn [results]
            (println (str "▲ up '" name "' (" (count results) " scenario(s))"))
-           (doseq [[sc port _] results] (println (str "  ▶ " sc "  http://localhost:" port)))
+           (doseq [[sc port _] results] (println (str "  ▶ " sc "  " (lifecycle/address sc port))))
            (println)
-           (doseq [[_ port vars] results, v vars]
-             (println (str "export " v "=http://localhost:" port))))))))
+           (doseq [[sc port vars] results, v vars]
+             (println (str "export " v "=" (lifecycle/address sc port)))))))))
 
 (defn cmd-down
   "Stop every scenario in a stack:  down <stack>"

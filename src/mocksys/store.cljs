@@ -88,12 +88,6 @@
                                     (.-message e)
                                     "  (tip: quote paths with {param}, e.g. path: \"/users/{id}\")"))))))))
 
-(defn watch-contract!
-  "Invoke `on-change` (debounced by the caller) whenever the scenario's
-   contract.yaml changes on disk. Returns the fs watcher."
-  [name on-change]
-  (fs/watch (contract-file name) (fn [_event _filename] (on-change))))
-
 ;; A *draft* contract (contract.draft.yaml): recording can land here for review
 ;; before `promote` makes it the canonical contract — recording as an input, not
 ;; the source of truth.

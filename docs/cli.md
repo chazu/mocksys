@@ -21,8 +21,8 @@ stateful scenarios and scenarios that list `modules`.
 | `kit <name> [--<flag> VALUE ...] [--scenario NAME] [--port N]` | Generate a twin from any kit, built in or in `$MOCKSYS_HOME/kits/*.yaml`. A value is parsed by the flag's type (`string`, `number`, `boolean`, `file` or `json`), and a non-boolean flag needs a value. A flag the kit doesn't declare, such as `--rate-limit` on `oauth2`, is an error. See [twins.md](twins.md#writing-a-kit). |
 | `kits` | List every kit (built in and from `$MOCKSYS_HOME/kits`) with its source, flags and defaults. Warns about a user kit that shadows a built-in or fails to parse. |
 | `genes` | List each gene a contract can name under `genes:`, with its params (`*` = required), plus the capabilities that are built in rather than genes. See [contracts.md](contracts.md#genes). |
-| `conform <name> --corpus FILE [--against URL] [--ignore k1,k2] [--headers] [--port N]` | Replay a corpus at the twin (and, with `--against`, the live service); diff; exit 1 on drift. Omit `--corpus` to replay recorded traffic. See [twins.md](twins.md). |
-| `clock <name> [advance <dur> \| set <ts>]` | Read or move the twin's deterministic virtual clock. `advance 1h`/`30m`/`45s`/`2d`/`<secs>`; `set <epoch\|ISO>`. The twin must be running. See [effects.md](effects.md#the-virtual-clock). |
+| `conform <name> --corpus FILE [--against URL] [--ignore k1,k2] [--headers] [--port N]` | Replay a corpus at the twin (and, with `--against`, the live service); diff; exit 1 on drift. Omit `--corpus` to replay recorded traffic. Refuses a grpc mock. See [twins.md](twins.md). |
+| `clock <name> [advance <dur> \| set <ts>]` | Read or move the twin's deterministic virtual clock. A grpc twin's clock works the same way. `advance 1h`/`30m`/`45s`/`2d`/`<secs>`; `set <epoch\|ISO>`. The twin must be running. See [effects.md](effects.md#the-virtual-clock). |
 
 ## Author
 
@@ -35,19 +35,19 @@ stateful scenarios and scenarios that list `modules`.
 | `use <name> --op ID --example NAME [--off] [--only]` | (De)select an example. `--only` clears the operation's others first (happy↔error swap). Refuses a gene operation and names the gene. |
 | `fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--malformed-json] [--clear]` | Overlay a transport fault (stored on the contract). |
 | `parameterize <name> --path '/a/{var}/b'` | Loosen matching exact paths to a `{param}` template. Refuses when the template would change a gene operation. |
-| `validate <name>` | Structural + example-vs-schema check over the expanded operations; an unknown gene or gene param is an error. Exit 1 on errors. |
+| `validate <name>` | Structural + example-vs-schema check over the expanded operations; an unknown gene or gene param is an error. For a grpc contract, it also loads the proto and checks that each `rpc` exists and is unary. Exit 1 on errors. |
 | `compile <name>` | Rebuild `imposter.json` from `contract.yaml` (normally automatic). |
 
 ## Run & verify
 
 | Command | Notes |
 |---|---|
-| `run <name> [--port N] [--env VAR] [--watch]` | Host the mock; prints the port + export lines. `--watch` recompiles+reloads on `contract.yaml` edits. An explicit `--port` is pinned onto the contract. |
+| `run <name> [--port N] [--env VAR] [--watch]` | Host the mock; prints the port + export lines. `--watch` recompiles+reloads on edits to `contract.yaml` and, for a grpc contract, its proto and the imports inside the scenario directory. An explicit `--port` is pinned onto the contract. A grpc mock's address is `localhost:PORT`, with no scheme, in `run`, `env` and `up`. |
 | `env <name> [--json \| --tilt] [--port N] [--env VAR]` | Wire a consumer to the mock. Default: eval-safe `export` lines (`eval "$(mocksys env NAME)"`). `--json`: `{scenario, port, url, <vars>}`. `--tilt`: a Tiltfile `local_resource` (pins a port; doesn't start). |
 | `inspect <name>` | Agent-readable summary: calls, matchers, redactions, volatile fields. Shows friendly `/users/{id}` paths. |
 | `doctor <name> [--fix]` | Lint matcher hygiene / frozen volatile values. `--fix` scrubs the contract's response headers and recompiles. Overfit is only flagged on recorded scenarios. |
 | `requests <name> [--clear]` | What the running mock received (`--clear` resets). |
-| `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss. |
+| `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss. A gRPC call is `POST /pkg.Service/Method`, as `requests` shows it. |
 | `ls` | All scenarios + which are live. |
 | `stop <name> \| --all` | Tear down a running scenario (or all). |
 | `daemon stop` | Stop the mocksys daemon. Every mock it serves stops with it. The next command that serves a mock starts a new daemon. |
@@ -73,7 +73,7 @@ stateful scenarios and scenarios that list `modules`.
 
 | Command | Notes |
 |---|---|
-| `pack <name> [--out FILE] \| --stdout` | Bundle a scenario as a self-describing `.mock.tgz` (includes the service profile). |
+| `pack <name> [--out FILE] \| --stdout` | Bundle a scenario as a self-describing `.mock.tgz` (includes the service profile). A grpc scenario's proto travels in its directory; `pack` refuses a proto that reads files outside it. |
 | `unpack <file.mock.tgz>` | Restore a bundle into the store. |
 
 ## Store (git-backed `~/.mocksys`)

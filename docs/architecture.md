@@ -2,7 +2,7 @@
 
 ## What mocksys is
 
-mocksys is a CLI with its own runtime: a daemon (`mocksys daemon`) that serves HTTP
+mocksys is a CLI with its own runtime: a daemon (`mocksys daemon`) that serves HTTP and gRPC
 mocks and takes commands over an admin API on `127.0.0.1:2626`. The CLI starts the
 daemon on first use and keeps it behind the commands. You work in agent vocabulary
 (*service, scenario, contract, example, effect, kit, twin*), never in the daemon's
@@ -36,7 +36,8 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `kits` | **Kits** and composable **genes**. A gene is a parameterized contract fragment (an OIDC handshake, a CRUD resource, an error envelope); a kit composes genes into a full twin. Ships `oauth2` and `okta`. A contract can list genes under `genes:`, and a kit can be a YAML template, built in or in `$MOCKSYS_HOME/kits`. |
 | `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff status and canonical bodies (`--ignore` keys masked; volatile headers dropped when headers are compared). |
 | `mb` | The admin-API client and daemon lifecycle (spawn `mocksys daemon` when none answers, free-port allocation, imposter CRUD, replayable pull). The name predates the native runtime. |
-| `runtime` | The daemon: the admin API, one HTTP server per imposter, the proxy client for recording, and wire faults. `runtime.imposter` validates a posted imposter and resolves each request (stub choice, responses, behaviors, injection, proxyOnce recording); `runtime.match` evaluates predicates. |
+| `runtime` | The daemon: the admin API, one HTTP server per imposter, the proxy client for recording, and wire faults. `runtime.imposter` validates a posted imposter and resolves each request (stub choice, responses, behaviors, injection, proxyOnce recording); `runtime.match` evaluates predicates. `runtime.grpc` serves a `protocol: grpc` imposter with grpc-js, turning each call into a request for `runtime.imposter` and its outcome into a reply or a gRPC status. |
+| `proto` | A grpc contract's `.proto`, read on the CLI side with protobufjs: imports, the descriptor `compile!` embeds in the imposter, and the rpc checks `validate` runs. |
 | `store` | On-disk layout under `~/.mocksys`: contracts, imposters, drafts, recordings, services, stacks. YAML read/write. |
 | `service` | Service templates (github, gitlab, aws-s3, stripe, generic-http): redact/volatile headers, default target, the consumer's base-URL env var. Composed with the base sets in `analyze`. |
 | `scrub` | Redaction (secrets → a marker) and volatility stripping, in memory, on `freeze`. |
@@ -101,7 +102,8 @@ a contract lifted from its static responses; any `inject` in it is dropped.
 (so `requests`/`assert`/`conform` have data). Port resolution order: explicit `--port` >
 the already-running port > a port **pinned** on the contract > a fresh free port. An
 explicit `--port` is persisted onto the contract as a pin. `run --watch` recompiles and
-reloads on every `contract.yaml` change (the Tilt-style save-and-reload loop).
+reloads on every change to `contract.yaml` and, for a grpc contract, to its proto and the
+imports inside the scenario directory (the Tilt-style save-and-reload loop).
 
 **The daemon.** `mb/ensure-up!` checks `GET /` on the admin port, which answers with
 the daemon's name, mocksys version and pid. If nothing answers, it spawns a detached
@@ -121,11 +123,21 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 
 | Part | Supported |
 |---|---|
-| Imposter | `protocol: http`, `port`, `name`, `recordRequests`, `stubs`, `modules` (absolute paths), `calls` (verb names) |
+| Imposter | `protocol` (`http` or `grpc`), `port`, `name`, `recordRequests`, `stubs`, `modules` (absolute paths), `calls` (verb names); for `grpc`, a `descriptor` (the proto as protobufjs JSON) |
 | Predicates | `equals`, `deepEquals`, `matches`, `exists` over method, path, query, headers; `jsonpath` (plain paths) over the body. Case-insensitive, as in Mountebank. |
 | Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `inject` (source that evaluates to a function), `proxy` (`proxyOnce` with `predicateGenerators`; `to` is an origin with no path, query or fragment), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
 | Behaviors | `wait`, `copy` (regex or jsonpath) |
 | Admin routes | `GET /` (name, version, pid), `DELETE /` (stop), `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
+
+**gRPC.** A `grpc` imposter gets a grpc-js server in place of the HTTP one. It
+registers every unary method of the descriptor. A call becomes an ordinary request
+(`POST /pkg.Service/Method`, metadata as headers, the message as a JSON body), so the
+stubs, predicates, injections and state are the same code as for HTTP. The outcome maps
+back to a reply message or a gRPC status; [contracts.md](contracts.md#grpc-unary) gives
+the rules. `compile!` embeds the descriptor, so the daemon reads no scenario files and
+`imposter.json` stays self-contained. Streaming and undeclared methods answer
+`UNIMPLEMENTED`, and a grpc imposter rejects `proxy` responses. The bun binary serves
+gRPC too.
 
 **Injection.** Injections run in the daemon's process, called as
 `f(request, state, logger)` with `require` in scope. `state` is one object per

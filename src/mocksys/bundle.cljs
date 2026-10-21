@@ -8,6 +8,7 @@
             ["node:child_process" :as cp]
             ["node:fs" :as fs]
             [mocksys.store :as store]
+            [mocksys.proto :as proto]
             [mocksys.service :as service]))
 
 (defn- member-paths
@@ -24,6 +25,10 @@
   [scenario out]
   (when-not (store/exists? scenario)
     (throw (js/Error. (str "no frozen scenario '" scenario "' to pack"))))
+  (let [dir (store/scenario-dir scenario)]
+    (when-let [outside (seq (proto/files-outside (store/read-contract scenario) dir))]
+      (throw (js/Error. (str "cannot pack '" scenario "': its proto reads " (str/join ", " outside)
+                             ", outside the scenario directory; copy it into " dir)))))
   (let [args (concat ["-czf" out "-C" store/root] (member-paths scenario))
         ;; stream to our stdout only in "-" mode; otherwise let tar write the file
         res  (cp/spawnSync "tar" (clj->js args)
