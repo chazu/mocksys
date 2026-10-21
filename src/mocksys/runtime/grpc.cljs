@@ -30,11 +30,15 @@
   #js {:longs js/String :enums js/String :bytes js/String :defaults false :oneofs false})
 
 (def http->grpc
-  "The gRPC code for an HTTP status, the inverse of google.rpc.Code's HTTP
-   mapping. A status not listed is UNKNOWN."
+  "The gRPC code for an HTTP status, the inverse of google.rpc.Code's HTTP mapping
+   where it names one code for a status. 408, 412, 422 and 502 are not in that
+   mapping; they take the code whose meaning they share (a timeout, a failed
+   precondition, a bad argument, an unreachable upstream). A status not listed is
+   UNKNOWN."
   {400 "INVALID_ARGUMENT" 401 "UNAUTHENTICATED" 403 "PERMISSION_DENIED" 404 "NOT_FOUND"
-   409 "ALREADY_EXISTS" 429 "RESOURCE_EXHAUSTED" 499 "CANCELLED" 500 "INTERNAL"
-   501 "UNIMPLEMENTED" 503 "UNAVAILABLE" 504 "DEADLINE_EXCEEDED"})
+   408 "DEADLINE_EXCEEDED" 409 "ALREADY_EXISTS" 412 "FAILED_PRECONDITION"
+   422 "INVALID_ARGUMENT" 429 "RESOURCE_EXHAUSTED" 499 "CANCELLED" 500 "INTERNAL"
+   501 "UNIMPLEMENTED" 502 "UNAVAILABLE" 503 "UNAVAILABLE" 504 "DEADLINE_EXCEEDED"})
 
 (defn- bad [msg] (throw (ex-info msg {:code "bad data"})))
 

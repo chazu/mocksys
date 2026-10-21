@@ -270,22 +270,32 @@ The body is checked against the reply type before it is sent, not coerced:
 
 Any other status is a gRPC error. A JSON body of `{ grpcCode, message }` picks the code
 directly; `grpcCode` is a code name (`NOT_FOUND`) or number (`5`). Otherwise the HTTP
-status maps through this table, the inverse of `google.rpc.Code`'s HTTP mapping:
+status maps through this table. It inverts `google.rpc.Code`'s HTTP mapping where that
+mapping gives a status one code. For a status that mapping does not name, the table
+picks the code with the same meaning.
 
-| HTTP | gRPC |
-|---|---|
-| 400 | `INVALID_ARGUMENT` |
-| 401 | `UNAUTHENTICATED` |
-| 403 | `PERMISSION_DENIED` |
-| 404 | `NOT_FOUND` |
-| 409 | `ALREADY_EXISTS` |
-| 429 | `RESOURCE_EXHAUSTED` |
-| 499 | `CANCELLED` |
-| 500 | `INTERNAL` |
-| 501 | `UNIMPLEMENTED` |
-| 503 | `UNAVAILABLE` |
-| 504 | `DEADLINE_EXCEEDED` |
-| any other | `UNKNOWN` |
+| HTTP | gRPC | Why |
+|---|---|---|
+| 400 | `INVALID_ARGUMENT` | google.rpc.Code |
+| 401 | `UNAUTHENTICATED` | google.rpc.Code |
+| 403 | `PERMISSION_DENIED` | google.rpc.Code |
+| 404 | `NOT_FOUND` | google.rpc.Code |
+| 408 | `DEADLINE_EXCEEDED` | a request timeout, as 504 |
+| 409 | `ALREADY_EXISTS` | google.rpc.Code |
+| 412 | `FAILED_PRECONDITION` | a precondition failed |
+| 422 | `INVALID_ARGUMENT` | the request is well-formed but its content is wrong, as 400 |
+| 429 | `RESOURCE_EXHAUSTED` | google.rpc.Code |
+| 499 | `CANCELLED` | google.rpc.Code |
+| 500 | `INTERNAL` | google.rpc.Code |
+| 501 | `UNIMPLEMENTED` | google.rpc.Code |
+| 502 | `UNAVAILABLE` | the upstream cannot be reached, as 503 |
+| 503 | `UNAVAILABLE` | google.rpc.Code |
+| 504 | `DEADLINE_EXCEEDED` | google.rpc.Code |
+| any other | `UNKNOWN` | |
+
+google.rpc.Code also maps 400 to `FAILED_PRECONDITION` and `OUT_OF_RANGE`, 409 to
+`ABORTED`, and 500 to `UNKNOWN` and `DATA_LOSS`. To answer one of those, give a
+`grpcCode`.
 
 The error's message is the body's `message` when it is a string, else the body text, else
 `HTTP <status>`. A `grpcCode` that is not a valid code other than `OK` is ignored, and
