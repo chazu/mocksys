@@ -427,12 +427,14 @@
 (defn parameterize
   "Loosen every authored operation whose path the `{param}` template `tmpl`
    matches to that template. Returns {:contract :changed n}, or {:refused {:op
-   :gene}} when a gene operation's path would have to change too."
+   :gene}} when a gene operation's concrete path would have to change too. A gene
+   operation whose path is already a template is left alone."
   [contract tmpl]
   (let [re      (re-pattern (path->regex tmpl))
         widens? #(let [path (get-in % ["request" "path"])]
                    (and path (not= path tmpl) (re-matches re path)))]
-    (if-let [op (first (filter #(and (get % "gene") (widens? %)) (get (expand contract) "operations")))]
+    (if-let [op (first (filter #(and (get % "gene") (widens? %) (not (templated? (get-in % ["request" "path"]))))
+                               (get (expand contract) "operations")))]
       {:refused {:op (get op "id") :gene (get op "gene")}}
       (let [ops (get contract "operations")]
         {:contract (cond-> contract

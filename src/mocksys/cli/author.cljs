@@ -202,25 +202,15 @@
         tmpl     (:path opts)]
     (when-not scenario (die "parameterize needs a scenario: parameterize <name> --path '/a/{x}/b'"))
     (when-not (string? tmpl) (die "parameterize needs --path '/template/{with}/{vars}'"))
-    (let [c       (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
-          re      (re-pattern (contract/path->regex tmpl))
-          widens? #(let [path (get-in % ["request" "path"])]
-                     (and path (not= path tmpl) (re-matches re path)))
-          _       (when-let [op (first (filter #(and (get % "gene") (widens? %))
-                                               (get (contract/expand c) "operations")))]
-                    (die (gene-op-refusal (get op "id") (get op "gene"))))
-          changed (atom 0)
-          c'      (update c "operations"
-                          (fn [ops]
-                            (mapv (fn [op]
-                                    (if (widens? op)
-                                      (do (swap! changed inc)
-                                          (assoc-in op ["request" "path"] tmpl))
-                                      op))
-                                  ops)))]
-      (if (zero? @changed)
+    (let [c (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
+          {:keys [contract changed refused]} (contract/parameterize c tmpl)]
+      (cond
+        refused
+        (die (gene-op-refusal (:op refused) (:gene refused)))
+        (zero? changed)
         (println (str "no operations matched " tmpl " - nothing parameterized"))
-        (do (store/write-contract! scenario c')
+        :else
+        (do (store/write-contract! scenario contract)
             (lifecycle/compile! scenario)
-            (println (str "parameterized " @changed " operation(s) in '" scenario "' to " tmpl)))))))
+            (println (str "parameterized " changed " operation(s) in '" scenario "' to " tmpl)))))))
 
