@@ -123,7 +123,7 @@
   (async done
     (p/let [registry (atom {})
             port     (free-port)
-            created  (let [pr (#'runtime/create! registry (js/JSON.stringify (clj->js (imposter port []))))]
+            created  (let [pr (#'runtime/create! registry {} (js/JSON.stringify (clj->js (imposter port []))))]
                        (#'runtime/delete! registry port)
                        (-> pr (p/then (fn [[st _]] st)) (p/catch (fn [e] (ex-message e)))))
             wire     (-> (js/fetch (str "http://127.0.0.1:" port "/"))
@@ -329,3 +329,32 @@
          (is (= (:token again) (fs/readFileSync file "utf8")) "a new daemon replaces a stale file")
          (is (= 8r600 mode2))
          (p/all [((:stop! d)) ((:stop! again))]))))))
+
+;; --- the recorded-request cap ----------------------------------------------------
+
+(deftest the-daemon-caps-each-imposters-request-log
+  (async done
+    (settle done
+     (p/let [d    (daemon/start! {:max-requests 2})
+             port (free-port)
+             _    (call (str (:admin d) "/imposters") {:method "POST" :body (imposter port [])})
+             _    (p/all (for [i (range 3)] (call (str "http://127.0.0.1:" port "/r" i))))
+             full (call (str (:admin d) "/imposters/" port))]
+       (is (= 2 (count (get-in full [:json "requests"]))) "the log keeps the newest 2")
+       (is (= 3 (get-in full [:json "numberOfRequests"])) "every request still counts")
+       (is (= 1 (get-in full [:json "droppedRequests"])))
+       ((:stop! d))))))
+
+(deftest the-cap-comes-from-the-daemons-environment
+  (let [env  (.-env js/process)
+        prev (.-MOCKSYS_MAX_RECORDED_REQUESTS env)
+        with (fn [v] (if (nil? v) (js-delete env "MOCKSYS_MAX_RECORDED_REQUESTS") (set! (.-MOCKSYS_MAX_RECORDED_REQUESTS env) v))
+               (try (runtime/max-recorded-requests) (catch :default e (ex-message e))))]
+    (try
+      (is (= 10000 (with nil)) "10000 by default")
+      (is (= 10000 (with "")))
+      (is (= 5 (with "5")))
+      (is (= 0 (with "0")) "0 keeps none")
+      (doseq [bad ["-1" "1.5" "lots"]]
+        (is (= (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number, got " (pr-str bad)) (with bad))))
+      (finally (if (nil? prev) (js-delete env "MOCKSYS_MAX_RECORDED_REQUESTS") (set! (.-MOCKSYS_MAX_RECORDED_REQUESTS env) prev))))))

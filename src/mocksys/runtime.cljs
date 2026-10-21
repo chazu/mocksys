@@ -200,10 +200,10 @@
   "Register the imposter, then start its servers. The port is claimed in the
    registry before the servers listen, so a delete can land in between; the
    servers are only attached if the entry still holds this imposter."
-  [registry body]
+  [registry imposter-opts body]
   (let [spec  (try (js->clj (js/JSON.parse body))
                    (catch :default _ (throw (ex-info "the imposter is not valid JSON" {:code "bad data"}))))
-        imp   (imposter/create spec)
+        imp   (imposter/create spec imposter-opts)
         port  (imposter/port imp)
         mine? #(identical? imp (get-in @registry [port :imp]))]
     (when (contains? @registry port) (throw (in-use port)))
@@ -228,7 +228,7 @@
 (defn- route
   "[status body] for one admin call, or [status body after] where `after` runs once
    the response is sent."
-  [registry stop! method path query body]
+  [registry imposter-opts stop! method path query body]
   (let [segs (vec (remove str/blank? (str/split path #"/")))
         port (when (= "imposters" (first segs)) (some-> (get segs 1) js/parseInt))
         imp  (when port (:imp (get @registry port)))
@@ -244,7 +244,7 @@
       [200 {"imposters" (mapv #(imposter/to-json (:imp %) {:list? true}) (vals @registry))}]
 
       (and (= segs ["imposters"]) (= method "POST"))
-      (create! registry body)
+      (create! registry imposter-opts body)
 
       (and (= 2 (count segs)) (= method "DELETE") port)
       (delete! registry port)
@@ -275,7 +275,7 @@
    imposter directly or through DNS rebinding. Every call but GET / must also
    carry the daemon's token, which only the user who started it can read, so
    another local user cannot either."
-  [registry token stop!]
+  [registry imposter-opts token stop!]
   (fn [^js node-req ^js res]
     (let [hs  (.-headers node-req)
           url (js/URL. (.-url node-req) "http://localhost")]
@@ -290,12 +290,23 @@
 
         :else
         (-> (p/let [body            (read-body node-req)
-                    [st resp after] (route registry stop! (.-method node-req) (.-pathname url) (query-of url) body)]
+                    [st resp after] (route registry imposter-opts stop! (.-method node-req) (.-pathname url) (query-of url) body)]
               (when after (.once res "finish" after))
               (write-json! res st resp))
             (p/catch (fn [e]
                        (let [code (or (:code (ex-data e)) "internal error")]
                          (write-json! res (if (= code "internal error") 500 400) (error-body code (ex-message e)))))))))))
+
+(defn max-recorded-requests
+  "How many requests each imposter keeps: $MOCKSYS_MAX_RECORDED_REQUESTS, else
+   10000."
+  []
+  (let [v (.-MOCKSYS_MAX_RECORDED_REQUESTS js/process.env)]
+    (if (and v (not= v ""))
+      (if (re-matches #"\d+" v)
+        (js/parseInt v 10)
+        (throw (js/Error. (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number, got " (pr-str v)))))
+      imposter/default-max-requests)))
 
 (defn- write-token!
   "Write `token` to `file`, readable by this user only. The rename swaps the whole
@@ -309,10 +320,11 @@
 (defn start!
   "Run the daemon's admin API on `host`:`port` (port 0 picks one) under a fresh
    random token, written to `token-file` once the port is ours, so a daemon that
-   loses the port to another leaves that one's token in place. Resolves {:port :token :stop!}; `stop!`
+   loses the port to another leaves that one's token in place. Each imposter keeps
+   its newest `max-requests` requests. Resolves {:port :token :stop!}; `stop!`
    closes the admin API and every imposter. `DELETE /` runs the same stop, then
    `on-stop`."
-  [{:keys [host port on-stop token-file]}]
+  [{:keys [host port on-stop token-file max-requests] :or {max-requests imposter/default-max-requests}}]
   (let [registry (atom {})
         admin    (atom nil)
         token    (.toString (crypto/randomBytes 32) "hex")
@@ -320,7 +332,8 @@
                    (p/let [_ (p/all (map close! (mapcat :servers (vals @registry))))]
                      (reset! registry {})
                      (close! @admin)))]
-    (reset! admin (tracked-server (admin-handler registry token #(p/then (stop!) (or on-stop identity)))))
+    (reset! admin (tracked-server (admin-handler registry {:max-requests max-requests} token
+                                                 #(p/then (stop!) (or on-stop identity)))))
     (p/let [_ (listen! @admin port host)]
       (when token-file (write-token! token-file token))
       {:port  (.-port (.address ^js (:server @admin)))

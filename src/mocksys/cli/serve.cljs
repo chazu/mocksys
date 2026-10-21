@@ -36,6 +36,7 @@
                    _    (runtime/start! {:host         "127.0.0.1"
                                          :port         port
                                          :token-file   (mb/token-path port)
+                                         :max-requests (runtime/max-recorded-requests)
                                          :on-stop      #(js/process.exit 0)})]
              (println (str "mocksys " version " daemon on http://127.0.0.1:" port " (pid " (.-pid js/process) ")")))
     "stop" (p/let [mocks (mb/stop-daemon!)]
@@ -192,9 +193,11 @@
       (if (:clear opts)
         (p/do (mb/clear-requests! (:port imp))
               (println (str "✓ cleared recorded requests for " scenario)))
-        (p/let [full (mb/get-imposter (:port imp))
-                reqs (get full "requests")]
-          (println (str "# requests seen by " scenario " (" (count reqs) ")"))
+        (p/let [full    (mb/get-imposter (:port imp))
+                reqs    (get full "requests")
+                dropped (get full "droppedRequests" 0)]
+          (println (str "# requests seen by " scenario " (" (count reqs)
+                        (when (pos? dropped) (str "; " dropped " older dropped")) ")"))
           (doseq [[r i] (map vector reqs (range))]
             (let [q (get r "query")]
               (println (str "  " (inc i) ". " (get r "method") " " (get r "path")
@@ -207,6 +210,16 @@
                            (str/replace #"[.+?^${}()|\[\]\\]" "\\$&")
                            (str/replace #"\*" ".*"))
                    "$")))
+
+(defn assert-miss
+  "The report for an `assert` that found no match among `n` recorded requests. When
+   the daemon dropped older ones from the log, the call may have been among them."
+  [scenario saw n dropped]
+  (str "✗ did NOT see " saw "  (" n " request(s) recorded)"
+       (when (pos? dropped)
+         (str "\n  " dropped " older request(s) were dropped from the log, which keeps the newest " n
+              " (MOCKSYS_MAX_RECORDED_REQUESTS), so the call may be among them. Run `mocksys requests "
+              scenario " --clear` before the calls you assert on."))))
 
 (defn cmd-assert
   "Verify a request was observed: assert <name> --saw 'METHOD /path' (path may
@@ -229,7 +242,7 @@
         (if hit?
           (println (str "✓ saw " saw))
           (do (binding [*print-fn* *print-err-fn*]
-                (println (str "✗ did NOT see " saw "  (" (count reqs) " request(s) recorded)")))
+                (println (assert-miss scenario saw (count reqs) (get full "droppedRequests" 0))))
               (js/process.exit 1)))))))
 
 (defn cmd-ls [_]
