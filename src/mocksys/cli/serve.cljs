@@ -188,7 +188,7 @@
   "METHOD-PATH glob: `*` matches any run of chars; everything else is literal."
   [g]
   (re-pattern (str "^" (-> g
-                           (str/replace #"[.+?^${}()|\[\]\\]" "\\\\$&")
+                           (str/replace #"[.+?^${}()|\[\]\\]" "\\$&")
                            (str/replace #"\*" ".*"))
                    "$")))
 
