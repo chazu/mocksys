@@ -137,6 +137,31 @@
                   "text" "short and stout"}
                  (update-vals rs :details))))))))
 
+(deftest metadata-round-trips-and-what-grpc-refuses-is-logged
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (p/let [dir   (fx/kv-dir)
+                port  (free-port)
+                _     (admin-call (str admin "/imposters") "POST"
+                                  (kv-imposter dir port [(stub "kv.Store/Get" []
+                                                               {"statusCode" 200 "body" {}
+                                                                "headers" {"x-ok" "1" "x-blob-bin" "AQID"
+                                                                           "x-city" "Zürich" "x/slash" "v"}})]))
+                c     (fx/connect (path/join dir "kv.proto") "kv.Store" port)
+                [r log] (fx/capturing-stderr #(fx/unary c "Get" {:key "a"} {"x-tag-bin" (js/Buffer.from #js [9 8])}))
+                full  (admin-call (str admin "/imposters/" port) "GET" nil)]
+          (fx/close c)
+          (testing "a -bin request value is base64 in the request headers"
+            (is (= "CQg=" (get-in full [:json "requests" 0 "headers" "x-tag-bin"]))))
+          (testing "a -bin response header is base64, and reaches the client as bytes"
+            (is (= [1 2 3] (vec (js/Array.from (get-in r [:metadata "x-blob-bin"])))) (pr-str r))
+            (is (= "1" (get-in r [:metadata "x-ok"]))))
+          (testing "a header grpc-js refuses as metadata is named in the daemon log"
+            (is (not (contains? (:metadata r) "x-city")))
+            (is (str/includes? log "x-city") log)
+            (is (str/includes? log "x/slash") log)))))))
+
 (deftest what-is-not-served-is-unimplemented
   (async done
     (with-daemon done
