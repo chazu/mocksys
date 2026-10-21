@@ -20,9 +20,10 @@
 (def ^:private codes (js->clj (.-status grpc)))
 
 (def ^:private loader-options
-  "How a message reads as JSON: int64 and bytes (base64) as strings, so no
-   precision is lost; enums by name; unset fields at their proto3 defaults."
-  #js {:longs js/String :enums js/String :bytes js/String :defaults true :oneofs true})
+  "How a request reads as JSON: int64 and bytes (base64) as strings, so no
+   precision is lost; enums by name; only the fields the message carries, so an
+   update that merges the request leaves the fields it did not send."
+  #js {:longs js/String :enums js/String :bytes js/String :defaults false :oneofs false})
 
 (def http->grpc
   "The gRPC code for an HTTP status, the inverse of google.rpc.Code's HTTP

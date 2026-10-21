@@ -216,19 +216,28 @@ call as `POST /pkg.Service/Method`.
 
 ### Messages as JSON
 
-The proto is read with these options, on both the request and the reply:
+The proto is read with these options:
 
 - Field names stay as written in the `.proto` (`display_name` stays `display_name`).
 - `int64` and other 64-bit integers are strings, so no precision is lost.
 - `bytes` are base64 strings.
-- Enums are their value names (`"SECRET"`), and a reply may use the name or the number.
-- An unset field reads as its proto3 default (`""`, `0`, `false`, the first enum value),
-  and an unset message field reads as `null`. Predicates see the default, so
-  `present: true` on a string field holds only when the string is non-empty, and on a
-  number, bool or enum field it always holds. To branch on an unset number, match its
-  default value.
-- A field in a `oneof` also sets a virtual field, named after the `oneof`, to the name of
-  the member that is set.
+- Enums are their value names (`"SECRET"`).
+
+A request body holds only the fields the message carries. An unset field is absent, not
+its default, so an `update` with `mergeVar` over the request changes the fields the
+caller sent and keeps the rest, and `requests` shows what the caller sent.
+
+proto3 cannot tell a scalar set to its default (`""`, `0`, `false`, the first enum
+value) from an unset one. Most clients do not send a default scalar at all; grpc-js
+sends one the caller set explicitly. So a default-valued scalar may arrive absent:
+
+- `present: true` holds when the field arrived. `present: false` holds when it is unset
+  or the client left out its default.
+- A missing field reads as `""`, so `equals: ""` matches an unset string. `equals: 0` or
+  `equals: false` does not match an absent number or bool. To branch on a default,
+  match the non-default values and let the default fall through to the next operation.
+- A field marked `optional`, a `oneof` member, and a message field have presence, so
+  they arrive whenever the caller set them, even to a default.
 
 ### Replies and status codes
 
