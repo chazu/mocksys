@@ -1,7 +1,8 @@
 (ns mocksys.tls-cli-test
   "A contract's `tls` in a throwaway store: compile records it in imposter.json
    without key material, validate names a bad value, the address a consumer gets is
-   https://, and `run` posts a certificate a client trusting the CA accepts."
+   https://, `run` posts a certificate a client trusting the CA accepts or the
+   contract's own pair, and `tls ca` prints only the CA's path on stdout."
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
@@ -13,6 +14,7 @@
             [mocksys.lifecycle :as lifecycle]
             [mocksys.runtime :as runtime]
             [mocksys.tls :as tls]
+            [mocksys.cli.serve :as serve]
             [mocksys.grpc-fixture :as fx]))
 
 (defn- contract-yaml [tls-line]
@@ -114,3 +116,30 @@
                 _    (lifecycle/ensure-running! "t/secure" (str port))
                 res  (get-https port (fs/readFileSync (tls/ca-file) "utf8"))]
           (is (= {:status 200 :body {"hi" "there"}} res)))))))
+
+(deftest run-serves-the-contracts-own-pair
+  (async done
+    (let [other (with-redefs [store/root (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-other-ca-"))]
+                  (tls/ensure-ca!))
+          {:strs [cert key]} (tls/issue other)
+          home  (home-with {"t/secure/contract.yaml" (contract-yaml "tls: { cert: ./cert.pem, key: ./key.pem }")
+                            "t/secure/cert.pem" cert
+                            "t/secure/key.pem" key})]
+      (with-store-daemon done home
+        (fn []
+          (p/let [port (fx/free-port)
+                  _    (lifecycle/ensure-running! "t/secure" (str port))
+                  res  (get-https port (:cert other))]
+            (is (= {:status 200 :body {"hi" "there"}} res) "a client trusting the pair's own CA")
+            (is (not (fs/existsSync (tls/ca-dir))) "and no local CA is made for it")))))))
+
+(deftest tls-ca-prints-only-the-path-on-stdout
+  (let [home (home-with {})
+        err  (atom "")
+        out  (in-store home
+               #(binding [*print-err-fn* (fn [s] (swap! err str s))]
+                  (with-out-str (serve/cmd-tls {:pos ["ca"]}))))
+        ca   (path/join home "tls" "ca.pem")]
+    (is (= (str ca "\n") out) "so NODE_EXTRA_CA_CERTS=$(mocksys tls ca) works")
+    (is (fs/existsSync ca) "the CA is made on first use")
+    (is (str/includes? @err (str "curl --cacert " ca)) "the ways to trust it go to stderr")))

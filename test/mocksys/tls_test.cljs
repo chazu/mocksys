@@ -1,7 +1,8 @@
 (ns mocksys.tls-test
   "The local CA under $MOCKSYS_HOME/tls and the certificates it issues: created once
-   with private file modes and kept out of git, reused, replaced near expiry; a
-   mock's certificate verifies against it for localhost, 127.0.0.1 and ::1; and a
+   with private file modes and kept out of git, reused, moved aside and replaced
+   near expiry, never deleted, and one CA when CLIs race; a mock's certificate
+   verifies against it for localhost, 127.0.0.1 and ::1 and ends with it; and a
    contract's `tls` declaration, including a bring-your-own pair."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
@@ -204,6 +205,16 @@
               "a leaf stays within the 398 days clients accept")
           (is (.checkPrivateKey leaf (crypto/createPrivateKey key)) "the key is the certificate's"))))))
 
+(deftest a-mock-certificate-ends-no-later-than-its-ca
+  (let [home (fresh-home)]
+    (in-store home
+      (fn []
+        (let [ca   (tls/ensure-ca! {:now (- (js/Date.now) (* 3630 day))})
+              root (crypto/X509Certificate. (:cert ca))
+              leaf (crypto/X509Certificate. (get (tls/issue ca) "cert"))]
+          (is (< (js/Date.parse (.-validTo root)) (+ (js/Date.now) (* 30 day))) "a CA with weeks left")
+          (is (= (.-validTo root) (.-validTo leaf)) "issues a certificate that ends with it"))))))
+
 (deftest a-contract-declares-tls
   (let [home (fresh-home)
         dir  (path/join home "t" "secure")]
@@ -223,7 +234,16 @@
     (is (= (str "tls: ../../outside.pem is outside the scenario directory " dir)
            (thrown #(tls/declaration dir {"cert" "../../outside.pem" "key" "key.pem"}))))
     (is (= "tls: nope.pem: no such file"
-           (thrown #(tls/declaration dir {"cert" "cert.pem" "key" "nope.pem"}))))))
+           (thrown #(tls/declaration dir {"cert" "cert.pem" "key" "nope.pem"}))))
+    (testing "an absolute path outside the directory"
+      (let [outside (path/join home "outside.pem")]
+        (is (= (str "tls: " outside " is outside the scenario directory " dir)
+               (thrown #(tls/declaration dir {"cert" outside "key" "key.pem"}))))))
+    (testing "a link inside the directory to a file outside it"
+      (fs/symlinkSync (path/join home "outside.pem") (path/join dir "linked.pem"))
+      (is (= (str "tls: linked.pem is outside the scenario directory " dir
+                  " (it links to " (fs/realpathSync (path/join home "outside.pem")) ")")
+             (thrown #(tls/declaration dir {"cert" "cert.pem" "key" "linked.pem"})))))))
 
 (deftest credentials-are-what-the-daemon-serves
   (let [home (fresh-home)
