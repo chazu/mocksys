@@ -294,14 +294,15 @@ Runnable example contracts are in [`examples/`](examples/) (the ones the walkthr
 ClojureScript compiled with [shadow-cljs](https://github.com/thheller/shadow-cljs) to a
 Node script (`out/mocksys.js`), shipped as prebuilt JS over npm and as a
 `bun build --compile` binary via Homebrew — same Node runtime as Mountebank. Focused
-modules: `mb` (admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
+modules: `core` (entry point + command table), `cli.*` (one namespace per command
+group), `lifecycle` (compile/run a scenario), `mb` (admin-API client + daemon lifecycle), `store` (disk layout), `scrub`
 (redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
 (the canonical source format — compile/lift/validate/example selection), `inject` (the
 declarative stateful layer — handshakes + resource collections, compiled to generated
 Mountebank injections), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
 (differential fidelity vs reality), `openapi` (spec import, via
 `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle` (pack/unpack), `git` (the
-shared store), `core` (CLI).
+shared store).
 
 ## License
 

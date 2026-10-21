@@ -7,7 +7,8 @@
             ["node:fs" :as fs]
             ["node:os" :as os]
             ["node:path" :as path]
-            ["js-yaml" :as yaml]))
+            ["js-yaml" :as yaml])
+  (:refer-clojure :exclude [exists?]))
 
 ;; The store is a single shared library, not per-project: $MOCKSYS_HOME, else
 ;; ~/.mocksys. Set MOCKSYS_HOME=./.mocks in a project to scope mocks to it.

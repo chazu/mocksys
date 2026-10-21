@@ -9,15 +9,15 @@
             ["node:child_process" :as cp]
             [mocksys.store :as store]))
 
-(defn- git
+(defn- ^js git
   "Run git inside the store. Returns the spawnSync result (check .status)."
   ([args] (git args {}))
   ([args opts]
    (cp/spawnSync "git" (clj->js (concat ["-C" store/root] args))
                  (clj->js (merge {:encoding "utf8"} opts)))))
 
-(defn- out [res] (str/trim (or (.-stdout res) "")))
-(defn- ok? [res] (zero? (.-status res)))
+(defn- out [^js res] (str/trim (or (.-stdout res) "")))
+(defn- ok? [^js res] (zero? (.-status res)))
 
 (defn repo? []
   (fs/existsSync (path/join store/root ".git")))

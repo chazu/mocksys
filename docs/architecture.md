@@ -24,7 +24,9 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 
 | Module | Responsibility |
 |---|---|
-| `core` | The CLI: arg parsing, command dispatch, orchestration, all user-facing output. |
+| `core` | The entry point and the command table (name → handler). |
+| `cli.*` | One namespace per command group, holding all user-facing output: `cli.record` (init/record/freeze/promote), `cli.serve` (run/env/inspect/doctor/requests/assert/ls/stop/stacks), `cli.twins` (kit/genes/conform/clock), `cli.author` (import/new/add/validate/examples/use/fault/parameterize/compile), `cli.share` (store + pack/unpack), `cli.help` (prime/usage), `cli.util` (arg parsing). |
+| `lifecycle` | A scenario's lifecycle: `compile!` (contract → imposter.json), `ensure-contract!` (lift a legacy imposter), `ensure-running!` (recompile, then post to the daemon), watch mode, port pins. |
 | `contract` | The canonical contract format. `lower` compiles a contract → imposter; `lift` reverse-engineers a contract from a recorded imposter; plus validation, example selection, response templating, path/predicate compilation. |
 | `inject` | The **stateful** layer. Compiles a declarative `effect` into a generated, dependency-free Mountebank response injection over a shared `state` object — handshake buckets and resource collections. The agent never writes JavaScript. |
 | `kits` | **Kits** and composable **genes**. A gene is a parameterized contract fragment (an OIDC handshake, a CRUD resource, an error envelope); a kit composes genes into a full twin. Ships `oauth2` and `okta`. |
