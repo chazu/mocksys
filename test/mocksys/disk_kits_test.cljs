@@ -114,6 +114,40 @@ contract: { operations: [] }
     (testing "a missing directory has no kits"
       (is (= [] (store/kit-files (path/join dir "absent")))))))
 
+(deftest two-user-kits-with-one-name-warn-which-wins
+  (let [{reg :kits warnings :warnings}
+        (kits/with-user-kits [["/home/kits/a.yaml" "name: twin\ndoc: from a\ncontract: { operations: [] }\n"]
+                              ["/home/kits/b.yaml" "name: twin\ndoc: from b\ncontract: { operations: [] }\n"]])]
+    (is (= "from b" (get-in reg ["twin" :doc])))
+    (is (= ["user kit 'twin' is declared by /home/kits/a.yaml and /home/kits/b.yaml; using /home/kits/b.yaml"]
+           warnings))))
+
+(deftest an-unreadable-kit-file-is-skipped-with-a-warning
+  (let [{reg :kits warnings :warnings}
+        (kits/with-user-kits [["/home/kits/gone.yaml" nil "EACCES: permission denied"]
+                              ["/home/kits/good.yaml" "contract: { operations: [] }\n"]])]
+    (is (contains? reg "good"))
+    (is (= ["skipped kit /home/kits/gone.yaml: EACCES: permission denied"] warnings))))
+
+(deftest a-yml-kit-is-named-after-its-file
+  (let [{reg :kits} (kits/with-user-kits [["/home/kits/short.yml" "contract: { operations: [] }\n"]])]
+    (is (contains? reg "short"))))
+
+(deftest kit-files-skips-what-it-cannot-read
+  (let [dir (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-kits-"))]
+    (fs/writeFileSync (path/join dir "a.yml") "name: a\n")
+    (fs/mkdirSync (path/join dir "b.yaml"))
+    (fs/writeFileSync (path/join dir "c.yaml") "name: c\n")
+    (fs/chmodSync (path/join dir "c.yaml") 0)
+    (let [files (store/kit-files dir)]
+      (testing "a .yml file is a kit file"
+        (is (= [(path/join dir "a.yml") "name: a\n"] (first files))))
+      (testing "a directory and an unreadable file come back with a reason instead of throwing"
+        (is (= [(path/join dir "b.yaml") nil "not a file"] (second files)))
+        (is (= [(path/join dir "c.yaml") nil] (take 2 (nth files 2))))
+        (is (string? (nth (nth files 2) 2)))))
+    (fs/chmodSync (path/join dir "c.yaml") 420)))
+
 ;; --- the built-in oauth2 kit is YAML ------------------------------------------
 
 (def ^:private oauth2 (get kits/builtin-kits "oauth2"))
