@@ -243,12 +243,30 @@ sends one the caller set explicitly. So a default-valued scalar may arrive absen
 
 A response with a 2xx status is the reply:
 
-- A JSON object body is encoded as the reply message. Fields the message does not
-  declare are ignored.
+- A JSON object body is encoded as the reply message. The client fills the fields the
+  body leaves out with their defaults.
 - A JSON array body fills the reply message's one repeated field. This is how a `list`
-  effect answers `ListTodosResponse { repeated Todo todos = 1; }`. A reply type with no
-  repeated field, or several, cannot take an array.
+  effect answers `ListTodosResponse { repeated Todo todos = 1; }`. A `map` field does not
+  count. A reply type with no repeated field, or several, cannot take an array.
 - Any other body (text, or an array with no field to fill) is `INTERNAL`.
+
+The body is checked against the reply type before it is sent, not coerced:
+
+- A field is named as in the `.proto` (`display_name`) or by its proto3 JSON name
+  (`displayName`).
+- A value takes its proto3 JSON form. A `string` is a string and a `bool` is `true` or
+  `false`. A 32-bit integer is a number or a decimal string, and a 64-bit one is the
+  same. A `float` or `double` is a number, a numeric string, `"NaN"` or `"Infinity"`.
+  `bytes` is base64. An enum is a value name or a number. A message is an object, and a
+  `google.protobuf.Timestamp` may also be an RFC 3339 string
+  (`"2026-10-21T10:00:00Z"`). A repeated field is an array, and a `map` is an object.
+  `null` leaves the field unset.
+- A value of the wrong type fails the call with `INTERNAL`. The details name each field
+  and the problem, for example `done: expected a bool, got the string "yes"`, and the same
+  line goes to the daemon log (`$MOCKSYS_HOME/daemon.log`).
+- A key that names no field is dropped, and the daemon log names it once per method and
+  set of keys. A record in a collection often carries fields the reply type leaves out,
+  so this is not an error.
 
 Any other status is a gRPC error. A JSON body of `{ grpcCode, message }` picks the code
 directly; `grpcCode` is a code name (`NOT_FOUND`) or number (`5`). Otherwise the HTTP

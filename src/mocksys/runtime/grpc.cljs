@@ -6,8 +6,10 @@
   are the HTTP imposter's. Streaming methods, and methods the proto does not
   declare, answer UNIMPLEMENTED.
 
-  The outcome maps back as follows. A 2xx JSON object body is the reply message;
-  a JSON array fills the reply type's one repeated field. Any other status is a
+  The outcome maps back as follows. A 2xx JSON object body is the reply message,
+  checked against the reply type by mocksys.runtime.proto-json; a JSON array fills
+  the reply type's one repeated field. A reply that does not fit its type is
+  INTERNAL, and the daemon log (stderr) says why. Any other status is a
   gRPC error: a body {grpcCode, message} picks the code (a name or a number),
   otherwise `http->grpc` does. Response headers become initial metadata. A fault
   is UNAVAILABLE."
@@ -16,7 +18,8 @@
             ["@grpc/grpc-js" :as grpc]
             ["@grpc/proto-loader" :as loader]
             ["protobufjs" :as protobuf]
-            [mocksys.runtime.imposter :as imposter]))
+            [mocksys.runtime.imposter :as imposter]
+            [mocksys.runtime.proto-json :as pj]))
 
 (def ^:private codes (js->clj (.-status grpc)))
 
@@ -70,12 +73,40 @@
 
 (defn- parse [text] (try (js/JSON.parse text) (catch :default _ ::none)))
 
+(defn- repeated-field
+  "The name of the reply type's only repeated field, or nil. A map field is not
+   one, though the descriptor marks it repeated."
+  [^js reply-type]
+  (let [fields (filter #(and (.-repeated ^js %) (not (.-map ^js %))) (.-fieldsArray reply-type))]
+    (when (= 1 (count fields)) (.-name ^js (first fields)))))
+
+(defn- internal [details] {:code (codes "INTERNAL") :details details :log? true})
+
+(defn- reply-of
+  "The reply for a 2xx body `doc`, checked against `reply-type` (see
+   mocksys.runtime.proto-json): {:value} or {:error}, and :unknown, the keys no
+   field declares."
+  [doc body ^js reply-type]
+  (let [repeated (repeated-field reply-type)
+        doc      (if (and (array? doc) repeated) (js-obj repeated doc) doc)
+        type     (subs (.-fullName reply-type) 1)]
+    (if (and (object? doc) (not (array? doc)))
+      (let [{:keys [value problems unknown]} (pj/encode reply-type doc)]
+        (if (seq problems)
+          {:error (internal (str "the mock's reply does not encode as " type ": " (str/join "; " problems)))}
+          {:value value :unknown unknown}))
+      (let [shown (if (= ::none doc) body (js/JSON.stringify doc))]
+        {:error (internal (str "the mock's reply is not a JSON object"
+                               (when (array? doc) (str " (a JSON array needs a reply type with one repeated field; " type " has "
+                                                       (if (seq (filter #(.-repeated ^js %) (.-fieldsArray reply-type))) "several" "none") ")"))
+                               ": " (subs shown 0 (min 80 (count shown)))))}))))
+
 (defn- outcome->reply
   "The gRPC answer for an imposter outcome ({:status :headers :body} or {:fault}):
-   {:value reply-object} or {:error {:code :details}}, with :metadata (the
-   response headers). `repeated` names the reply type's only repeated field, if it
-   has exactly one."
-  [{:keys [status body fault headers]} repeated]
+   {:value reply-object :unknown [paths]} or {:error {:code :details :log?}}, with
+   :metadata (the response headers) and :log, lines for the daemon log. An error
+   with :log? is the mock's own fault, so it is logged too."
+  [{:keys [status body fault headers]} reply-type]
   (let [meta (when-not fault (headers->metadata headers))
         doc  (if (str/blank? body) #js {} (parse body))]
     (cond
@@ -83,14 +114,7 @@
       {:error {:code (codes "UNAVAILABLE") :details (str "fault " fault)}}
 
       (<= 200 status 299)
-      (cond
-        (and (object? doc) (not (array? doc))) {:metadata meta :value doc}
-        (and (array? doc) repeated)            {:metadata meta :value (js-obj repeated doc)}
-        :else {:metadata meta
-               :error {:code (codes "INTERNAL")
-                       :details (str "the mock's reply is not a JSON object"
-                                     (when (array? doc) (str " (a JSON array needs a reply type with one repeated field)"))
-                                     ": " (subs body 0 (min 80 (count body))))}})
+      (assoc (reply-of doc body reply-type) :metadata meta)
 
       :else
       (let [doc  (when (and (object? doc) (not (array? doc))) (js->clj doc))
@@ -101,26 +125,30 @@
                                 (not (str/blank? body)) body
                                 :else                 (str "HTTP " status))}}))))
 
-(defn- repeated-field
-  "The name of the reply type's only repeated field, or nil. A map field is not
-   one, though the descriptor marks it repeated."
-  [^js reply-type]
-  (let [fields (filter #(and (.-repeated ^js %) (not (.-map ^js %))) (.-fieldsArray reply-type))]
-    (when (= 1 (count fields)) (.-name ^js (first fields)))))
+(defn- log! [line] (.write js/process.stderr (str line "\n")))
 
 (defn- no-proxy [_ _]
   (p/rejected (js/Error. "proxy responses are not served over grpc")))
 
-(defn- handler [imp ^js md ^js reply-type]
-  (let [path     (.-path md)
-        repeated (repeated-field reply-type)]
+(defn- handler
+  "Answer calls to `md` from `imp`. A reply's unknown keys are logged once for each
+   set of them, since every call to a twin answers from the same records."
+  [imp ^js md ^js reply-type]
+  (let [path   (.-path md)
+        say    #(log! (str "grpc mock on port " (imposter/port imp) ", " path ": " %))
+        warned (atom #{})]
     (fn [^js call callback]
       (-> (p/let [out (imposter/respond imp (request-of call path) {:proxy! no-proxy})
                   _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
-            (let [{:keys [metadata value error]} (outcome->reply out repeated)]
+            (let [{:keys [metadata value error unknown]} (outcome->reply out reply-type)
+                  keys (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
+              (when (and (seq keys) (not (@warned keys)))
+                (swap! warned conj keys)
+                (say (str "dropped reply field(s) " (subs (.-fullName reply-type) 1) " does not declare: " (str/join ", " keys))))
+              (when (:log? error) (say (:details error)))
               (when metadata (.sendMetadata call metadata))
               (if error
-                (callback (clj->js error))
+                (callback (clj->js (dissoc error :log?)))
                 (callback nil value))))
           (p/catch (fn [e] (callback #js {:code (codes "INTERNAL") :details (ex-message e)})))))))
 
