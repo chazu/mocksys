@@ -297,8 +297,9 @@ google.rpc.Code also maps 400 to `FAILED_PRECONDITION` and `OUT_OF_RANGE`, 409 t
 `ABORTED`, and 500 to `UNKNOWN` and `DATA_LOSS`. To answer one of those, give a
 `grpcCode`.
 
-The error's message is the body's `message` when it is a string, else the body text, else
-`HTTP <status>`. A `grpcCode` that is not a valid code other than `OK` is ignored, and
+The error's message is the body's `message` when it is a string, else its `error` when
+that is a string (an OAuth error body), else the body when it is text and not JSON, else
+`HTTP <status>`. A JSON body is never sent as the message. A `grpcCode` that is not a valid code other than `OK` is ignored, and
 the table applies.
 
 Response headers become the reply's initial metadata, lower-cased. `Content-Type`,

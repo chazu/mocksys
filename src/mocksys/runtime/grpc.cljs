@@ -121,13 +121,12 @@
       (assoc (reply-of doc body reply-type) :metadata meta)
 
       :else
-      (let [doc  (when (and (object? doc) (not (array? doc))) (js->clj doc))
-            msg  (get doc "message")]
+      (let [obj (when (and (object? doc) (not (array? doc))) (js->clj doc))]
         {:metadata meta
-         :error {:code    (or (code-of (get doc "grpcCode")) (codes (get http->grpc status "UNKNOWN")))
-                 :details (cond (string? msg)        msg
-                                (not (str/blank? body)) body
-                                :else                 (str "HTTP " status))}}))))
+         :error {:code    (or (code-of (get obj "grpcCode")) (codes (get http->grpc status "UNKNOWN")))
+                 :details (or (some #(when (string? %) %) [(get obj "message") (get obj "error")])
+                              (when (and (= ::none doc) (not (str/blank? body))) body)
+                              (str "HTTP " status))}}))))
 
 (defn- log! [line] (.write js/process.stderr (str line "\n")))
 
