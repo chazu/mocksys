@@ -678,14 +678,14 @@
        :doc     doc
        :source  source
        :flags   decls
-       :modules (get template "modules")
-       :build  (fn [scenario opts]
-                 (let [given (into {} (filter (comp some? val)) (select-keys opts (keys decls)))]
-                   (-> (substitute template (merge defaults given))
-                       (assoc "service" (first (str/split scenario #"/"))
-                              "scenario" scenario
-                              "origin" "kit")
-                       (update "summary" #(or % doc)))))})))
+       :modules (let [ms (get template "modules")] (when-not (= [] ms) ms))
+       :build   (fn [scenario opts]
+                  (let [given (into {} (filter (comp some? val)) (select-keys opts (keys decls)))]
+                    (-> (substitute template (merge defaults given))
+                        (assoc "service" (first (str/split scenario #"/"))
+                               "scenario" scenario
+                               "origin" "kit")
+                        (update "summary" #(or % doc)))))})))
 
 (def ^:private builtin-yaml
   "Built-in YAML kits, inlined at build time: the bun binary cannot read repo files."

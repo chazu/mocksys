@@ -2,9 +2,8 @@
   "Custom verbs: the CommonJS files a contract lists under `modules:`. A module sets
   `module.exports = { verbs: { name(ctx) { ... } } }` and an effect runs a verb with
   `call`. The CLI resolves the paths, and `kit` copies a kit's modules into the
-  scenario, but it never runs a module. The daemon loads
-  the files on each post, checks the verbs the imposter calls, and hands them to the
-  generated injections."
+  scenario, but it never runs a module. The daemon loads the files on each post,
+  checks the verbs the imposter calls, and hands them to the generated injections."
   (:require [clojure.string :as str]
             ["node:fs" :as fs]
             ["node:path" :as path]
@@ -65,10 +64,10 @@
               (when-not (inside? root real)
                 (fail (str "copying " p " into " to " would write " real ", outside it")))
               [p (cond
-                   (not (fs/existsSync real))           :new
-                   (not (.isFile (fs/statSync real)))   (fail (str p " in " to " is not a file"))
+                   (not (fs/existsSync real)) :new
+                   (not (.isFile (fs/statSync real))) (fail (str p " in " to " is not a file"))
                    (.equals (fs/readFileSync real) (fs/readFileSync (path/resolve from p))) :same
-                   :else                                :changed)]))
+                   :else :changed)]))
           paths)))
 
 (defn copy!

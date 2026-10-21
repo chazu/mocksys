@@ -154,6 +154,10 @@ contract:
       (is (not (contains? reg "hooks")))
       (is (= ["skipped kit /home/kits/hooks.yaml: a kit that ships modules is a directory: move it to /home/kits/hooks/kit.yaml with its modules beside it"]
              warnings))))
+  (testing "an empty modules list ships nothing, so a single file may carry it"
+    (let [{reg :kits} (kits/with-user-kits [(entry "/home/kits/plain.yaml" "contract: { modules: [], operations: [] }\n")])]
+      (is (contains? reg "plain"))
+      (is (nil? (get-in reg ["plain" :modules])))))
   (testing "the directory form loads and records what it ships"
     (let [{reg :kits} (kits/with-user-kits [{:file "/home/kits/hooks/kit.yaml" :text module-kit :dir "/home/kits/hooks"}])]
       (is (= ["./verbs.js"] (get-in reg ["hooks" :modules]))))))
