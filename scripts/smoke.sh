@@ -274,6 +274,22 @@ check "imposter.json holds no key" 0 "$(grep -c 'PRIVATE KEY' "$MOCKSYS_HOME/dem
 echo '[{"method":"GET","path":"/whoami","expect":200}]' > "$WORK/https-corpus.json"
 "$MS" conform demo/https --corpus "$WORK/https-corpus.json" >/dev/null && code=0 || code=$?
 check "conform replays at an https twin" 0 "$code"
+"$MS" conform demo/https --corpus "$WORK/https-corpus.json" --against "https://localhost:$TP" >/dev/null 2>&1 && code=0 || code=$?
+check "conform --against checks the live service's certificate" 1 "$code"
+NODE_EXTRA_CA_CERTS="$CA" "$MS" conform demo/https --corpus "$WORK/https-corpus.json" --against "https://localhost:$TP" >/dev/null && code=0 || code=$?
+check "and passes once its CA is trusted" 0 "$code"
+check "env --json names the CA" "$CA" "$("$MS" env demo/https --json | json_field '.caCert')"
+cp "$CA" "$WORK/corp.pem"
+out="$(NODE_EXTRA_CA_CERTS="$WORK/corp.pem" "$MS" env demo/https 2>"$WORK/env.err")"
+check "env leaves a NODE_EXTRA_CA_CERTS of another file alone" 0 "$(echo "$out" | grep -c NODE_EXTRA_CA_CERTS || true)"
+check "and says to add the CA to that file" 1 \
+  "$(grep -c "NODE_EXTRA_CA_CERTS is already $WORK/corp.pem; add the certificate in $CA to that file" "$WORK/env.err")"
+"$MS" stack tls-stack demo/https >/dev/null
+check "up exports NODE_EXTRA_CA_CERTS" "export NODE_EXTRA_CA_CERTS=$CA" "$("$MS" up tls-stack | grep NODE_EXTRA_CA_CERTS)"
+out="$(NODE_EXTRA_CA_CERTS="$WORK/corp.pem" "$MS" up tls-stack 2>"$WORK/up.err")"
+check "up leaves a NODE_EXTRA_CA_CERTS of another file alone" 0 "$(echo "$out" | grep -c NODE_EXTRA_CA_CERTS || true)"
+check "and says to add the CA to that file" 1 \
+  "$(grep -c "NODE_EXTRA_CA_CERTS is already $WORK/corp.pem; add the certificate in $CA to that file" "$WORK/up.err")"
 mkdir -p "$MOCKSYS_HOME/demo/login-tls"
 { echo "tls: true"; sed "s#^scenario: demo/login-throttle#scenario: demo/login-tls#" "$ROOT/examples/login-throttle.yaml"; } > "$MOCKSYS_HOME/demo/login-tls/contract.yaml"
 "$MS" run demo/login-tls --port $((TP + 1)) >/dev/null
