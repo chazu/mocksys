@@ -15,7 +15,11 @@
   INTERNAL, and the daemon log (stderr) says why. Any other status is a
   gRPC error: a body {grpcCode, message} picks the code (a name or a number),
   otherwise `http->grpc` does. Response headers become initial metadata. A fault
-  is UNAVAILABLE."
+  is UNAVAILABLE.
+
+  A proxyOnce proxy (what `mocksys record` posts) forwards each call upstream with
+  grpc-js and saves the outcome as a stub of that shape, the status as HTTP by
+  `grpc->http` and the code as grpcCode. A bidirectional stream is not recorded."
   (:require [clojure.string :as str]
             [promesa.core :as p]
             ["@grpc/grpc-js" :as grpc]
@@ -166,14 +170,14 @@
   "A fn from one request to a promise of the answer `imp` gives it (see
    `outcome->reply`), once the response's wait is over. A reply's unknown keys are
    logged once for each set of them, since every call to a twin answers from the
-   same records."
-  [imp ^js md ^js reply-type]
+   same records. `proxy!` answers a proxy response (see imposter/respond)."
+  [imp ^js md ^js reply-type proxy!]
   (let [path    (.-path md)
         stream? (boolean (.-responseStream md))
         say     #(log! (str "grpc mock on port " (imposter/port imp) ", " path ": " %))
         warned  (atom #{})]
     (fn [request]
-      (p/let [out (imposter/respond imp request {:proxy! no-proxy})
+      (p/let [out (imposter/respond imp request {:proxy! proxy!})
               _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
         (let [{:keys [unknown log] :as answer} (outcome->reply out reply-type stream?)
               dropped (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
@@ -184,7 +188,10 @@
           (run! say log)
           answer)))))
 
-(defn- internal-error [e] #js {:code (codes "INTERNAL") :details (ex-message e)})
+(defn- call-error
+  "The gRPC error for a failed answer: the :grpc-code its ex-data names, or INTERNAL."
+  [e]
+  #js {:code (codes (:grpc-code (ex-data e) "INTERNAL")) :details (ex-message e)})
 
 (defn- reply!
   "Answer a call that takes one reply (unary, client streaming) with `callback`."
@@ -192,7 +199,7 @@
   (-> (p/let [{:keys [metadata values error]} (ask request)]
         (when metadata (.sendMetadata call metadata))
         (if error (callback (clj->js error)) (callback nil (first values))))
-      (p/catch #(callback (internal-error %)))))
+      (p/catch #(callback (call-error %)))))
 
 (defn- unary-handler [ask path]
   (fn [^js call callback]
@@ -215,7 +222,7 @@
           (if error
             (.emit call "error" (clj->js error))
             (do (run! #(.write call %) values) (.end call))))
-        (p/catch #(.emit call "error" (internal-error %))))))
+        (p/catch #(.emit call "error" (call-error %))))))
 
 (defn- bidi-handler
   "Each inbound message is one request, answered in order with its reply's
@@ -234,15 +241,96 @@
                             (when-not @over?
                               (when (and metadata (not @md?)) (reset! md? true) (.sendMetadata call metadata))
                               (if error (stop! (clj->js error)) (run! #(.write call %) values))))
-                          (p/catch #(stop! (internal-error %)))))))]
+                          (p/catch #(stop! (call-error %)))))))]
       (.on call "data" (fn [msg] (swap! turns p/then (turn msg))))
       (.on call "end" (fn [] (swap! turns p/then (fn [_] (stop! nil)))))
       (.on call "cancelled" #(reset! over? true)))))
 
+;; --- recording: forwarding a call upstream ---------------------------------------
+
+(def grpc->http
+  "The HTTP status google.rpc.Code maps each gRPC code to. A recorded error's stub
+   carries it next to the code, which picks the code on replay."
+  {"OK" 200 "CANCELLED" 499 "UNKNOWN" 500 "INVALID_ARGUMENT" 400 "DEADLINE_EXCEEDED" 504
+   "NOT_FOUND" 404 "ALREADY_EXISTS" 409 "PERMISSION_DENIED" 403 "RESOURCE_EXHAUSTED" 429
+   "FAILED_PRECONDITION" 400 "ABORTED" 409 "OUT_OF_RANGE" 400 "UNIMPLEMENTED" 501
+   "INTERNAL" 500 "UNAVAILABLE" 503 "DATA_LOSS" 500 "UNAUTHENTICATED" 401})
+
+(def ^:private code-names (into {} (map (fn [[k v]] [v k])) codes))
+
+(defn- upstream-address
+  "The grpc-js target for a proxy's `to`, an http:// origin."
+  [to]
+  (let [url (js/URL. to)]
+    (str (.-hostname url) ":" (if (seq (.-port url)) (.-port url) 80))))
+
+(defn- connected
+  "Resolve `client` once its channel is ready, or reject as soon as it fails to
+   connect, as the HTTP proxy does: a call on a channel that cannot connect fails
+   UNAVAILABLE, which would be recorded as the upstream's answer."
+  [^js client to]
+  (let [^js ch  (.getChannel client)
+        states  (.-connectivityState grpc)
+        refused #(ex-info (str "Unable to connect to " (pr-str to)) {:grpc-code "UNAVAILABLE"})]
+    (js/Promise.
+     (fn [resolve reject]
+       ((fn check []
+          (let [st (.getConnectivityState ch true)]
+            (condp = st
+              (.-READY states)             (resolve client)
+              (.-TRANSIENT_FAILURE states) (reject (refused))
+              (.watchConnectivityState ch st (+ (js/Date.now) 10000)
+                                       #(if % (reject (refused)) (check)))))))))))
+
+(defn- call-upstream
+  "Make the call `request` stands for on `client`; resolves its outcome as an `is`
+   response. A reply, or a server stream's messages as an array, is a 200 body; an
+   error is the status `grpc->http` gives its code, with a {grpcCode, message} body.
+   The upstream's initial metadata becomes the headers."
+  [^js client ^js md request]
+  (js/Promise.
+   (fn [resolve]
+     (let [path    (.-path md)
+           ser     (.-requestSerialize md)
+           de      (.-responseDeserialize md)
+           meta    (first (headers->metadata (dissoc (get request "headers") "user-agent")))
+           msg     (js/JSON.parse (get request "body"))
+           headers (atom {})
+           ok      #(resolve {"statusCode" 200 "headers" @headers "body" (js->clj %)})
+           fail    (fn [^js e]
+                     (let [code (get code-names (.-code e) "UNKNOWN")]
+                       (resolve {"statusCode" (grpc->http code) "headers" @headers
+                                 "body" {"grpcCode" code "message" (.-details e)}})))
+           done    (fn [err reply] (if err (fail err) (ok reply)))
+           ^js call (cond
+                      (.-requestStream md)  (let [^js c (.makeClientStreamRequest client path ser de meta done)]
+                                              (run! #(.write c %) msg)
+                                              (.end c)
+                                              c)
+                      (.-responseStream md) (let [^js c (.makeServerStreamRequest client path ser de msg meta)
+                                                  msgs  #js []]
+                                              (.on c "data" #(.push msgs %))
+                                              (.on c "end" #(ok msgs))
+                                              (.on c "error" fail)
+                                              c)
+                      :else                 (.makeUnaryRequest client path ser de msg meta done))]
+       (.on call "metadata" #(reset! headers (metadata->headers %)))))))
+
+(defn- forwarder
+  "The `proxy!` for calls to `md`: send each upstream, to the proxy's `to`, through
+   `client-for` (to -> grpc-js client)."
+  [^js md client-for]
+  (fn [cfg request]
+    (if (and (.-requestStream md) (.-responseStream md))
+      (p/rejected (ex-info (str "mocksys does not record bidirectional streams; " (.-path md) " is one")
+                           {:grpc-code "UNIMPLEMENTED"}))
+      (p/let [client (connected (client-for (get cfg "to")) (get cfg "to"))]
+        (call-upstream client md request)))))
+
 (defn- handler
   "The grpc-js handler for `md`, by its kind, answering from `imp`."
-  [imp ^js md ^js reply-type]
-  (let [ask  (asker imp md reply-type)
+  [imp ^js md ^js reply-type client-for]
+  (let [ask  (asker imp md reply-type (forwarder md client-for))
         path (.-path md)]
     (case [(boolean (.-requestStream md)) (boolean (.-responseStream md))]
       [false false] (unary-handler ask path)
@@ -294,14 +382,14 @@
 (defn- services
   "[[service-definition {method handler}]] for each service. `root` is the
    protobufjs reading of the same descriptor, which knows each reply's type."
-  [imp pkg-def ^js root]
+  [imp pkg-def ^js root client-for]
   (for [k (js-keys pkg-def)
         :let [^js svc (aget pkg-def k)]
         :when (nil? (.-format svc))]
     [svc (into {} (for [m (js-keys svc)
                         :let [^js md  (aget svc m)
                               ^js rpc (aget (.-methods (.lookupService root k)) m)]]
-                    [m (handler imp md (.-resolvedResponseType rpc))]))]))
+                    [m (handler imp md (.-resolvedResponseType rpc) client-for)]))]))
 
 (defn- bind! [^js server addr]
   (js/Promise.
@@ -316,8 +404,9 @@
   (boolean (re-find #"EADDRNOTAVAIL|EAFNOSUPPORT" (str (ex-message e)))))
 
 (defn- check-stubs! [imp]
-  (doseq [s (:stubs @imp), r (get-in s [:spec "responses"]) :when (contains? r "proxy")]
-    (bad (str "stubs[" (:id s) "]: proxy responses are not supported for protocol grpc"))))
+  (doseq [s (:stubs @imp), r (get-in s [:spec "responses"])
+          :when (str/starts-with? (str (get-in r ["proxy" "to"])) "https:")]
+    (bad (str "stubs[" (:id s) "]: a grpc proxy forwards without TLS, so proxy.to must be an http:// origin"))))
 
 (defn start!
   "Serve `imp` over gRPC on 127.0.0.1 and, where the host has IPv6, ::1, as the HTTP
@@ -328,8 +417,17 @@
   (let [[pkg-def root] (package-definition (get-in @imp [:spec "descriptor"]))
         ^js server     (grpc/Server.)
         port           (imposter/port imp)
-        stop           (fn [] (.forceShutdown server) (p/resolved nil))]
-    (doseq [[svc impl] (services imp pkg-def root)]
+        clients        (atom {})
+        client-for     (fn [to]
+                         (or (get @clients to)
+                             (get (swap! clients assoc to (grpc/Client. (upstream-address to)
+                                                                       (.createInsecure grpc/credentials)))
+                                  to)))
+        stop           (fn []
+                         (.forceShutdown server)
+                         (run! #(.close ^js %) (vals @clients))
+                         (p/resolved nil))]
+    (doseq [[svc impl] (services imp pkg-def root client-for)]
       (.addService server svc (clj->js impl)))
     (reflection/add! server pkg-def)
     (.register server clock-path (clock-handler imp) text-out text-in "unary")

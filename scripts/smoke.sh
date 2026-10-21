@@ -252,7 +252,24 @@ check "and describes its streams" 1 "$(node "$G/reflect.js" "localhost:$GP" todo
 "$MS" assert demo/todos --saw 'POST /todo.v1.Todos/CreateTodo' >/dev/null && code=0 || code=$?
 check "assert sees an rpc as its POST path" 0 "$code"
 check "env exports the target without a scheme" "export TODOS=localhost:$GP" "$("$MS" env demo/todos --env TODOS | head -1)"
+RP=$((PORT + 3))
+out="$("$MS" record demo/rec-todos --target "localhost:$GP" --proto "$G/todo.proto" --port $RP)"
+check "record proxies a gRPC upstream" 1 "$(echo "$out" | grep -c "proxy:  localhost:$RP (gRPC)  ->  localhost:$GP")"
+rec() { node "$G/client.js" "localhost:$RP" "$@" || true; }
+check "a call through the proxy is answered upstream" "Write the proto" "$(rec GetTodo '{"id":"t1"}' | json_field '.title')"
+check "and a server stream" "t1" "$(rec WatchTodos '{}' | each_field '.id')"
+check "and an error, with its code" PERMISSION_DENIED "$(rec DeleteTodo '{"id":"t1"}' | json_field '.code')"
+"$MS" freeze demo/rec-todos >/dev/null
+"$MS" validate demo/rec-todos >/dev/null && code=0 || code=$?
+check "the frozen contract validates against the copied proto" 0 "$code"
 "$MS" stop demo/todos >/dev/null
+"$MS" run demo/rec-todos --port $RP >/dev/null
+check "the frozen mock replays a reply" "Write the proto" "$(rec GetTodo '{"id":"t1"}' | json_field '.title')"
+check "a stream" "t1" "$(rec WatchTodos '{}' | each_field '.id')"
+check "and a code" PERMISSION_DENIED "$(rec DeleteTodo '{"id":"t1"}' | json_field '.code')"
+"$MS" stop demo/rec-todos >/dev/null
+out="$("$MS" record demo/tls --target https://localhost:$GP --proto "$G/todo.proto" 2>&1)" && code=0 || code=$?
+check "record refuses a TLS gRPC upstream" 1 "$code"
 
 echo "# daemon stop"
 "$MS" daemon stop >/dev/null

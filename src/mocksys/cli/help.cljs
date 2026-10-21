@@ -148,7 +148,7 @@
   (println)
   (println "  SEED FROM LIVE TRAFFIC (optional — needs real access)")
   (println "  mocksys init <service>                          github | gitlab | aws-s3 | stripe | generic-http")
-  (println "  mocksys record <service/name> [--target URL] [--port N]")
+  (println "  mocksys record <service/name> [--target URL] [--port N] [--proto FILE]   --proto: a gRPC upstream")
   (println "  mocksys freeze <name> [--draft]                 --draft: land for review, then `promote`")
   (println "  mocksys promote <name>                          make a reviewed draft canonical")
   (println)

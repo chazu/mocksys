@@ -385,8 +385,29 @@ grpcurl -plaintext -d '{"id":"t1"}' localhost:9150 todo.v1.Todos/GetTodo
 node examples/grpc-todos/reflect.js localhost:9150 todo.v1.Todos  # one line per rpc
 ```
 
-Out of scope: recording gRPC traffic (`record`,
-`freeze`), TLS, `proxy` responses, and `conform`, which replays HTTP. A grpc mock
+### Recording
+
+`record --proto` seeds a grpc contract from a live upstream, and `freeze` lifts it as
+it does for HTTP:
+
+```bash
+mocksys record acme/todos --target localhost:50051 --proto ./todo.proto --port 9160
+node examples/grpc-todos/client.js localhost:9160 GetTodo '{"id":"t1"}'   # forwarded upstream
+mocksys freeze acme/todos                                                  # protocol: grpc, rpc operations
+```
+
+`record` copies the proto, and the files it imports, into the scenario directory, so the
+frozen contract compiles from what the scenario holds. The proxy forwards each call
+with grpc-js, the metadata as it came, and keeps the first answer for each rpc, as the
+HTTP proxy keeps the first for each method and path. A reply is a 200 body, and a
+server stream's messages are a 200 array. An error is the HTTP status that
+`google.rpc.Code` maps its code to, with a `{ grpcCode, message }` body, so it replays
+with the same code. A client stream is recorded with its reply. A bidirectional stream
+is not recorded: the proxy answers it `UNIMPLEMENTED`. An upstream that does not
+connect fails the call `UNAVAILABLE`, and nothing is saved. `--target` is `host:port`
+without TLS; an `https://` target is refused.
+
+Out of scope: TLS, `proxy` responses in a contract, and `conform`, which replays HTTP. A grpc mock
 listens on `127.0.0.1` and `::1` without TLS, so a client connects with insecure
 credentials.
 

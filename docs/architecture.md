@@ -141,7 +141,8 @@ stream's reply array is its messages. Undeclared methods answer `UNIMPLEMENTED`.
 `runtime.grpc-reflection` adds server reflection (v1 and v1alpha) from the same
 descriptor. It registers the reflection service from proto text it carries, since
 `@grpc/reflection`'s own registration reads a file the bun binary cannot ship. A grpc
-imposter rejects `proxy` responses. The bun binary serves
+imposter's `proxy` response forwards each call upstream with grpc-js, which is how
+`record --proto` records a gRPC service. The bun binary serves
 gRPC too.
 
 **Injection.** Injections run in the daemon's process, called as

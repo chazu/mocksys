@@ -65,7 +65,7 @@ stateful scenarios and scenarios that list `modules`.
 | Command | Notes |
 |---|---|
 | `init <service>` | Materialize a service profile: `github` \| `gitlab` \| `aws-s3` \| `stripe` \| `generic-http`. |
-| `record <service/name> [--target URL] [--port N]` | Start a recording proxy to the target. |
+| `record <service/name> [--target URL] [--port N] [--proto FILE]` | Start a recording proxy to the target. With `--proto`, record a gRPC upstream at `--target host:port` (no TLS); the proto and its imports are copied into the scenario. See [contracts.md](contracts.md#recording). |
 | `freeze <name> [--draft]` | Scrub secrets + volatility (in memory) and lift a contract from the recording. `--draft` lands it for review (then `promote`). |
 | `promote <name>` | Make a reviewed draft the canonical contract. |
 

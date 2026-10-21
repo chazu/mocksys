@@ -257,7 +257,7 @@
                                                                     {"nested" {"S" {"methods" {"M" {"requestType" "Gone" "responseType" "Gone"}}}}}))
                 on-http (admin-call (str admin "/imposters") "POST" (assoc (kv-imposter dir port []) "protocol" "http"))
                 proxied (admin-call (str admin "/imposters") "POST"
-                                    (kv-imposter dir port [{"responses" [{"proxy" {"to" "http://127.0.0.1:1"}}]}]))
+                                    (kv-imposter dir port [{"responses" [{"proxy" {"to" "https://127.0.0.1:1"}}]}]))
                 listed  (admin-call (str admin "/imposters") "GET" nil)]
           (is (= [400 "protocol grpc needs a descriptor"]
                  [(:status no-desc) (get-in no-desc [:json "errors" 0 "message"])]))
@@ -265,7 +265,7 @@
           (is (str/starts-with? (str (get-in junk [:json "errors" 0 "message"])) "descriptor: "))
           (is (= [400 "unsupported field(s) descriptor"]
                  [(:status on-http) (get-in on-http [:json "errors" 0 "message"])]))
-          (is (= [400 "stubs[0]: proxy responses are not supported for protocol grpc"]
+          (is (= [400 "stubs[0]: a grpc proxy forwards without TLS, so proxy.to must be an http:// origin"]
                  [(:status proxied) (get-in proxied [:json "errors" 0 "message"])]))
           (is (= [] (get-in listed [:json "imposters"])) "no rejected imposter is left registered"))))))
 
