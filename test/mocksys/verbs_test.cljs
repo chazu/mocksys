@@ -371,6 +371,34 @@
             (is (= [400 "call: verb 'upper' is not exported by the modules (they export lower, title)"] other))
             (is (= [400 (str "modules: verb 'upper' is exported by both " (abs "a.js") " and " (abs "b.js"))] both))))))))
 
+(deftest one-module-listed-twice-loads-once
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (let [dir (scenario-dir! {"verbs.js" upper-module})
+              c   (shout-contract ["./verbs.js" "verbs.js"])]
+          (is (= ["verbs.js"] (get (contract/lower c nil dir) "modules")))
+          (p/let [port   (free-port)
+                  made   (post! admin (lowered c dir) port)
+                  served (call (str "http://127.0.0.1:" port "/shout?w=hey"))]
+            (is (= 201 (:status made)) "./verbs.js and verbs.js are one module, not two exporting upper")
+            (is (= {"loud" "HEY!"} (:json served)))))))))
+
+(deftest a-module-that-does-not-load-says-where
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (let [dir (scenario-dir! {"throws.js" "const a = 1;\n\nthrow new Error('boom');\n"
+                                  "syntax.js" "module.exports = {"
+                                  "string.js" "throw 'oops';"})
+              abs #(path/join dir %)]
+          (p/let [throws (post-error admin dir ["./throws.js"])
+                  syntax (post-error admin dir ["./syntax.js"])
+                  string (post-error admin dir ["./string.js"])]
+            (is (str/includes? (str (second throws)) (str (abs "throws.js") " does not load: boom (at " (abs "throws.js") ":3:7)")))
+            (is (str/includes? (str (second syntax)) (str "(at " (abs "syntax.js") ":1)")))
+            (is (str/includes? (str (second string)) (str (abs "string.js") " does not load: it threw \"oops\", not an Error")))))))))
+
 ;; --- the lifecycle -------------------------------------------------------------
 
 (defn- with-store
