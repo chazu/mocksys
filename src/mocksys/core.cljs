@@ -1,5 +1,5 @@
 (ns mocksys.core
-  "mocksys: agent-native CLI over Mountebank. This namespace is only the entry
+  "mocksys: agent-native CLI for local mocks and digital twins. This namespace is only the entry
   point and the command table; each command lives in a `mocksys.cli.*` namespace
   and the scenario lifecycle in `mocksys.lifecycle`."
   (:require [promesa.core :as p]

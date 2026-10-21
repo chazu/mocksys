@@ -169,7 +169,7 @@
       (lifecycle/compile! scenario)
       (println (str "✦ generated '" scenario "' from kit '" kind "'"))
       (when (inject/contract-stateful? built)
-        (println "  (stateful — served via Mountebank injection, managed automatically by `run`)"))
+        (println "  (stateful: served by the mocksys daemon, started automatically by `run`)"))
       (doseq [op (get built "operations")]
         (println (str "  · " (get-in op ["request" "method"]) " " (get-in op ["request" "path"]))))
       (println)

@@ -15,7 +15,7 @@ No real Okta account, no credentials, no network. Everything runs locally.
 ## The one idea behind mocksys
 
 You write a **contract** — a YAML description of an API. mocksys *compiles* it and serves
-it as a local mock (using Mountebank under the hood). Your app or test hits the mock
+it as a local mock (from a small daemon it starts for you). Your app or test hits the mock
 instead of the real service.
 
 A contract operation comes in two flavors:
@@ -39,7 +39,7 @@ mocksys kit okta --rate-limit 100 --token-ttl 3600 --port 9200
 
 ```
 ✦ generated 'okta/okta' from kit 'okta'
-  (stateful — served via Mountebank injection, managed automatically by `run`)
+  (stateful: served by the mocksys daemon, started automatically by `run`)
   · POST /api/v1/users        · GET /api/v1/users      · GET /api/v1/users/{id}
   · POST /api/v1/users/{id}    · DELETE /api/v1/users/{id}
   · POST /api/v1/groups       · GET /api/v1/groups     · ... groups CRUD ...

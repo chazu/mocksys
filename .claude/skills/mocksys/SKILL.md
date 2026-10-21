@@ -17,8 +17,8 @@ description: >-
 `mocksys` is a CLI that hosts local mocks of external systems from a declarative
 `contract.yaml` — your app/test hits the mock instead of the real API. It scales from a
 fixed fixture to a full stateful **digital twin** (e.g. an Okta clone: users/groups CRUD,
-SCIM filtering, OIDC login, rate limits, expiring tokens). Mountebank is the runtime, kept
-entirely behind the CLI.
+SCIM filtering, OIDC login, rate limits, expiring tokens). mocksys serves mocks from its
+own daemon, kept entirely behind the CLI.
 
 ## Do this first
 
@@ -79,7 +79,8 @@ mocksys clock <twin> advance 1h                                    # move the de
 
 - Scenarios live in one git-backed store at `~/.mocksys` (override `MOCKSYS_HOME`; set
   `MOCKSYS_HOME=./.mocks` to scope to a project).
-- `mocksys` starts Mountebank for you (and leaves it running) — never run `mb` directly.
+- `mocksys` starts its daemon for you and leaves it running; never run `mocksys daemon`
+  yourself. Its admin API is `127.0.0.1:2626` (`MOCKSYS_ADMIN_PORT` overrides).
 - **Quote any contract path containing `{param}`**: `path: "/users/{id}"` (unquoted YAML
   flow-parsing mis-reads `{...}` as a map).
 - `assert` / `validate` / `conform` exit non-zero on failure — they drop into CI.

@@ -4,9 +4,10 @@ Every command. Run `mocksys help` for the terse flag list, `mocksys prime` for a
 orientation. A scenario id is `service/name`. Commands that start a mock recompile
 `imposter.json` from the contract first.
 
-Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides how the
-`mb` daemon is launched (else `mb` on `PATH`, else the bundled `mountebank` package).
-`MOCKSYS_NO_INJECTION=1` refuses stateful scenarios.
+Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). Commands that serve a mock
+start the mocksys daemon if it is not running; its admin API is `127.0.0.1:2626`, and
+`MOCKSYS_ADMIN_PORT` picks another port. `MOCKSYS_NO_INJECTION=1` refuses stateful
+scenarios.
 
 ## Twins — full clones in one command
 
