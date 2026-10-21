@@ -40,9 +40,17 @@ were dropped. `assert` says when a dropped request could change its answer.
   inside it. `mocksys kit` copies each module into the scenario directory at the same
   relative path, so the scenario keeps travelling as one directory.
 - A single-file kit that lists modules fails, and the error points at the directory form.
+  It fails when the kits load, as a skipped kit with a warning, so `kits` reports it too.
 - `mocksys kits` marks kits that ship modules. `mocksys kit` prints the same warning
   `unpack` prints about module JavaScript.
+- `kit` checks every destination before it writes: a copy may not land outside the
+  scenario directory through a symlink in it, or through a dangling one.
+- Running `kit` again rewrites `contract.yaml`, since flags change it, but no flag changes
+  a module, so a module that differs from the kit's copy is a hand edit. `kit` then writes
+  nothing and names the file; `--force` replaces it. A matching module is left alone.
 - An example kit under `examples/kits/` ships a module.
+- Not covered: a directory kit's gRPC proto is not copied. A gRPC kit still needs an
+  absolute `proto` path.
 
 ## C. gRPC streaming, reflection, recording
 
