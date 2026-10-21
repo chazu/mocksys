@@ -247,3 +247,14 @@ contract:
       (is (= "/scim/v2/Users/{uid}/groups" (get-in (op "list-user-groups") ["request" "path"]))))
     (testing "a number flag stays a number"
       (is (= 5 (get-in (op "list-users") ["effect" "limit" "max"]))))))
+
+(deftest the-webhooks-example-is-a-directory-kit-that-ships-its-verb
+  (let [{reg :kits warnings :warnings} (kits/with-user-kits (store/kit-files "examples/kits"))
+        kit (get reg "webhooks")
+        c   ((:build kit) "webhooks/webhooks" {:secret "whsec_mine"})]
+    (is (= [] warnings) "every example kit loads")
+    (is (= "examples/kits/webhooks" (:dir kit)))
+    (is (= ["./verbs.js"] (get c "modules")))
+    (is (= {:errors [] :warnings []} (contract/validate c (:dir kit))))
+    (testing "the secret flag reaches the verb's args"
+      (is (= "whsec_mine" (get-in c ["operations" 0 "effect" "call" "args" "secret"]))))))

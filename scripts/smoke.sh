@@ -167,6 +167,22 @@ out="$("$MS" validate demo/webhooks 2>&1)" && code=0 || code=$?
 check "a module outside the scenario directory is refused" 1 "$code"
 check "and named" 1 "$(echo "$out" | grep -c 'modules: ../../outside.js is outside the scenario directory')"
 
+echo "# kits that ship modules"
+cp -R "$ROOT/examples/kits/webhooks" "$MOCKSYS_HOME/kits/"
+check "kits marks a kit that ships modules" 1 "$("$MS" kits | grep -c 'webhooks .*ships modules: ./verbs.js')"
+out="$("$MS" kit webhooks --secret whsec_kit --port $P3 2>&1)"
+check "kit names the module code it copied" 1 \
+  "$(echo "$out" | grep -c 'webhooks/webhooks runs JavaScript from its modules (./verbs.js)')"
+"$MS" run webhooks/webhooks >/dev/null
+check "the kit's module checks a delivery signed with the kit's secret" 202 \
+  "$(deliver $P3 "$(hmac whsec_kit "$body")" "$body")"
+check "and refuses one signed with another" 401 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
+"$MS" stop webhooks/webhooks >/dev/null
+echo '// edited by hand' >> "$MOCKSYS_HOME/webhooks/webhooks/verbs.js"
+check "kit again keeps a hand-edited module" 1 "$("$MS" kit webhooks >/dev/null 2>&1 && echo 0 || echo 1)"
+check "and --force replaces it" 0 \
+  "$("$MS" kit webhooks --force >/dev/null 2>&1 && grep -c 'edited by hand' "$MOCKSYS_HOME/webhooks/webhooks/verbs.js" || true)"
+
 echo "# async failures in module code"
 P4=$((PORT + 3))
 AF="$MOCKSYS_HOME/demo/async"

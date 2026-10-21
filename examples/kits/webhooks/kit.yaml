@@ -1,0 +1,39 @@
+# A directory kit: kit.yaml plus the module it ships. Copy the directory to
+# $MOCKSYS_HOME/kits/ and `mocksys kit webhooks` generates a webhook receiver that
+# checks each delivery's HMAC signature with the verifySignature verb. kit copies
+# verbs.js into the scenario beside contract.yaml, so the scenario stays one
+# directory that pack, publish and push carry whole.
+#
+#   export MOCKSYS_HOME=./.mocks
+#   mkdir -p .mocks/kits && cp -R examples/kits/webhooks .mocks/kits/
+#   mocksys kits                     # marks it: ships modules: ./verbs.js
+#   mocksys kit webhooks --secret whsec_mine --port 9150
+#   mocksys run webhooks/webhooks
+#
+# A delivery signed with the secret is stored and answered 202. A missing or forged
+# signature is 401, and nothing is stored. GET /deliveries lists what was accepted.
+name: webhooks
+doc: webhook receiver that checks HMAC signatures with a custom verb
+flags:
+  secret: whsec_test   # the shared secret deliveries are signed with
+contract:
+  modules: [./verbs.js]
+  state:
+    collections:
+      deliveries: { idField: id }
+  operations:
+    - id: receive
+      request: { method: POST, path: /webhooks }
+      effect:
+        bind: { signature: { header: X-Hub-Signature-256 } }
+        call:
+          verb: verifySignature
+          args: { signature: "{signature}", secret: "{secret}" }
+          as: event
+        mint: { delivery: { prefix: dlv_ } }
+        create: { collection: deliveries, merge: [event], body: { id: "{delivery}" }, status: 202 }
+
+    - id: list-deliveries
+      request: { method: GET, path: /deliveries }
+      effect:
+        list: { collection: deliveries }
