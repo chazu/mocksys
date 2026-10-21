@@ -176,6 +176,21 @@
           (is (= (codes "UNIMPLEMENTED") (:code nope)) "a method the proto does not declare")
           (is (= (codes "UNIMPLEMENTED") (:code stream)) "a streaming method"))))))
 
+(defn- hold!
+  "Listen on `host`:`port` with a plain TCP server; resolves a fn that closes it."
+  [host port]
+  (js/Promise.
+   (fn [resolve reject]
+     (let [srv (.createServer net)]
+       (.once srv "error" reject)
+       (.listen srv port host (fn [] (resolve (fn [] (js/Promise. (fn [r] (.close srv r)))))))))))
+
+(defn- bindable?
+  "Whether `host`:`port` is free to listen on now."
+  [host port]
+  (-> (p/let [release (hold! host port)] (release) true)
+      (p/catch (fn [_] false))))
+
 (deftest faults-and-deletion
   (async done
     (with-daemon done
@@ -192,7 +207,48 @@
           (is (= (codes "UNAVAILABLE") (:code fault)) "a fault drops the call as UNAVAILABLE")
           (is (= 200 (:status del)))
           (is (= "grpc" (get-in del [:json "protocol"])))
-          (is (= (codes "UNAVAILABLE") (:code gone)) "a deleted imposter no longer listens"))))))
+          (is (= (codes "UNAVAILABLE") (:code gone)) "a deleted imposter no longer answers")
+          (p/let [v4 (bindable? "127.0.0.1" port)
+                  v6 (bindable? "::1" port)]
+            (is (and v4 v6) "once DELETE answers, neither address is listening")))))))
+
+(deftest a-port-is-served-again-after-a-delete
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (p/let [dir    (fx/kv-dir)
+                port   (free-port)
+                answer (fn [v] (kv-imposter dir port [(stub "kv.Store/Get" [] {"statusCode" 200 "body" {"value" v}})]))
+                c      (fx/connect (path/join dir "kv.proto") "kv.Store" port)
+                _      (admin-call (str admin "/imposters") "POST" (answer "first"))
+                first  (fx/unary c "Get" {:key "a"})
+                _      (admin-call (str admin "/imposters/" port) "DELETE" nil)
+                again  (admin-call (str admin "/imposters") "POST" (answer "second"))
+                second (fx/unary c "Get" {:key "a"})]
+          (fx/close c)
+          (is (= "first" (get-in first [:ok "value"])))
+          (is (= 201 (:status again)) (pr-str (:json again)))
+          (is (= "second" (get-in second [:ok "value"])) "the same client reaches the new imposter"))))))
+
+(deftest a-client-deadline-ends-a-slow-call
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (p/let [dir   (fx/kv-dir)
+                port  (free-port)
+                _     (admin-call (str admin "/imposters") "POST"
+                                  (kv-imposter dir port
+                                               [{"predicates" [{"equals" {"body" "slow"} "jsonpath" {"selector" "$.key"}}]
+                                                 "responses" [{"is" {"statusCode" 200 "body" {"value" "late"}}
+                                                               "behaviors" [{"wait" 600}]}]}
+                                                (stub "kv.Store/Get" [] {"statusCode" 200 "body" {"value" "fast"}})]))
+                c     (fx/connect (path/join dir "kv.proto") "kv.Store" port)
+                slow  (fx/unary c "Get" {:key "slow"} {} {:deadline-ms 150})
+                _     (p/delay 700)
+                after (fx/unary c "Get" {:key "quick"})]
+          (fx/close c)
+          (is (= (codes "DEADLINE_EXCEEDED") (:code slow)) (pr-str slow))
+          (is (= "fast" (get-in after [:ok "value"])) "the late reply to a cancelled call harms nothing"))))))
 
 (deftest grpc-imposters-are-validated
   (async done
@@ -216,21 +272,6 @@
           (is (= [400 "stubs[0]: proxy responses are not supported for protocol grpc"]
                  [(:status proxied) (get-in proxied [:json "errors" 0 "message"])]))
           (is (= [] (get-in listed [:json "imposters"])) "no rejected imposter is left registered"))))))
-
-(defn- hold!
-  "Listen on `host`:`port` with a plain TCP server; resolves a fn that closes it."
-  [host port]
-  (js/Promise.
-   (fn [resolve reject]
-     (let [srv (.createServer net)]
-       (.once srv "error" reject)
-       (.listen srv port host (fn [] (resolve (fn [] (js/Promise. (fn [r] (.close srv r)))))))))))
-
-(defn- bindable?
-  "Whether `host`:`port` is free to listen on now."
-  [host port]
-  (-> (p/let [release (hold! host port)] (release) true)
-      (p/catch (fn [_] false))))
 
 (deftest a-port-in-use-is-refused-on-either-loopback-address
   (async done
