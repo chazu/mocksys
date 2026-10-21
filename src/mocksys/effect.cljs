@@ -4,7 +4,8 @@
   daemon checks them again when an imposter is posted, then evaluates them directly.
 
   An effect runs over its imposter's `state`, one mutable JS object shared by every
-  stub and handed to custom verbs as `ctx.state`. Its layout:
+  stub and handed to custom verbs as `ctx.state`. It, its buckets, the collection maps
+  and the variables have no prototype, since their keys come from data. Its layout:
     <bucket>       a handshake bucket (store/consume/lookup) or a limit's counters
     __c / __cf     each collection's rows by id, and its id field
     __now          the virtual clock, in epoch seconds
@@ -55,6 +56,18 @@
    defaults below must not."
   [a b]
   (if (js/Boolean a) a b))
+
+(defn- dict
+  "An empty JS object with no prototype, for a map keyed by names from an effect, the
+   settings or a request: `__proto__` or `toString` is then only a key, and no key
+   reaches Object.prototype, which every imposter in the daemon shares."
+  []
+  (js/Object.create nil))
+
+(defn new-state
+  "A new imposter's `state`."
+  []
+  (dict))
 
 (defn- js-keys-in
   "The keys a JavaScript `for (k in o)` visits."
@@ -205,7 +218,7 @@
 (defn- coll
   "Collection `name` as {:m rows-by-id :f id-field}."
   [^js state name]
-  {:m (js-or (unchecked-get (unchecked-get state "__c") name) (js-obj))
+  {:m (js-or (unchecked-get (unchecked-get state "__c") name) (dict))
    :f (js-or (unchecked-get (unchecked-get state "__cf") name) "id")})
 
 (defn- coll-get [{:keys [m]} id] (unchecked-get m (js/String id)))
@@ -379,7 +392,7 @@
   (let [b      (get l "bucket")
         mx     (or (get l "max") 60)
         window (or (get l "window") 60)
-        _      (unchecked-set state b (js-or (unchecked-get state b) (js-obj)))
+        _      (unchecked-set state b (js-or (unchecked-get state b) (dict)))
         win    (* (js/Math.floor (/ (now state) window)) window)
         k      (str (interp (get l "key") vars) "|" win)
         n      (inc (js-or (unchecked-get (unchecked-get state b) k) 0))]
@@ -402,7 +415,7 @@
 (defn- read-bucket
   "Bucket entry `k`, undefined when absent or expired; `del?` removes it."
   [^js state bucket k del?]
-  (let [b (js-or (unchecked-get state bucket) (js-obj))
+  (let [b (js-or (unchecked-get state bucket) (dict))
         h (unchecked-get b k)]
     (cond
       (undefined? h) js/undefined
@@ -787,12 +800,12 @@
    clock and the id stream."
   [^js state effect {:strs [collections clock randomSeed]}]
   (doseq [b (distinct (keep #(get-in effect [% "bucket"]) ["store" "consume" "lookup"]))]
-    (unchecked-set state b (js-or (unchecked-get state b) (js-obj))))
+    (unchecked-set state b (js-or (unchecked-get state b) (dict))))
   (doseq [[n spec] collections]
-    (unchecked-set state "__c" (js-or (unchecked-get state "__c") (js-obj)))
-    (unchecked-set state "__cf" (js-or (unchecked-get state "__cf") (js-obj)))
+    (unchecked-set state "__c" (js-or (unchecked-get state "__c") (dict)))
+    (unchecked-set state "__cf" (js-or (unchecked-get state "__cf") (dict)))
     (when-not (js/Boolean (unchecked-get (unchecked-get state "__c") n))
-      (let [f (or (get spec "idField") "id") m (js-obj)]
+      (let [f (or (get spec "idField") "id") m (dict)]
         (doseq [r (clj->js (or (get spec "seed") []))] (unchecked-set m (js/String (unchecked-get r f)) r))
         (unchecked-set (unchecked-get state "__c") n m)
         (unchecked-set (unchecked-get state "__cf") n f))))
@@ -805,7 +818,7 @@
    its custom verbs. Returns {statusCode headers body}; throws when a verb fails."
   [effect {:keys [state request settings verbs]}]
   (init-state! state effect settings)
-  (let [ctx {:state state :req (clj->js request) :vars (js-obj) :settings settings :verbs verbs}]
+  (let [ctx {:state state :req (clj->js request) :vars (dict) :settings settings :verbs verbs}]
     (js->clj
      (or (some (fn [{:keys [verb run]}] (when-let [spec (get effect verb)] (run ctx spec))) reads)
          (if-let [{:keys [verb run]} (some #(when (get effect (:verb %)) %) collection-verbs)]

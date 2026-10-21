@@ -187,7 +187,7 @@
            :next-id  (count stubs)
            :requests []
            :count    0
-           :state    #js {}
+           :state    (effect/new-state)
            :verbs    (verbs-of spec)})))
 
 ;; --- behaviors -----------------------------------------------------------------

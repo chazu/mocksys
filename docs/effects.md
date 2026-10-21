@@ -596,7 +596,7 @@ A verb is a function that takes one argument, `ctx`:
 | Field | Value |
 |---|---|
 | `request` | `{ method, path, query, headers, body }`. `body` is the raw request text, so a signature check hashes exactly the bytes the client sent. Header names keep the client's case. |
-| `state` | The imposter's shared state object. It lasts until the scenario is run again. Keep your own keys on it. Keys that start with `__` belong to mocksys. |
+| `state` | The imposter's shared state object. It lasts until the scenario is run again. Keep your own keys on it. Keys that start with `__` belong to mocksys. It has no prototype, so test a key with `Object.hasOwn(ctx.state, k)` or `k in ctx.state`, not `ctx.state.hasOwnProperty(k)`. |
 | `vars` | A copy of the variables bound so far, with their types. A row bound by `find` is an object here, where `args` would have flattened it to a string. Variables that start with `__` belong to mocksys and are left out. |
 | `args` | The interpolated `args`. |
 | `now` | The [virtual clock](#the-virtual-clock), in epoch seconds. A contract that uses `call` has the clock on, so `mocksys clock` moves it. |

@@ -23,7 +23,7 @@
   "A blank per-imposter state object. Pass the SAME one across several `run` calls
    to exercise statefulness (mint→store→consume, create→get, link→listJoin, ...)."
   []
-  #js {})
+  (effect/new-state))
 
 (defn- request-of
   "The request map the runtime hands an effect. `req` has optional :method :path
