@@ -23,7 +23,7 @@
   (:require [clojure.string :as str]
             [promesa.core :as p]
             ["node:path" :as path]
-            ["node:tls" :as tls]
+            ["node:tls" :as node-tls]
             [mocksys.modules :as modules]
             [mocksys.runtime.match :as match]))
 
@@ -142,7 +142,7 @@
 (defn- check-tls! [v]
   (when-not (and (map? v) (= #{"cert" "key"} (set (keys v))) (every? string? (vals v)))
     (bad "" "tls must be {cert, key}, PEM text; mocksys run issues them"))
-  (try (tls/createSecureContext #js {:cert (get v "cert") :key (get v "key")})
+  (try (node-tls/createSecureContext #js {:cert (get v "cert") :key (get v "key")})
        (catch :default e (bad "tls" (ex-message e)))))
 
 (defn- validate! [spec]
