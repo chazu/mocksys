@@ -117,17 +117,6 @@
 (defn has-contract? [name]
   (fs/existsSync (contract-file name)))
 
-(defn contract-stale?
-  "True when the contract should be (re)compiled: a contract exists and the
-   imposter artifact is missing or older than it. No contract -> never stale
-   (legacy imposter-only scenarios are left untouched)."
-  [name]
-  (let [cf (contract-file name) imf (imposter-file name)]
-    (and (fs/existsSync cf)
-         (or (not (fs/existsSync imf))
-             (> (.. (fs/statSync cf) -mtimeMs)
-                (.. (fs/statSync imf) -mtimeMs))))))
-
 (defn read-mock [name]
   (let [file (path/join (scenario-dir name) "mock.yaml")]
     (when (fs/existsSync file) (read-yaml file))))

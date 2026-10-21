@@ -14,8 +14,8 @@ The guiding split:
 > **The contract is the source of truth. The imposter is a build artifact.**
 
 You author (or generate, or record) a `contract.yaml`. mocksys *compiles* it to an
-`imposter.json` and posts that to Mountebank. Any contract-aware command recompiles a
-stale imposter automatically.
+`imposter.json` and posts that to Mountebank. Every command that starts a mock
+recompiles from the contract first; an existing `imposter.json` is never posted as-is.
 
 ## Module map
 
@@ -81,9 +81,9 @@ else `~/.mocksys`. (Set `MOCKSYS_HOME=./.mocks` to scope mocks to a single proje
 ```
 
 A scenario id may nest (`github/create-issue`) — Node's path join turns it into a real
-subdirectory. The catalog (`ls`) walks for `imposter.json`. `contract-stale?` triggers a
-recompile when `contract.yaml` is newer than `imposter.json` (or the artifact is
-missing); a legacy imposter-only scenario with no contract is never stale.
+subdirectory. The catalog (`ls`) walks for `imposter.json`. Running a scenario always
+recompiles `imposter.json` from `contract.yaml`. A legacy imposter-only scenario first gets
+a contract lifted from its static responses; any `inject` in it is dropped.
 
 ## The runtime
 
@@ -97,6 +97,21 @@ reloads on every `contract.yaml` change (the Tilt-style save-and-reload loop).
 manages this: `ensure-up!` starts an injecting daemon when a stateful scenario runs, and
 `post-imposter-injecting!` relaunches the daemon with the flag and retries if a running
 daemon rejects injection. Set `MOCKSYS_NO_INJECTION=1` to refuse stateful scenarios.
+
+**Trust boundary.** An injection runs with full Node access inside the daemon, so mocksys
+only ever posts injections it generated itself:
+
+- The daemon is always started with `--localOnly`, so no other machine can reach the
+  admin API or the mocks.
+- `imposter.json` is a build output, never an input. A pulled, unpacked or hand-edited
+  one is overwritten from the contract before anything is posted.
+- Every contract value spliced into generated JS goes through `JSON.stringify` (strings,
+  objects) or must be a finite number (statuses, windows, TTLs, clock offsets);
+  `validate` and `compile` reject anything else.
+- JSONPath selectors from a contract (`request.body` predicate keys and
+  `{{request.body.…}}` templates) must be plain paths (`$.a.b`, `$.items[0]`,
+  `$['k']`, `[*]`). Mountebank's JSONPath library evaluates filter and script
+  expressions, so those are rejected.
 
 **State lifetime.** Mountebank persists the `state` object for the imposter's lifetime.
 Reposting an imposter (every `run`, and every `conform`) creates a fresh instance, so

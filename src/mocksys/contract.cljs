@@ -74,12 +74,26 @@
       (contains? c "matches") {"matches" {selector {field (get c "matches")}}}
       :else                   {"equals"  {selector {field (get c "equals")}}})))
 
+(def ^:private plain-jsonpath
+  #"^\$(?:\.[A-Za-z0-9_-]+|\.\*|\[\d+\]|\[\*\]|\['[A-Za-z0-9_ .-]+'\])*$")
+
+(defn- jsonpath!
+  "A JSONPath selector taken from the contract, if it is a plain path ($.a.b[0],
+   $['k'], [*]). Mountebank evaluates selectors with jsonpath-plus, whose filter and
+   script expressions run code, so nothing richer may reach it from a contract."
+  [selector]
+  (if (and (string? selector) (re-matches plain-jsonpath selector))
+    selector
+    (throw (js/Error. (str "unsupported JSONPath selector " (pr-str selector)
+                           ": use a plain path such as $.user.id or $.items[0]")))))
+
 (defn- body-predicates
   "Compile a `{jsonpath-selector condition}` map into Mountebank JSONPath body
    predicates (for JSON request bodies). Same condition vocabulary as above."
   [spec]
   (for [[selector c] spec
-        :let [c (as-cond c)]]
+        :let [c        (as-cond c)
+              selector (jsonpath! selector)]]
     (cond
       (contains? c "present") {"exists"  {"body" (boolean (get c "present"))} "jsonpath" {"selector" selector}}
       (contains? c "matches") {"matches" {"body" (get c "matches")}           "jsonpath" {"selector" selector}}
@@ -169,7 +183,7 @@
 
 (defn- copy-for [source field token]
   (let [using (if (= source "body")
-                {"method" "jsonpath" "selector" (str "$." field)}
+                {"method" "jsonpath" "selector" (jsonpath! (str "$." field))}
                 {"method" "regex" "selector" ".+"})
         from  (case source
                 "query"   {"query" field}
@@ -219,13 +233,16 @@
          clock-start (when clock? (inject/clock-start contract))
          issuer      (get contract "issuer")
          stubs (mapv (fn [op]
-                       {"predicates" (predicates-for (get op "request"))
-                        "responses"
-                        (if (inject/stateful? op)
-                          ;; stateful op: a generated injection over the shared state
-                          [{"inject" (inject/gen op seed colls clock-start issuer)}]
-                          (mapv #(-> % templatize (apply-fault fault))
-                                (operation-responses op)))})
+                       (try
+                         {"predicates" (predicates-for (get op "request"))
+                          "responses"
+                          (if (inject/stateful? op)
+                            ;; stateful op: a generated injection over the shared state
+                            [{"inject" (inject/gen op seed colls clock-start issuer)}]
+                            (mapv #(-> % templatize (apply-fault fault))
+                                  (operation-responses op)))}
+                         (catch :default e
+                           (throw (js/Error. (str (get op "id" "<no id>") ": " (.-message e)))))))
                      (get contract "operations"))
          ;; a twin that uses a virtual clock gets a built-in /_mocksys/clock control op
          stubs (cond-> stubs
@@ -433,6 +450,8 @@
                                "link" "unlink" "listJoin" "render"])))
           (err! (str id ": effect has no `respond` or collection action "
                      "(create/get/update/remove/list/link/unlink/listJoin/render)")))
+        (try (lower (assoc contract "operations" [op]))
+             (catch :default e (err! (.-message e))))
         (when (and (not effect) (empty? responses)) (err! (str id ": no responses")))
         (doseq [r responses]
           (when-not (number? (get r "status"))

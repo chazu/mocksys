@@ -44,6 +44,10 @@ share — not a one-off blob:
   (`Date`, `ETag`, request-ids) **in memory** before writing anything.
 - **One shared library.** Every scenario lives in a git-backed store at `~/.mocksys`
   that's the same from every project, and shareable with a remote.
+- **Shared mocks can't smuggle in code.** Stateful mocks run generated JavaScript inside
+  Mountebank, so mocksys only posts what it compiled from a contract: a pulled or
+  unpacked `imposter.json` is rebuilt before use, contract values reach the generated
+  code only as escaped literals, and the daemon accepts connections from localhost only.
 
 ## Install
 

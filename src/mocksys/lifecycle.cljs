@@ -41,19 +41,24 @@
           c))))
 
 (defn ensure-compiled!
-  "Recompile imposter.json when the contract is newer (or the artifact is missing).
-   No-op for legacy imposter-only scenarios (no contract -> never stale)."
+  "Rebuild imposter.json from the contract (lifting one first for a legacy
+   imposter-only scenario) and return it; nil when the scenario doesn't exist.
+   Always recompiles, never trusts an existing imposter.json: a bundled, pulled or
+   hand-edited artifact could carry injected JS that mocksys didn't generate, and
+   the daemon runs injections with full Node access."
   [scenario]
-  (when (store/contract-stale? scenario)
+  (when (ensure-contract! scenario)
     (compile! scenario)))
 
 (defn ensure-running!
   "Make `scenario` live and return its port. Resolution order: explicit --port >
    the already-running port > a port *pinned* on the contract > a fresh free port.
    An explicit --port is persisted onto the contract so it stays pinned. Always
-   (re)posts with recordRequests=true so `requests`/`assert` have data."
+   recompiles from the contract and (re)posts with recordRequests=true so
+   `requests`/`assert` have data."
   [scenario port-opt]
-  (let [imposter  (store/read-imposter scenario)
+  (let [imposter  (or (ensure-compiled! scenario)
+                      (throw (js/Error. (str "no scenario '" scenario "' in " store/root))))
         contract  (store/read-contract scenario)
         pinned    (get contract "port")
         stateful? (inject/imposter-stateful? imposter)]
@@ -73,8 +78,6 @@
         (p/let [_ (if stateful?
                     (mb/post-imposter-injecting! imp)
                     (mb/post-imposter! imp))]
-          ;; persist an explicit --port as a pin (only when it actually changed, so
-          ;; we don't churn contract.yaml's mtime and force needless recompiles)
           (when (and port-opt contract (not= port pinned))
             (store/write-contract! scenario (assoc contract "port" port)))
           port)))))
@@ -92,8 +95,7 @@
        (reset! timer
                (js/setTimeout
                 (fn []
-                  (-> (p/do (compile! scenario)
-                            (ensure-running! scenario nil))
+                  (-> (ensure-running! scenario nil)
                       (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ http://localhost:" port))))
                       (p/catch (fn [e] (binding [*print-fn* *print-err-fn*]
                                          (println (str "  ✗ reload failed: " (.-message e))))))))

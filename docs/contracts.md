@@ -72,7 +72,9 @@ query:
 
 Mountebank ANDs the predicates and serves the **first matching stub in contract order** —
 so order operations specific-first, with a fallback last. `body` uses JSONPath selectors
-(`{ "$.action": { equals: "opened" } }`) and fits JSON request bodies.
+(`{ "$.action": { equals: "opened" } }`) and fits JSON request bodies. Selectors must be
+plain paths (`$.a.b`, `$.items[0]`, `$['k']`, `[*]`); filter and script expressions
+(`[?(...)]`, `(...)`) are rejected at compile time because Mountebank would evaluate them.
 
 > Authoring shortcut: `mocksys add <name> --request 'GET /authorize' --when-query 'login'`
 > appends a branch operation. See [cli.md](cli.md).

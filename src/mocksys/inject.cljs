@@ -56,6 +56,15 @@
   "A JS literal for a Clojure value (objects/arrays/strings/numbers)."
   (js/JSON.stringify (clj->js x)))
 
+(defn- num-lit
+  "A contract number spliced into the generated JS (statuses, windows, ttls). The
+   contract is data that travels through git and bundles, so anything other than a
+   finite number is rejected here rather than emitted as code."
+  [field v]
+  (if (and (number? v) (js/isFinite v))
+    (str v)
+    (throw (js/Error. (str field " must be a number, got " (pr-str v))))))
+
 (defn- buckets-of
   "Every flat state bucket named by the operation's handshake effects (so we can
    pre-init them)."
@@ -90,7 +99,7 @@
                                        (str v "=hv(" h ");")))
       (contains? spec "baseUrl")   (str v "=baseUrl();")
       (contains? spec "now")       (let [n (get spec "now")
-                                         add (if (map? n) (or (get n "add") 0) 0)
+                                         add (num-lit "now.add" (if (map? n) (or (get n "add") 0) 0))
                                          t   (str "(now(state)+" add ")")]
                                      (if (and (map? n) (get n "iso"))
                                        (str v "=new Date(" t "*1000).toISOString();")
@@ -100,7 +109,7 @@
 (defn- resp-js
   "JS expression building a Mountebank response object from a respond/miss spec."
   [spec]
-  (let [status  (or (get spec "status") 200)
+  (let [status  (num-lit "status" (or (get spec "status") 200))
         json?   (or (contains? spec "json") (contains? spec "jsonVar"))
         headers (cond-> (or (get spec "headers") {})
                   (and json? (not (get-in spec ["headers" "Content-Type"])))
@@ -120,7 +129,7 @@
         body   (str "deepInterp(" (js (get c "body" {})) ",V)")
         args   (str/join "," (concat ["{}"] merges [body]))
         as     (get c "as")
-        status (or (get c "status") 201)]
+        status (num-lit "status" (or (get c "status") 201))]
     (str "{var _o=Object.assign(" args ");coll(state," coll ").put(_o);"
          (when as (str "V[" (js as) "]=_o;"))
          "return collResp(" status ",_o);}")))
@@ -130,7 +139,7 @@
         key*   (str "interp(" (js (get g "key")) ",V)")
         as     (get g "as")
         miss   (resp-js (or (get g "miss") {"status" 404}))
-        status (or (get g "status") 200)]
+        status (num-lit "status" (or (get g "status") 200))]
     (str "{var _r=coll(state," coll ").get(" key* ");"
          "if(_r===undefined){return " miss ";}"
          (when as (str "V[" (js as) "]=_r;"))
@@ -145,7 +154,7 @@
                  :else "{}")
         as     (get u "as")
         miss   (resp-js (or (get u "miss") {"status" 404}))
-        status (or (get u "status") 200)]
+        status (num-lit "status" (or (get u "status") 200))]
     (str "{var _c=coll(state," coll "),_r=_c.get(" key* ");"
          "if(_r===undefined){return " miss ";}"
          "var _n=merge1(_r," patch ");_c.put(_n);"
@@ -156,7 +165,7 @@
   (let [coll   (js (get d "collection"))
         key*   (str "interp(" (js (get d "key")) ",V)")
         miss   (resp-js (or (get d "miss") {"status" 404}))
-        status (or (get d "status") 204)]
+        status (num-lit "status" (or (get d "status") 204))]
     (str "{var _c=coll(state," coll "),_r=_c.get(" key* ");"
          "if(_r===undefined){return " miss ";}"
          "_c.del(" key* ");return collResp(" status ",null);}")))
@@ -167,7 +176,7 @@
         after  (if (get l "after")  (str "interp(" (js (get l "after")) ",V)") "''")
         limit  (if (get l "limit")  (str "parseInt(interp(" (js (get l "limit")) ",V),10)") "0")
         link   (get l "link")
-        status (or (get l "status") 200)]
+        status (num-lit "status" (or (get l "status") 200))]
     (str "{var _p=coll(state," coll ").list({filter:" filt ",after:" after ",limit:" limit "});"
          "var _h={};"
          (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",{next:_p.next});}"))
@@ -223,7 +232,7 @@
     (map? v)
     (cond
       (contains? v "now")     (let [n   (get v "now")
-                                    add (if (map? n) (or (get n "add") 0) 0)
+                                    add (num-lit "now.add" (if (map? n) (or (get n "add") 0) 0))
                                     t   (str "(now(state)+" add ")")]
                                 (if (and (map? n) (get n "iso"))
                                   (str "new Date(" t "*1000).toISOString()")
@@ -263,7 +272,7 @@
   (let [coll   (js (get l "collection"))
         id*    (str "interp(" (js (get l "id")) ",V)")
         row    (str "deepInterp(" (js (get l "row" {})) ",V)")
-        status (or (get l "status") 204)]
+        status (num-lit "status" (or (get l "status") 204))]
     (str "{var _c=coll(state," coll "),_id=" id* ";"
          "if(_c.get(_id)===undefined){var _row=" row ";_row[_c.f]=_id;_c.put(_row);}"
          "return collResp(" status ",null);}")))
@@ -274,7 +283,7 @@
   [u]
   (let [coll   (js (get u "collection"))
         id*    (str "interp(" (js (get u "id")) ",V)")
-        status (or (get u "status") 204)]
+        status (num-lit "status" (or (get u "status") 204))]
     (str "{coll(state," coll ").del(" id* ");return collResp(" status ",null);}")))
 
 (defn- list-join-js
@@ -291,7 +300,7 @@
         after   (if (get j "after") (str "interp(" (js (get j "after")) ",V)") "''")
         limit   (if (get j "limit") (str "parseInt(interp(" (js (get j "limit")) ",V),10)") "0")
         link    (get j "link")
-        status  (or (get j "status") 200)]
+        status  (num-lit "status" (or (get j "status") 200))]
     (str "{var _via=coll(state," via "),_hy=coll(state," hydrate "),_mm=_via.m,_k,_objs=[];"
          "for(_k in _mm){var _r=_mm[_k];"
          "if(String(dget(_r," byfield "))===" byval "){"
@@ -309,7 +318,7 @@
         filt   (if (get r "filter") (str "interp(" (js (get r "filter")) ",V)") "''")
         row    (js (get r "row" ""))
         wrap   (js (get r "wrap" "{rows}"))
-        status (or (get r "status") 200)]
+        status (num-lit "status" (or (get r "status") 200))]
     (str "{var _p=coll(state," coll ").list({filter:" filt "});"
          "var _html=renderPage(_p.items," row "," wrap ",V);"
          "return {statusCode:" status ",headers:withRl({'Content-Type':'text/html; charset=utf-8'}),body:_html};}")))
@@ -335,8 +344,8 @@
   [l]
   (let [bname  (js (get l "bucket"))
         key*   (str "interp(" (js (get l "key")) ",V)")
-        max*   (or (get l "max") 60)
-        window (or (get l "window") 60)
+        max*   (num-lit "limit.max" (or (get l "max") 60))
+        window (num-lit "limit.window" (or (get l "window") 60))
         miss   (resp-js (or (get l "miss")
                             {"status" 429
                              "json" {"errorCode" "E0000047"
@@ -397,7 +406,7 @@
    "responses"
    [{"inject"
      (str "function (request, state, logger) {"
-          "state.__now=state.__now||" start ";"
+          "state.__now=state.__now||" (num-lit "clock start" start) ";"
           "var b={};try{b=JSON.parse(request.body||'{}')||{};}catch(e){}"
           "if(typeof b.set==='number')state.__now=b.set;"
           "else if(typeof b.advance==='number')state.__now=state.__now+b.advance;"
@@ -460,7 +469,7 @@
                           (str "V[" (js (get s "valueVar")) "]")
                           (str "interp(" (js (or (get s "value") "")) ",V)"))]
              (if-let [ttl (get s "ttl")]
-               [(str bucket "[" key* "]={__ttl:true,v:" val* ",exp:now(state)+" ttl "};")]
+               [(str bucket "[" key* "]={__ttl:true,v:" val* ",exp:now(state)+" (num-lit "store.ttl" ttl) "};")]
                [(str bucket "[" key* "]=" val* ";")])))
          ;; respond
          [(str "return " (resp-js (or (get effect "respond") {"status" 200})) ";")]))))))
@@ -559,7 +568,7 @@
                                     (js (or (get spec "idField") "id")) ","
                                     (js (or (get spec "seed") [])) ");")))
                         str/join)
-         clock-init (when clock-start (str "state.__now=state.__now||" clock-start ";"))]
+         clock-init (when clock-start (str "state.__now=state.__now||" (num-lit "clock start" clock-start) ";"))]
      (str "function (request, state, logger) {"
           prelude
           "var seed=" (js (or seed {})) ";"

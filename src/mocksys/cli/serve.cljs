@@ -14,7 +14,6 @@
 (defn cmd-run [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "run needs a scenario: run <name>"))
-    (lifecycle/ensure-compiled! scenario)
     (let [prof (service/effective scenario)]
       (p/let [port (lifecycle/ensure-running! scenario (:port opts))]
         (println (str "▶ running '" scenario "' at http://localhost:" port))
@@ -131,9 +130,10 @@
       (println (str "# doctor: " scenario))
       (cond
         (:fix opts)
-        (let [{:keys [imposter stripped redacted]}
-              (scrub/scrub-imposter imposter (:redact prof) (:volatile prof))]
-          (store/write-imposter! scenario imposter)
+        (let [{:keys [contract stripped redacted]}
+              (scrub/scrub-contract (store/read-contract scenario) (:redact prof) (:volatile prof))]
+          (store/write-contract! scenario contract)
+          (lifecycle/compile! scenario)
           (if (or (seq stripped) (seq redacted))
             (do (when (seq stripped) (println (str "  ✎ stripped volatile: " (str/join ", " (sort stripped)))))
                 (when (seq redacted) (println (str "  ✎ redacted secrets:  " (str/join ", " (sort redacted))))))
@@ -267,7 +267,6 @@
           (if (empty? scs)
             acc
             (let [sc (first scs)]
-              (lifecycle/ensure-compiled! sc)
               (p/let [prof (service/effective sc)
                       port (lifecycle/ensure-running! sc nil)]
                 (p/recur (rest scs) (conj acc [sc port (env-vars-for sc {} prof)]))))))

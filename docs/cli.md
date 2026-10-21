@@ -1,8 +1,8 @@
 # CLI reference
 
 Every command. Run `mocksys help` for the terse flag list, `mocksys prime` for an agent
-orientation. A scenario id is `service/name`. Commands that read a contract recompile a
-stale `imposter.json` automatically.
+orientation. A scenario id is `service/name`. Commands that start a mock recompile
+`imposter.json` from the contract first.
 
 Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides how the
 `mb` daemon is launched (else `mb` on `PATH`, else the bundled `mountebank` package).
@@ -39,7 +39,7 @@ Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides
 | `run <name> [--port N] [--env VAR] [--watch]` | Host the mock; prints the port + export lines. `--watch` recompiles+reloads on `contract.yaml` edits. An explicit `--port` is pinned onto the contract. |
 | `env <name> [--json \| --tilt] [--port N] [--env VAR]` | Wire a consumer to the mock. Default: eval-safe `export` lines (`eval "$(mocksys env NAME)"`). `--json`: `{scenario, port, url, <vars>}`. `--tilt`: a Tiltfile `local_resource` (pins a port; doesn't start). |
 | `inspect <name>` | Agent-readable summary: calls, matchers, redactions, volatile fields. Shows friendly `/users/{id}` paths. |
-| `doctor <name> [--fix]` | Lint matcher hygiene / frozen volatile values. `--fix` scrubs in place. Overfit is only flagged on recorded scenarios. |
+| `doctor <name> [--fix]` | Lint matcher hygiene / frozen volatile values. `--fix` scrubs the contract's response headers and recompiles. Overfit is only flagged on recorded scenarios. |
 | `requests <name> [--clear]` | What the running mock received (`--clear` resets). |
 | `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss. |
 | `ls` | All scenarios + which are live. |

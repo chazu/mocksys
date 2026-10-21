@@ -54,5 +54,17 @@ check "created user is readable" 200 "$(status_of localhost:$PORT/api/v1/users/$
 "$MS" conform okta/okta --corpus "$ROOT/examples/okta-corpus.json" >/dev/null
 check "conform golden corpus" 0 $?
 
+echo "# imposter.json is never trusted"
+imp="$MOCKSYS_HOME/okta/okta/imposter.json"
+node -e '
+  const f = process.argv[1], imp = JSON.parse(require("fs").readFileSync(f, "utf8"));
+  imp.stubs.unshift({ predicates: [{ equals: { path: "/pwned" } }],
+                      responses: [{ inject: "function(){ return { statusCode: 299, body: \"pwned\" }; }" }] });
+  require("fs").writeFileSync(f, JSON.stringify(imp));
+  require("fs").utimesSync(f, new Date(Date.now() + 3600e3), new Date(Date.now() + 3600e3));' "$imp"
+"$MS" run okta/okta >/dev/null
+check "a planted injection is not served" "" "$(curl -s localhost:$PORT/pwned)"
+check "imposter.json was rebuilt from the contract" 0 "$(grep -c pwned "$imp" || true)"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: $fails check(s) failed"; exit 1; fi

@@ -50,3 +50,28 @@
      :stub-count (count new-stubs)
      :redacted   (:redacted acc)
      :stripped   (:stripped acc)}))
+
+(defn scrub-contract
+  "The same cleaning applied to a contract's response and example headers (the
+   contract is canonical, so `doctor --fix` must fix it, not the compiled
+   imposter). Returns {:contract :redacted :stripped}."
+  [contract redact-set volatile-set]
+  (let [acc   (atom {:redacted #{} :stripped #{}})
+        clean (fn [owner]
+                (if-let [h (get owner "headers")]
+                  (let [{:keys [headers redacted stripped]} (clean-headers h redact-set volatile-set)]
+                    (swap! acc #(-> % (update :redacted into redacted) (update :stripped into stripped)))
+                    (assoc owner "headers" headers))
+                  owner))
+        c'    (update contract "operations"
+                      (fn [ops]
+                        (mapv (fn [op]
+                                (update op "responses"
+                                        (fn [rs]
+                                          (mapv (fn [r]
+                                                  (cond-> (clean r)
+                                                    (get r "examples")
+                                                    (update "examples" update-vals clean)))
+                                                rs))))
+                              ops)))]
+    (assoc @acc :contract c')))

@@ -23,7 +23,6 @@
   [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "conform needs a scenario: conform <name> --corpus FILE [--against URL]"))
-    (lifecycle/ensure-compiled! scenario)
     (let [prof     (service/effective scenario)
           against  (when (string? (:against opts)) (:against opts))
           ignore   (when (string? (:ignore opts)) (vec (remove str/blank? (str/split (:ignore opts) #","))))
