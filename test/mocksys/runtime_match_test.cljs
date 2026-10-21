@@ -77,6 +77,27 @@
       (is (not (m/matches? {"equals" {"body" "x"} "jsonpath" {"selector" "$.a"}} (req "body" "a=x"))))
       (is (m/matches? {"exists" {"body" false} "jsonpath" {"selector" "$.a"}} (req "body" "a=x"))))))
 
+(deftest jsonpath-selecting-null-is-a-hit
+  (let [body  "{\"a\":null,\"b\":1,\"list\":[null]}"
+        holds (fn [op expected selector] (m/matches? {op {"body" expected} "jsonpath" {"selector" selector}} (req "body" body)))]
+    (testing "a selected null exists, unlike a selector that hits nothing"
+      (is (holds "exists" true "$.a"))
+      (is (not (holds "exists" false "$.a")))
+      (is (not (holds "exists" true "$.missing")))
+      (is (holds "exists" true "$.list[*]"))
+      (is (holds "exists" true "$.*")))
+    (testing "a selected null is not the empty string"
+      (is (not (holds "equals" "" "$.a")))
+      (is (holds "equals" "" "$.missing"))
+      (is (not (holds "matches" "^$" "$.a")))
+      (is (holds "matches" "^null$" "$.a")))
+    (testing "deepEquals reads a selected null as \"null\", and a miss as nothing"
+      (is (holds "deepEquals" "null" "$.a"))
+      (is (not (holds "deepEquals" "null" "$.missing"))))
+    (testing "among several hits, a null is one value and does not satisfy exists false"
+      (is (holds "equals" 1 "$.*"))
+      (is (not (holds "exists" false "$.*"))))))
+
 (deftest select-plain-jsonpath
   (let [doc {"a" {"b" [10 20]} "k y" 1}]
     (is (= [[10 20]] (m/select "$.a.b" doc)))
