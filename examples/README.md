@@ -10,6 +10,7 @@ Runnable contracts and a conform corpus that back the
 | [`login-throttle.yaml`](login-throttle.yaml) | The three **time-aware primitives** by hand: a `limit` (rate limit → 429), `store.ttl` (an expiring session token), and `state.clock` (the deterministic virtual clock). |
 | [`directory.yaml`](directory.yaml)           | A twin built **only from genes**: `crud-collection` for users and groups plus `membership`, with no hand-written operations.                                              |
 | [`kits/directory.yaml`](kits/directory.yaml) | A **user kit**: the directory twin as a template with flags (`--users-base`, `--rate-limit`, ...). Copy it to `$MOCKSYS_HOME/kits/` and run `mocksys kit directory`. |
+| [`webhooks/`](webhooks/)                     | A **custom verb**: a webhook receiver whose `verifySignature` verb (in `verbs.js`) checks an HMAC signature header and rejects a forged delivery with 401. Copy the whole directory: the module travels with the scenario. |
 | [`okta-corpus.json`](okta-corpus.json)       | A request corpus for `mocksys conform` — golden expectations for the Okta twin.                                                                                          |
 
 ## Quick start
@@ -42,6 +43,15 @@ mocksys kits                                                # lists it next to t
 mocksys kit directory --users-base /scim/v2/Users --port 9140
 mocksys run directory/directory
 curl localhost:9140/scim/v2/Users
+
+# the webhook receiver with a custom verb
+mkdir -p .mocks/demo/webhooks && cp examples/webhooks/* .mocks/demo/webhooks/
+mocksys run demo/webhooks --port 9150
+BODY='{"action":"opened","number":7}'
+SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac whsec_test | sed 's/^.* //')"
+curl -i -X POST localhost:9150/webhooks -H "X-Hub-Signature-256: $SIG" -d "$BODY"           # 202, stored
+curl -i -X POST localhost:9150/webhooks -H 'X-Hub-Signature-256: sha256=00' -d "$BODY"      # 401
+curl localhost:9150/deliveries                                                             # the one accepted
 
 # the rate-limit + expiring-session demo
 mkdir -p .mocks/demo/login-throttle && cp examples/login-throttle.yaml .mocks/demo/login-throttle/contract.yaml
