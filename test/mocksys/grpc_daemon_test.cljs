@@ -99,6 +99,30 @@
               (is (= "HTTP 429" (:details limited)))
               (is (= [(codes "UNKNOWN") "short and stout"] [(:code teapot) (:details teapot)])))))))))
 
+(defn- answers
+  "Serve kv.Store/Get answering request key k with response `is`, for each [k is] of
+   `by-key`, and call it with every key; resolves {k result}."
+  [admin by-key]
+  (p/let [dir  (fx/kv-dir)
+          port (free-port)
+          stubs (vec (for [[k is] by-key]
+                       (stub "kv.Store/Get" [{"equals" {"body" k} "jsonpath" {"selector" "$.key"}}] is)))
+          _    (admin-call (str admin "/imposters") "POST" (kv-imposter dir port stubs))
+          c    (fx/connect (path/join dir "kv.proto") "kv.Store" port)
+          rs   (p/all (map #(fx/unary c "Get" {:key %}) (keys by-key)))]
+    (fx/close c)
+    (zipmap (keys by-key) rs)))
+
+(deftest the-http-status-table-follows-google-rpc-code
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (p/let [table {408 "DEADLINE_EXCEEDED" 412 "FAILED_PRECONDITION" 422 "INVALID_ARGUMENT"
+                       502 "UNAVAILABLE" 504 "DEADLINE_EXCEEDED"}
+                rs    (answers admin (into {} (for [st (keys table)] [(str st) {"statusCode" st}])))]
+          (doseq [[st code] table]
+            (is (= (codes code) (:code (get rs (str st)))) (str st " is " code))))))))
+
 (deftest what-is-not-served-is-unimplemented
   (async done
     (with-daemon done
