@@ -76,10 +76,13 @@
       {:status (.-status res)
        :body   (when (seq text) (js->clj (js/JSON.parse text)))})))
 
-(defn- another-store-error []
+(defn- another-store-error
+  "`pid` is the one the daemon reports on GET /, which needs no token."
+  [pid]
   (js/Error. (str "the mocksys daemon on 127.0.0.1:" (admin-port) " belongs to another store or user "
                   "(its token is not the one in " (token-path (admin-port)) "). Use the MOCKSYS_HOME it was "
-                  "started with, or set MOCKSYS_ADMIN_PORT to another port to run a daemon for this store")))
+                  "started with, " (when pid (str "stop it (pid " pid "), "))
+                  "or set MOCKSYS_ADMIN_PORT to another port to run a daemon for this store")))
 
 (defn fetch-json
   "Call the admin API. Returns {:status int :body <clj|nil>}.
@@ -88,7 +91,10 @@
   ([method path] (fetch-json method path nil))
   ([method path body]
    (p/let [{:keys [status] :as res} (call method path body)]
-     (if (= 401 status) (throw (another-store-error)) res))))
+     (if (= 401 status)
+       (p/let [ident (-> (call "GET" "/" nil) (p/then :body) (p/catch (constantly nil)))]
+         (throw (another-store-error (when (map? ident) (let [pid (get ident "pid")] (when (integer? pid) pid))))))
+       res))))
 
 ;; --- Lifecycle ------------------------------------------------------------
 

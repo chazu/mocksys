@@ -131,7 +131,7 @@ mocksys clock <twin> advance 1h                                    # move the de
   yourself. Its admin API is `127.0.0.1:2626` for `~/.mocksys`, else a port in
   26000–26999 derived from the store's path; `mocksys home` prints it, and
   `MOCKSYS_ADMIN_PORT` overrides it. The error "belongs to another store or user" means
-  that port is held by another store's daemon.
+  that port is held by another store's daemon, and names its pid.
   `mocksys daemon stop` stops it and every running mock. If the daemon fails to start,
   read `$MOCKSYS_HOME/daemon.log`.
 - **Quote any contract path containing `{param}`**: `path: "/users/{id}"` (unquoted YAML

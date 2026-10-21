@@ -141,7 +141,8 @@ running daemon's token in place. Every admin call except `GET /` must carry
 `Authorization: Bearer <token>`, compared in constant time; a missing or wrong token
 gets a 401. `mocksys.mb` reads the token file on every call. A 401 means the daemon on
 the port was started from another store or by another user, so the CLI stops with an
-error that names the token file it read and `MOCKSYS_ADMIN_PORT`. Replacing a daemon of
+error that names the token file it read, the pid that daemon reports on `GET /`, and
+`MOCKSYS_ADMIN_PORT`. Replacing a daemon of
 another version needs the token too, so the CLI never stops a daemon it cannot
 authenticate to.
 

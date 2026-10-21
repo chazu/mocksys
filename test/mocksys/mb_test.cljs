@@ -309,6 +309,7 @@
             (is (str/includes? (str out) (another-store-error port)))
             (is (str/includes? (str out) "MOCKSYS_ADMIN_PORT") "the error says how to get a daemon of your own"))
           (is (str/includes? (str ls) (mb/token-path port)) "and names the token file it read")
+          (is (str/includes? (str ls) (str "(pid " (.-pid js/process) ")")) "and the pid that daemon reports, to stop it")
           (is (true? up) "a refused stop leaves the daemon running")
           ((:stop! d)))))))
 

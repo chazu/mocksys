@@ -82,9 +82,10 @@ check "with the store's token it is served" 200 \
 check "only the daemon's user can read the token" 600 \
   "$(node -p '(require("fs").statSync(process.argv[1]).mode & 0o777).toString(8)' "$TOKEN_FILE")"
 out="$(MOCKSYS_HOME="$WORK/other" "$MS" ls 2>&1)" && code=0 || code=$?
-check "a CLI on another store is refused" 1 "$code"
+check "a CLI on another store, set to this daemon's port, is refused" 1 "$code"
 check "and told whose daemon it reached" 1 \
   "$(echo "$out" | grep -c "daemon on 127.0.0.1:$MOCKSYS_ADMIN_PORT belongs to another store or user")"
+check "and its pid, to stop it" 1 "$(echo "$out" | grep -c "stop it (pid $(curl -s "$ADMIN/" | json_field '.pid'))")"
 check "and how to run its own" 1 "$(echo "$out" | grep -c MOCKSYS_ADMIN_PORT)"
 "$MS" stop demo/hello >/dev/null
 
