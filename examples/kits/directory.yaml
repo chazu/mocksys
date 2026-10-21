@@ -1,0 +1,30 @@
+# A user kit. Copy it to $MOCKSYS_HOME/kits/ and `mocksys kit directory` generates a
+# users, groups and memberships twin from genes. Each flag below is a default that
+# `--<flag> VALUE` overrides; a value takes the type of its default, so
+# `--rate-limit 5` is the number 5.
+#
+#   export MOCKSYS_HOME=./.mocks
+#   mkdir -p .mocks/kits && cp examples/kits/directory.yaml .mocks/kits/
+#   mocksys kits                                   # lists it next to the built-ins
+#   mocksys kit directory --users-base /scim/v2/Users --rate-limit 5 --port 9140
+#   mocksys run directory/directory
+#   curl localhost:9140/scim/v2/Users
+name: directory
+doc: users, groups and memberships composed from genes
+flags:
+  users-base: /api/v1/users
+  groups-base: /api/v1/groups
+  id-prefix: u
+  rate-limit: 100     # requests per client per minute on the users resource
+contract:
+  seed:
+    users:
+      - { id: u1, status: ACTIVE, profile: { login: alice@example.com } }
+      - { id: u2, status: ACTIVE, profile: { login: bob@example.com } }
+    groups:
+      - { id: g1, profile: { name: Admins } }
+  genes:
+    - crud-collection: { coll: users, base: "{users-base}", seed-name: users, id-prefix: "{id-prefix}",
+                         rate-limit: { max: "{rate-limit}", window: 60 } }
+    - crud-collection: { coll: groups, base: "{groups-base}", seed-name: groups }
+    - membership: { users-base: "{users-base}", groups-base: "{groups-base}" }

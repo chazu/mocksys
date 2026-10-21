@@ -176,3 +176,19 @@
          (map #(path/dirname %))
          (remove #(str/starts-with? % "services"))
          sort)))
+
+;; --- user kits ------------------------------------------------------------
+
+(def kits-dir (path/join root "kits"))
+
+(defn kit-files
+  "[[path text] ...] for every *.yaml file in `dir`, sorted by name. Empty when
+   `dir` does not exist."
+  [dir]
+  (if-not (fs/existsSync dir)
+    []
+    (->> (fs/readdirSync dir)
+         (map str)
+         (filter #(str/ends-with? % ".yaml"))
+         sort
+         (mapv (fn [f] (let [file (path/join dir f)] [file (fs/readFileSync file "utf8")]))))))

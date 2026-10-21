@@ -153,3 +153,16 @@ contract: { operations: [] }
     (is (str/includes? (get-in (some #(when (= "authorize-picker" (get % "id")) %) (get c "operations"))
                                ["responses" 0 "examples" "picker" "body"])
                        "login=me"))))
+
+(deftest the-directory-example-kit-builds-a-valid-twin
+  (let [kit (kits/parse-kit (fs/readFileSync "examples/kits/directory.yaml" "utf8")
+                            "examples/kits/directory.yaml" "directory")
+        c   ((:build kit) "directory/directory" {:users-base "/scim/v2/Users" :rate-limit 5})
+        ops (get (contract/expand c) "operations")
+        op  (fn [id] (some #(when (= id (get % "id")) %) ops))]
+    (is (= {:errors [] :warnings []} (contract/validate c)))
+    (testing "a string flag lands in every gene that names it"
+      (is (= "/scim/v2/Users" (get-in (op "list-users") ["request" "path"])))
+      (is (= "/scim/v2/Users/{uid}/groups" (get-in (op "list-user-groups") ["request" "path"]))))
+    (testing "a number flag stays a number"
+      (is (= 5 (get-in (op "list-users") ["effect" "limit" "max"]))))))

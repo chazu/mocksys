@@ -130,57 +130,91 @@
     "oauth2" (str "oauth/" (or provider "github"))
     (str kind "/" kind)))         ; e.g. okta -> okta/okta
 
+(defn- load-kits
+  "Built-in kits plus $MOCKSYS_HOME/kits/*.yaml, printing any load warnings."
+  []
+  (let [{:keys [kits warnings]} (kits/with-user-kits (store/kit-files store/kits-dir))]
+    (binding [*print-fn* *print-err-fn*]
+      (doseq [w warnings] (println (str "warning: " w))))
+    kits))
+
+(def ^:private numeric-flags #{:token-ttl :rate-limit :rate-window})
+
+(defn- flag-value
+  "Parse kit flag `k` from its command-line value `v`. --users and --signing-key
+   read a file. Otherwise the value takes the type of the flag's default."
+  [k v default]
+  (let [file (fn [what parse]
+               (when-not (string? v) (die (str "--" (name k) " needs a file")))
+               (try (parse (store/slurp v))
+                    (catch :default _ (die (str "could not read --" (name k) " as " what ": " v)))))]
+    (cond
+      (= k :users)         (file "a JSON array" #(js->clj (js/JSON.parse %)))
+      (= k :signing-key)   (file "a PEM file" identity)
+      (or (numeric-flags k) (number? default))
+      (let [n (js/Number v)]
+        (if (or (boolean? v) (js/isNaN n)) (die (str "--" (name k) " needs a number, got " v)) n))
+      (boolean? default)   (if (string? v) (= v "true") v)
+      :else                v)))
+
 (defn cmd-kit
-  "Generate a complete (often stateful) mock — a digital twin — from a recipe in one
-   shot:
+  "Generate a complete (often stateful) mock — a digital twin — from a kit in one
+   shot. Kits are built in or YAML files in $MOCKSYS_HOME/kits (see `mocksys kits`):
      kit okta [--users FILE.json] [--rate-limit N] [--rate-window S] [--token-ttl S]
               [--issuer URL] [--signing-key FILE.pem] [--scenario NAME] [--port N]
      kit oauth2 [--provider github|codeberg] [--users FILE.json] [--token-ttl S]
-                [--scenario NAME] [--port N]"
+                [--scenario NAME] [--port N]
+     kit <name> [--<flag> VALUE ...] [--scenario NAME] [--port N]"
   [{:keys [pos opts]}]
-  (let [kind (first pos)]
+  (let [kind     (first pos)
+        registry (load-kits)
+        known    (str/join "|" (sort (keys registry)))]
     (when-not kind
-      (die (str "kit needs a recipe: kit <" (str/join "|" (sort (keys kits/kits))) "> [options]\n"
-                "  (see `mocksys genes` for the building blocks a kit composes)")))
-    (let [builder  (or (:build (get kits/kits kind))
-                       (die (str "unknown kit '" kind "'. known: "
-                                 (str/join ", " (sort (keys kits/kits))))))
-          _        (when-let [bad (seq (kits/unsupported-flags kind opts))]
+      (die (str "kit needs a recipe: kit <" known "> [options]\n"
+                "  (see `mocksys kits` for each kit's flags)")))
+    (let [kit      (or (get registry kind)
+                       (die (str "unknown kit '" kind "'. known: " known)))
+          _        (when-let [bad (seq (kits/unsupported-flags kit opts))]
                      (die (str "kit " kind " does not support "
                                (str/join ", " (map #(str "--" (name %)) bad)))))
-          provider (when (string? (:provider opts)) (:provider opts))
-          users    (when (string? (:users opts))
-                     (try (js->clj (js/JSON.parse (store/slurp (:users opts))))
-                          (catch :default _ (die (str "could not parse --users as JSON: " (:users opts))))))
+          flags    (into {} (for [[k v] opts :when ((:flags kit) k)]
+                              [k (flag-value k v (get-in kit [:defaults k]))]))
           scenario (or (when (string? (:scenario opts)) (:scenario opts))
-                       (default-scenario-for kind provider))
-          rate-limit  (when (string? (:rate-limit opts)) (js/parseInt (:rate-limit opts)))
-          rate-window (when (string? (:rate-window opts)) (js/parseInt (:rate-window opts)))
-          token-ttl  (when (string? (:token-ttl opts)) (js/parseInt (:token-ttl opts)))
-          issuer     (when (string? (:issuer opts)) (:issuer opts))
-          signing-key (when (string? (:signing-key opts))
-                        (try (store/slurp (:signing-key opts))
-                             (catch :default _ (die (str "could not read --signing-key file: " (:signing-key opts))))))
-          built    (cond-> (builder scenario {:provider provider :users users
-                                              :rate-limit rate-limit :rate-window rate-window
-                                              :token-ttl token-ttl
-                                              :issuer issuer :signing-key signing-key})
-                     (:port opts) (assoc "port" (js/parseInt (:port opts))))]
+                       (default-scenario-for kind (or (:provider flags) (get-in kit [:defaults :provider]))))
+          built    (cond-> ((:build kit) scenario flags)
+                     (:port opts) (assoc "port" (js/parseInt (:port opts))))
+          expanded (contract/expand built)]
       (store/write-contract! scenario built)
       (lifecycle/compile! scenario)
       (println (str "✦ generated '" scenario "' from kit '" kind "'"))
-      (when (inject/contract-stateful? (contract/expand built))
+      (when (inject/contract-stateful? expanded)
         (println "  (stateful — served via Mountebank injection, managed automatically by `run`)"))
-      (doseq [op (get (contract/expand built) "operations")]
+      (doseq [op (get expanded "operations")]
         (println (str "  · " (get-in op ["request" "method"]) " " (get-in op ["request" "path"]))))
       (println)
       (println (str "  run it:   mocksys run " scenario
                     (when (:port opts) (str " --port " (:port opts)))))
       (println (str "  inspect:  mocksys inspect " scenario)))))
 
+(defn cmd-kits
+  "List every kit `kit` can generate, built in or from $MOCKSYS_HOME/kits, with its
+   flags and their defaults:  kits"
+  [_]
+  (let [registry (load-kits)]
+    (println (str "# kits (mocksys kit <name> [--flag VALUE ...]); yours go in " store/kits-dir "/*.yaml"))
+    (doseq [[kname {:keys [doc source flags defaults]}] (sort registry)]
+      (println (str "  · " kname "  " doc "  [" source "]"))
+      (println (str "      " (if (empty? flags)
+                                 "(no flags)"
+                                 (str/join "  " (for [f (sort flags)
+                                                      :let [d (get defaults f)]]
+                                                  (str "--" (name f) (when (some? d) (str " (default " d ")")))))))))
+    (println)
+    (println "  e.g.  mocksys kit okta            # a digital twin of Okta")))
+
 (defn cmd-genes
-  "List the genes a contract can list under `genes:`, each with its params, the
-   capabilities that are built in rather than genes, and the kits available:  genes"
+  "List the genes a contract can list under `genes:`, each with its params, and the
+   capabilities that are built in rather than genes:  genes"
   [_]
   (println "# genes (list them under `genes:` in contract.yaml; * marks a required param)")
   (doseq [[gname {:keys [doc params required]}] (sort kits/genes)]
@@ -195,9 +229,5 @@
     (doseq [[cname where] kits/capabilities]
       (println (str "  · " (.padEnd cname width) "  " where))))
   (println)
-  (println "# kits — full twins generated in one command")
-  (doseq [[k {:keys [doc]}] (sort kits/kits)]
-    (println (str "  · mocksys kit " k "   —  " doc)))
-  (println)
-  (println "  e.g.  mocksys kit okta            # a digital twin of Okta"))
+  (println "# kits compose genes into a whole twin: `mocksys kits` lists them"))
 
