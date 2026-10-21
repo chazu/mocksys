@@ -51,6 +51,7 @@
      "A reply is checked against its type: a wrong type is INTERNAL naming the field."
      "Streams: a server stream sends a 2xx JSON array as its messages; a client stream's"
      "body is the array it sent; each bidirectional message is a request of its own."
+     "Server reflection is on: grpcurl -plaintext localhost:PORT list."
      "run/env print localhost:PORT; assert --saw 'POST /todo.v1.Todos/GetTodo'."
      ""
      "## Run it & wire a test/app to the mock"

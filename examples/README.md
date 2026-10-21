@@ -11,7 +11,7 @@ Runnable contracts and a conform corpus that back the
 | [`directory.yaml`](directory.yaml)           | A twin built **only from genes**: `crud-collection` for users and groups plus `membership`, with no hand-written operations.                                              |
 | [`kits/directory.yaml`](kits/directory.yaml) | A **user kit**: the directory twin as a template with flags (`--users-base`, `--rate-limit`, ...). Copy it to `$MOCKSYS_HOME/kits/` and run `mocksys kit directory`. |
 | [`webhooks/`](webhooks/)                     | A **custom verb**: a webhook receiver whose `verifySignature` verb (in `verbs.js`) checks an HMAC signature header and rejects a forged delivery with 401. Copy the whole directory: the module travels with the scenario. |
-| [`grpc-todos/`](grpc-todos)                  | A stateful **gRPC** twin of `todo.proto`: create, get (`NOT_FOUND` on a miss), an update that keeps the fields it does not set, filtered list, an explicit `grpcCode`, and server, client and bidirectional streams. `client.js` calls it with grpc-js.                     |
+| [`grpc-todos/`](grpc-todos)                  | A stateful **gRPC** twin of `todo.proto`: create, get (`NOT_FOUND` on a miss), an update that keeps the fields it does not set, filtered list, an explicit `grpcCode`, and server, client and bidirectional streams. `client.js` calls it with grpc-js; `reflect.js` lists and describes it through server reflection.                     |
 | [`okta-corpus.json`](okta-corpus.json)       | A request corpus for `mocksys conform` — golden expectations for the Okta twin.                                                                                          |
 
 ## Quick start
@@ -71,6 +71,7 @@ node examples/grpc-todos/client.js localhost:9150 GetTodo '{"id":"t1"}'
 node examples/grpc-todos/client.js localhost:9150 GetTodo '{"id":"nope"}'   # {"code":"NOT_FOUND",...}
 node examples/grpc-todos/client.js localhost:9150 WatchTodos '{}'           # one JSON line per todo
 node examples/grpc-todos/client.js localhost:9150 CreateTodos '[{"title":"a"},{"title":"b"}]'
+node examples/grpc-todos/reflect.js localhost:9150 todo.v1.Todos             # rpcs, via reflection
 mocksys assert demo/todos --saw 'POST /todo.v1.Todos/GetTodo'
 ```
 

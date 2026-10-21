@@ -110,7 +110,9 @@ JSON body is the reply, a 404 reaches the client as `NOT_FOUND`, and a body
 of the wrong type is `INTERNAL` naming the field, and `daemon.log` says the same.
 Streaming RPCs work too: a server stream sends a 2xx JSON array as its messages (a
 `list` effect streams one per record), a client stream's body is the JSON array of what
-it sent, and each message of a bidirectional stream is its own request. `run`/`env` print `localhost:PORT`; connect with
+it sent, and each message of a bidirectional stream is its own request. Every grpc
+mock serves server reflection, so `grpcurl -plaintext localhost:PORT list` works
+without the proto. `run`/`env` print `localhost:PORT`; connect with
 insecure credentials. See `docs/contracts.md#grpc` and `examples/grpc-todos/`.
 
 The full effect-language reference is `docs/effects.md`; `docs/walkthrough.md` is a

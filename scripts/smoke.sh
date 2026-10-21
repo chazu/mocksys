@@ -247,6 +247,8 @@ check "a client stream's messages arrive as one array" '{"count":2,"first_title"
   "$(rpc PreviewImport '[{"title":"a"},{"title":"b"}]')"
 check "a bidi stream answers each message" "x,y" "$(rpc CreateTodos '[{"title":"x"},{"title":"y"}]' | each_field '.title')"
 check "and each one created a todo" 4 "$(rpc ListTodos '{}' | json_field '.todos.length')"
+check "reflection lists the service without the proto" todo.v1.Todos "$(node "$G/reflect.js" "localhost:$GP")"
+check "and describes its streams" 1 "$(node "$G/reflect.js" "localhost:$GP" todo.v1.Todos | grep -c '^rpc CreateTodos (stream todo.v1.CreateTodoRequest) returns (stream todo.v1.Todo)$')"
 "$MS" assert demo/todos --saw 'POST /todo.v1.Todos/CreateTodo' >/dev/null && code=0 || code=$?
 check "assert sees an rpc as its POST path" 0 "$code"
 check "env exports the target without a scheme" "export TODOS=localhost:$GP" "$("$MS" env demo/todos --env TODOS | head -1)"

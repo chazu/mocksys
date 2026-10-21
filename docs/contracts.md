@@ -372,7 +372,20 @@ matches no stub gets an empty reply, every field at its default, as an unmatched
 request gets an empty 200; a server stream, or a bidirectional stream's turn, sends no
 messages. A method the proto does not declare answers `UNIMPLEMENTED`.
 
-Out of scope: server reflection, recording gRPC traffic (`record`,
+Every grpc mock serves server reflection, `grpc.reflection.v1` and `v1alpha`, so a
+client that lists and describes services, such as `grpcurl` or Postman, calls the mock
+without the proto. The files it returns are rebuilt from the descriptor, one per
+package, so their names need not match the `.proto` files on disk.
+[`examples/grpc-todos/reflect.js`](../examples/grpc-todos/reflect.js) does the same with
+grpc-js:
+
+```bash
+grpcurl -plaintext localhost:9150 list                         # todo.v1.Todos
+grpcurl -plaintext -d '{"id":"t1"}' localhost:9150 todo.v1.Todos/GetTodo
+node examples/grpc-todos/reflect.js localhost:9150 todo.v1.Todos  # one line per rpc
+```
+
+Out of scope: recording gRPC traffic (`record`,
 `freeze`), TLS, `proxy` responses, and `conform`, which replays HTTP. A grpc mock
 listens on `127.0.0.1` and `::1` without TLS, so a client connects with insecure
 credentials.

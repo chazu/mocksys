@@ -5,7 +5,8 @@
   headers, the decoded message as a JSON body), so matching, injection and state
   are the HTTP imposter's. A client stream's request body is the array of its
   messages; each message of a bidirectional stream is a request of its own.
-  Methods the proto does not declare answer UNIMPLEMENTED.
+  Methods the proto does not declare answer UNIMPLEMENTED. Every server also
+  serves reflection (mocksys.runtime.grpc-reflection).
 
   The outcome maps back as follows. A 2xx JSON object body is the reply message,
   checked against the reply type by mocksys.runtime.proto-json; a JSON array fills
@@ -20,6 +21,7 @@
             ["@grpc/grpc-js" :as grpc]
             ["@grpc/proto-loader" :as loader]
             ["protobufjs" :as protobuf]
+            [mocksys.runtime.grpc-reflection :as reflection]
             [mocksys.runtime.imposter :as imposter]
             [mocksys.runtime.proto-json :as pj]))
 
@@ -329,6 +331,7 @@
         stop           (fn [] (.forceShutdown server) (p/resolved nil))]
     (doseq [[svc impl] (services imp pkg-def root)]
       (.addService server svc (clj->js impl)))
+    (reflection/add! server pkg-def)
     (.register server clock-path (clock-handler imp) text-out text-in "unary")
     (-> (p/let [_ (bind! server (str "127.0.0.1:" port))
                 _ (p/catch (bind! server (str "[::1]:" port))
