@@ -96,6 +96,23 @@
             (is (= 200 (:status again)))
             (is (= 404 (:status miss)))))))))
 
+(deftest a-delete-during-create-leaves-nothing-listening
+  ;; create! registers the imposter before its servers listen; a delete! issued in
+  ;; that window must win, so the servers that come up afterwards are closed.
+  (async done
+    (p/let [registry (atom {})
+            port     (free-port)
+            created  (let [pr (#'runtime/create! registry (js/JSON.stringify (clj->js (imposter port []))))]
+                       (#'runtime/delete! registry port)
+                       (-> pr (p/then (fn [[st _]] st)) (p/catch (fn [e] (ex-message e)))))
+            wire     (-> (js/fetch (str "http://127.0.0.1:" port "/"))
+                         (p/then (constantly :served)) (p/catch (constantly :refused)))]
+      (is (= :refused wire) "no server is left listening on the deleted port")
+      (is (= {} @registry) "the registry holds nothing for it")
+      (is (string? created) (str "the create reports that it lost to the delete, got " (pr-str created)))
+      (p/do (p/all (map #(#'runtime/close! %) (mapcat :servers (vals @registry))))
+            (done)))))
+
 (deftest faults-and-wait-on-the-wire
   (async done
     (with-daemon done
