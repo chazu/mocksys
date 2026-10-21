@@ -58,6 +58,17 @@
   (is (str/includes? (rejects (spec [{"responses" [{"inject" "function ( {"}]}])) "injection"))
   (is (str/includes? (rejects (spec [{"responses" [{"proxy" {"to" "https://x" "mode" "proxyAlways"}}]}])) "proxyOnce")))
 
+(deftest a-proxy-target-is-a-bare-origin
+  (let [proxy-to (fn [to] (rejects (spec [{"responses" [{"proxy" {"to" to "mode" "proxyOnce"}}]}])))]
+    (testing "a path, query or fragment would be dropped on the way upstream, so it is refused"
+      (is (str/includes? (proxy-to "https://api.example.com/v1") "stubs[0].responses[0]: proxy.to must not contain a path"))
+      (is (str/includes? (proxy-to "https://api.example.com/?page=2") "proxy.to must not contain a query"))
+      (is (str/includes? (proxy-to "https://api.example.com#top") "proxy.to must not contain a fragment")))
+    (testing "an origin, with or without the root slash, is accepted"
+      (is (nil? (proxy-to "https://api.example.com")))
+      (is (nil? (proxy-to "http://127.0.0.1:8080/"))))
+    (is (str/includes? (proxy-to "not a url") "proxy.to must be an http(s) URL"))))
+
 ;; --- is responses ------------------------------------------------------------
 
 (deftest is-response-and-defaults
