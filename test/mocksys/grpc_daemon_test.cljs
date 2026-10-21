@@ -6,6 +6,7 @@
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
+            ["node:net" :as net]
             ["node:path" :as path]
             [mocksys.contract :as contract]
             [mocksys.proto :as proto]
@@ -152,6 +153,39 @@
           (is (= [400 "stubs[0]: proxy responses are not supported for protocol grpc"]
                  [(:status proxied) (get-in proxied [:json "errors" 0 "message"])]))
           (is (= [] (get-in listed [:json "imposters"])) "no rejected imposter is left registered"))))))
+
+(defn- hold!
+  "Listen on `host`:`port` with a plain TCP server; resolves a fn that closes it."
+  [host port]
+  (js/Promise.
+   (fn [resolve reject]
+     (let [srv (.createServer net)]
+       (.once srv "error" reject)
+       (.listen srv port host (fn [] (resolve (fn [] (js/Promise. (fn [r] (.close srv r)))))))))))
+
+(defn- bindable?
+  "Whether `host`:`port` is free to listen on now."
+  [host port]
+  (-> (p/let [release (hold! host port)] (release) true)
+      (p/catch (fn [_] false))))
+
+(deftest a-port-in-use-is-refused-on-either-loopback-address
+  (async done
+    (fx/with-daemon done
+      (fn [admin]
+        (p/doseq [host ["127.0.0.1" "::1"]]
+          (p/let [dir     (fx/kv-dir)
+                  port    (free-port)
+                  release (hold! host port)
+                  made    (admin-call (str admin "/imposters") "POST" (kv-imposter dir port []))
+                  listed  (admin-call (str admin "/imposters") "GET" nil)
+                  _       (release)
+                  v4-free (bindable? "127.0.0.1" port)]
+            (testing (str "with " host " taken")
+              (is (= [400 (str "Port " port " is already in use")]
+                     [(:status made) (get-in made [:json "errors" 0 "message"])]))
+              (is (= [] (get-in listed [:json "imposters"])) "nothing is left registered")
+              (is v4-free "nothing is left listening"))))))))
 
 (def ^:private kv-contract
   {"scenario" "t/kv" "protocol" "grpc" "proto" "./kv.proto"
