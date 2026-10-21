@@ -6,6 +6,7 @@
             [mocksys.store :as store]
             [mocksys.service :as service]
             [mocksys.inject :as inject]
+            [mocksys.contract :as contract]
             [mocksys.conform :as conform]
             [mocksys.kits :as kits]
             [mocksys.lifecycle :as lifecycle]
@@ -153,24 +154,24 @@
                           (catch :default _ (die (str "could not parse --users as JSON: " (:users opts))))))
           scenario (or (when (string? (:scenario opts)) (:scenario opts))
                        (default-scenario-for kind provider))
-          rate-limit (when (string? (:rate-limit opts))
-                       {:max    (js/parseInt (:rate-limit opts))
-                        :window (when (string? (:rate-window opts)) (js/parseInt (:rate-window opts)))})
+          rate-limit  (when (string? (:rate-limit opts)) (js/parseInt (:rate-limit opts)))
+          rate-window (when (string? (:rate-window opts)) (js/parseInt (:rate-window opts)))
           token-ttl  (when (string? (:token-ttl opts)) (js/parseInt (:token-ttl opts)))
           issuer     (when (string? (:issuer opts)) (:issuer opts))
           signing-key (when (string? (:signing-key opts))
                         (try (store/slurp (:signing-key opts))
                              (catch :default _ (die (str "could not read --signing-key file: " (:signing-key opts))))))
           built    (cond-> (builder scenario {:provider provider :users users
-                                              :rate-limit rate-limit :token-ttl token-ttl
+                                              :rate-limit rate-limit :rate-window rate-window
+                                              :token-ttl token-ttl
                                               :issuer issuer :signing-key signing-key})
                      (:port opts) (assoc "port" (js/parseInt (:port opts))))]
       (store/write-contract! scenario built)
       (lifecycle/compile! scenario)
       (println (str "✦ generated '" scenario "' from kit '" kind "'"))
-      (when (inject/contract-stateful? built)
+      (when (inject/contract-stateful? (contract/expand built))
         (println "  (stateful — served via Mountebank injection, managed automatically by `run`)"))
-      (doseq [op (get built "operations")]
+      (doseq [op (get (contract/expand built) "operations")]
         (println (str "  · " (get-in op ["request" "method"]) " " (get-in op ["request" "path"]))))
       (println)
       (println (str "  run it:   mocksys run " scenario
@@ -178,12 +179,20 @@
       (println (str "  inspect:  mocksys inspect " scenario)))))
 
 (defn cmd-genes
-  "List the reusable behavioral genes that kits compose (the building blocks of a
-   twin), and the kits available:  genes"
+  "List the genes a contract can list under `genes:`, each with its params, the
+   capabilities that are built in rather than genes, and the kits available:  genes"
   [_]
-  (println "# genes — reusable behavioral patterns a kit composes")
-  (doseq [{:keys [name doc]} kits/genes]
-    (println (str "  · " name "  —  " doc)))
+  (println "# genes — list them under `genes:` in contract.yaml  (* = required param)")
+  (doseq [[gname {:keys [doc params required]}] (sort kits/genes)]
+    (println (str "  · " gname "  —  " doc))
+    (let [label #(str (name %) (when (required %) "*"))
+          width (apply max (map (comp count label first) params))]
+      (doseq [[k pdoc] params]
+        (println (str "      " (.padEnd (label k) width) "  " pdoc)))))
+  (println)
+  (println "# built in, not genes")
+  (doseq [[cname where] kits/capabilities]
+    (println (str "  · " cname "  —  " where)))
   (println)
   (println "# kits — full twins generated in one command")
   (doseq [[k {:keys [doc]}] (sort kits/kits)]

@@ -21,6 +21,7 @@
   example instead of the happy one."
   (:require [clojure.string :as str]
             [mocksys.inject :as inject]
+            [mocksys.kits :as kits]
             ["openapi-sampler" :as sampler]))
 
 ;; --- path templating ------------------------------------------------------
@@ -48,6 +49,66 @@
       str/lower-case
       (str/replace #"[^a-z0-9]+" "-")
       (str/replace #"^-+|-+$" "")))
+
+;; --- genes: the authored `genes:` list -> operations ------------------------
+
+(defn- gene-entry-errors
+  "Problems with the `i`th `genes:` entry, as messages."
+  [i entry]
+  (if-not (and (map? entry) (= 1 (count entry)))
+    [(str "genes[" i "]: expected a one-key map {gene-name: {params}}, got " (pr-str entry))]
+    (let [[gname ps] (first entry)
+          gene       (get kits/genes gname)
+          at         (str "genes[" i "] " gname)]
+      (cond
+        (nil? gene)
+        [(str at ": unknown gene '" gname "' (known: " (str/join ", " (sort (keys kits/genes))) ")")]
+        (not (or (nil? ps) (map? ps)))
+        [(str at ": params must be a map, got " (pr-str ps))]
+        :else
+        (let [declared (map first (:params gene))
+              given    (set (map keyword (keys ps)))]
+          (concat
+           (for [k (sort given) :when (not (some #{k} declared))]
+             (str at ": unknown param '" (name k) "' (params: " (str/join ", " (map name declared)) ")"))
+           (for [k (sort (:required gene)) :when (not (given k))]
+             (str at ": missing required param '" (name k) "'"))))))))
+
+(defn gene-errors
+  "Every problem with a contract's `genes:` list (unknown gene, unknown or missing
+   param, malformed entry), as messages. Empty when there are none."
+  [contract]
+  (let [gs (get contract "genes")]
+    (cond
+      (nil? gs)             []
+      (not (sequential? gs)) ["genes: expected a list of {gene-name: {params}} entries"]
+      :else                  (vec (mapcat gene-entry-errors (range) gs)))))
+
+(defn- gene-fragment
+  "Build one valid `genes:` entry, tagging each operation with the gene's name."
+  [entry]
+  (let [[gname ps] (first entry)
+        frag       ((:build (get kits/genes gname)) (update-keys (or ps {}) keyword))]
+    (update frag :operations (fn [ops] (mapv #(assoc % "gene" gname) ops)))))
+
+(defn expand
+  "The effective contract: `genes:` expanded into operations appended after the
+   authored ones, so an authored operation shadows a gene operation on the same
+   request (first match wins). Gene collections and seed merge in, authored ones
+   winning. Pure and idempotent; a contract without `genes:` comes back unchanged.
+   Throws on an unknown gene or param."
+  [contract]
+  (if-not (contains? contract "genes")
+    contract
+    (let [errs (gene-errors contract)]
+      (when (seq errs) (throw (js/Error. (str/join "; " errs))))
+      (apply kits/compose (dissoc contract "genes") (map gene-fragment (get contract "genes"))))))
+
+(defn gene-of
+  "The gene contributing operation `op-id`, or nil when that id is authored (an
+   authored operation wins the id) or unknown."
+  [contract op-id]
+  (get (first (filter #(= op-id (get % "id")) (get (expand contract) "operations"))) "gene"))
 
 ;; --- lower: contract -> imposter ------------------------------------------
 
@@ -222,7 +283,8 @@
    prior artifact had one (ensure-running! reassigns at run time regardless)."
   ([contract] (lower contract nil))
   ([contract port]
-   (let [fault (get contract "fault")
+   (let [contract (expand contract)
+         fault (get contract "fault")
          seed  (get contract "seed")
          ;; collection declarations ({name {idField, seed}}) — resolve each `seed`
          ;; name to its actual array so the injection can embed + seed it once.
@@ -318,7 +380,7 @@
                             "operations" []})
          ctype (when (some? body) {"Content-Type" (if json? "application/json" "text/plain")})
          resp-hdrs (merge ctype resp-headers)
-         taken (set (map #(get % "id") (get base "operations")))
+         taken (set (map #(get % "id") (get (expand base) "operations")))
          base-id (slug (str method "-" path))
          id    (if (contains? taken base-id)
                  (first (remove taken (map #(str base-id "-" %) (iterate inc 2))))
@@ -376,9 +438,10 @@
 (defn examples-overview
   "Agent-readable view of a contract's operations -> responses -> examples."
   [contract op-filter]
-  (for [op (get contract "operations")
+  (for [op (get (expand contract) "operations")
         :when (or (nil? op-filter) (= op-filter (get op "id")))]
     {:id     (get op "id")
+     :gene   (get op "gene")
      :method (get-in op ["request" "method"])
      :path   (get-in op ["request" "path"])
      :responses
@@ -428,9 +491,7 @@
       (mapcat #(schema-violations (get schema "items") % (str path "[]")) value)
       :else [])))
 
-(defn validate
-  "Returns {:errors [...] :warnings [...]}. Errors block compile; warnings (e.g. an
-   example diverging from its schema) are advisory."
+(defn- validate-expanded
   [contract]
   (let [ops (get contract "operations")
         errs (atom []) warns (atom [])
@@ -469,3 +530,13 @@
                 v (schema-violations (get r "bodySchema") (get ex "body") (str id "/" nm))]
           (warn! v))))
     {:errors @errs :warnings @warns}))
+
+(defn validate
+  "Returns {:errors [...] :warnings [...]}. Errors block compile; warnings (e.g. an
+   example diverging from its schema) are advisory. Checks `genes:` first, then the
+   expanded operations."
+  [contract]
+  (let [gerrs (gene-errors contract)]
+    (if (seq gerrs)
+      {:errors gerrs :warnings []}
+      (validate-expanded (expand contract)))))

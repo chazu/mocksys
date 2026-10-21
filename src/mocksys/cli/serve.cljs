@@ -8,6 +8,7 @@
             [mocksys.scrub :as scrub]
             [mocksys.analyze :as analyze]
             [mocksys.service :as service]
+            [mocksys.contract :as contract]
             [mocksys.lifecycle :as lifecycle]
             [mocksys.cli.util :refer [die env-vars-for running-imposter]]))
 
@@ -77,7 +78,7 @@
           prof     (service/effective scenario)
           ;; Prefer the contract's friendly method/path (e.g. /users/{id}) over the
           ;; imposter's compiled regex — stubs map 1:1 to operations in order.
-          ops      (get (or (store/read-contract scenario) {}) "operations" [])
+          ops      (get (contract/expand (or (store/read-contract scenario) {})) "operations" [])
           stubs    (->> (analyze/summarize imposter (:volatile prof))
                         (map-indexed
                          (fn [i s]

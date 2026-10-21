@@ -17,16 +17,17 @@
 
 ;; --- composition ----------------------------------------------------------
 
-(defn- compose
+(defn compose
   "Merge gene fragments into one contract. Each fragment may carry :operations
-   (concatenated, in order — Mountebank serves the first matching stub),
-   :collections (merged), and :seed (merged)."
+   (concatenated, in order), :collections and :seed. Earlier wins throughout, as
+   Mountebank serves the first matching stub: `base` keeps its own collections and
+   seed arrays over a fragment's of the same name."
   [base & fragments]
   (reduce (fn [c {:keys [operations collections seed]}]
             (cond-> c
               (seq operations)   (update "operations" (fnil into []) operations)
-              (seq collections)  (update-in ["state" "collections"] merge collections)
-              (seq seed)         (update "seed" merge seed)))
+              (seq collections)  (update-in ["state" "collections"] #(merge collections %))
+              (seq seed)         (update "seed" #(merge seed %))))
           (merge {"operations" [] "state" {"collections" {}} "seed" {}} base)
           fragments))
 
@@ -48,7 +49,7 @@
      POST   {base}/{id}       merge-patch
      DELETE {base}/{id}       delete
    `opts`: :coll :base :id-field :seed-name :id-prefix :create-defaults :not-found
-   :invalid-filter."
+   :invalid-filter :rate-limit {\"max\" N \"window\" S}."
   [{:keys [coll base id-field seed-name id-prefix create-defaults not-found invalid-filter rate-limit]}]
   (let [id-field (or id-field "id")
         id-regex (str base "/([^/]+)$")
@@ -60,7 +61,7 @@
         rl-bind  (when rate-limit {"__cli" {"header" "authorization" "bearer" true}})
         rl       (when rate-limit
                    {"bucket" "rl" "key" "{__cli}"
-                    "max"    (:max rate-limit) "window" (or (:window rate-limit) 60)})
+                    "max"    (get rate-limit "max") "window" (or (get rate-limit "window") 60)})
         eff      (fn [m] (cond-> m
                            rl-bind (update "bind" merge rl-bind)
                            rl      (assoc "limit" rl)))]
@@ -186,12 +187,12 @@
 (defn- oidc-live-ops
   "The live-collection handshake (okta): a `render` picker over the mutable
    collection, a uid carried through the code→token buckets, and userinfo shaped by
-   `find`+dotted `respond`. `active-only?` gates issuance and the picker to
+   `find`+dotted `respond`. `active-only` gates issuance and the picker to
    `status eq \"ACTIVE\"` (Q7). `claims` is the (dotted) userinfo claim template."
-  [{:keys [authz token userinfo token-ttl user-source]}]
-  (let [{:keys [collection login-field active-only? claims jwt]} user-source
+  [{:keys [authz token userinfo token-ttl user-source jwt]}]
+  (let [{:strs [collection login-field active-only claims]} user-source
         login-field (or login-field "profile.login")
-        active-flt  (when active-only? "status eq \"ACTIVE\"")
+        active-flt  (when active-only "status eq \"ACTIVE\"")
         claims      (or claims {"sub" "{user.id}"})
         ;; the access-token op: opaque bucket token, or a signed RS256 JWT pair when
         ;; the kit supplies a `:jwt` config (private PEM + kid + claim templates).
@@ -263,15 +264,16 @@
                  "respond" {"status" 200 "json" claims}}}]))
 
 (defn oidc-handshake
-  "OIDC genes over `authz`/`token`/`userinfo` paths. `:user-source` forks the source:
-     {:seed <name>}                            → seed-array resolve (oauth2, default)
-     {:collection <c> :login-field <p> :active-only? bool :claims <tpl>}
-                                               → live mutable collection (okta)
+  "OIDC genes over `authz`/`token`/`userinfo` paths. Users come from the seed array
+   `:seed-name` (oauth2, default; `:users` feeds the static picker), or from a live
+   collection when `:user-source` is
+     {\"collection\" c \"login-field\" p \"active-only\" bool \"claims\" tpl}  (okta)
    Returns authorize(+picker), token, userinfo. With `:token-ttl` (seconds), issued
-   tokens expire on the virtual clock."
+   tokens expire on the virtual clock. `:jwt` (live source only) signs RS256 tokens;
+   it carries a private key made at kit time, so only code can supply it."
   [{:keys [user-source] :as opts}]
   {:operations
-   (if (:collection user-source)
+   (if (get user-source "collection")
      (oidc-live-ops opts)
      (oidc-seed-ops opts))})
 
@@ -491,7 +493,7 @@
   "A digital twin of Okta: users + groups CRUD (SCIM-ish filter + pagination), the
    Okta error envelope on misses, and an OIDC authorize/token/userinfo flow — all on
    one stateful imposter. Composed entirely from genes.
-     :rate-limit {:max N :window S}  rate-limit the CRUD ops (429 + X-Rate-Limit-*)
+     :rate-limit {\"max\" N \"window\" S}  rate-limit the CRUD ops (429 + X-Rate-Limit-*)
      :token-ttl  S                   OIDC tokens expire after S seconds (virtual clock)"
   [scenario users {:keys [rate-limit token-ttl issuer signing-key]}]
   (let [users  (or (seq users) okta-users)
@@ -520,9 +522,9 @@
       ;; login→uid, and userinfo all read the same mutable collection the CRUD ops
       ;; write, so SCIM-created users can log in. Issuance + picker gate to ACTIVE (Q7).
       (oidc-handshake {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token"
-                       :userinfo "/oauth2/v1/userinfo" :token-ttl token-ttl
-                       :user-source {:collection "users" :login-field "profile.login"
-                                     :active-only? true :claims okta-userinfo-claims :jwt jwt}})
+                       :userinfo "/oauth2/v1/userinfo" :token-ttl token-ttl :jwt jwt
+                       :user-source {"collection" "users" "login-field" "profile.login"
+                                     "active-only" true "claims" okta-userinfo-claims}})
       ;; JWKS + discovery so third-party validators can verify the twin's tokens
       {:operations [(jwks-op (:jwk cfg))
                     (discovery-op "openid-config" "/.well-known/openid-configuration"
@@ -541,8 +543,11 @@
                       (oauth2 scenario (or provider "github") users token-ttl))}
    "okta"   {:doc "Okta twin: users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + membership [--rate-limit N] [--token-ttl S] [--issuer URL] [--signing-key FILE.pem]"
              :flags #{:users :rate-limit :rate-window :token-ttl :issuer :signing-key}
-             :build (fn [scenario {:keys [users rate-limit token-ttl issuer signing-key]}]
-                      (okta scenario users {:rate-limit rate-limit :token-ttl token-ttl
+             :build (fn [scenario {:keys [users rate-limit rate-window token-ttl issuer signing-key]}]
+                      (okta scenario users {:rate-limit (when rate-limit
+                                                          (cond-> {"max" rate-limit}
+                                                            rate-window (assoc "window" rate-window)))
+                                            :token-ttl token-ttl
                                             :issuer issuer :signing-key signing-key}))}})
 
 (defn unsupported-flags
@@ -555,11 +560,47 @@
          vec)))
 
 (def genes
-  "The reusable behavioral genes a kit composes — shown by `mocksys genes`."
-  [{:name "crud-collection" :doc "REST resource: create/list/get/update/delete, SCIM-ish filter + cursor pagination"}
-   {:name "oidc-handshake"  :doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"}
-   {:name "membership"      :doc "Group membership: assign/unassign (idempotent, FK-guarded) + list either side of the relation, hydrated + paginated"}
-   {:name "jwt-signing"     :doc "RS256-signed access/id JWTs (require('crypto')), published JWKS + OIDC discovery; typed claims via the sign verb"}
-   {:name "error-envelope"  :doc "Provider-shaped error bodies for misses (e.g. Okta errorCode/errorSummary)"}
-   {:name "rate-limit"      :doc "Per-client request budget over a virtual-clock window → 429 + X-Rate-Limit-* headers"}
-   {:name "virtual-clock"   :doc "Deterministic, advanceable time (store.ttl expiry, now bind); driven by `mocksys clock`"}])
+  "name -> {:doc :params :required :build}: the genes a contract may list under
+   `genes:`. `:params` is [[option doc] ...] in display order. `:build` takes the
+   options keyword-keyed, values as written in YAML, and returns a fragment."
+  {"crud-collection"
+   {:doc "REST resource: create/list/get/update/delete, SCIM filter + cursor pagination"
+    :params [[:coll "collection name; also names the ops (list-<coll>, ...)"]
+             [:base "resource path, e.g. /api/v1/users"]
+             [:seed-name "seed array the collection starts from"]
+             [:id-field "row id field (default id)"]
+             [:id-prefix "prefix for minted ids (default none)"]
+             [:create-defaults "fields a created row gets unless the body sets them"]
+             [:not-found "miss response {status, json} (default Okta E0000007)"]
+             [:invalid-filter "bad-filter response {status, json} (default Okta E0000031)"]
+             [:rate-limit "{max, window}: per-client budget per window seconds (default 60), then 429 + X-Rate-Limit-*"]]
+    :required #{:coll :base}
+    :build crud-collection}
+   "oidc-handshake"
+   {:doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"
+    :params [[:authz "authorize path"]
+             [:token "token path"]
+             [:userinfo "userinfo path"]
+             [:seed-name "seed array userinfo resolves logins in (seed source)"]
+             [:users "accounts the static picker lists (seed source)"]
+             [:token-ttl "seconds until an issued token expires on the virtual clock"]
+             [:user-source "{collection, login-field, active-only, claims}: read users from a live collection instead"]]
+    :required #{:authz :token :userinfo}
+    :build oidc-handshake}
+   "membership"
+   {:doc "Many-to-many membership: assign/unassign (idempotent, FK-guarded) + list either side, hydrated + paginated"
+    :params [[:coll "relation collection (default memberships)"]
+             [:users-coll "member collection (default users)"]
+             [:groups-coll "group collection (default groups)"]
+             [:users-base "member resource path (default /api/v1/users)"]
+             [:groups-base "group resource path (default /api/v1/groups)"]
+             [:not-found "miss response {status, json} (default Okta E0000007)"]]
+    :required #{}
+    :build membership}})
+
+(def capabilities
+  "Behavior that is not a standalone gene, and where it lives instead."
+  [["rate-limit"     "crud-collection's rate-limit param, or the `limit` effect verb"]
+   ["error-envelope" "the default not-found / invalid-filter of crud-collection and membership (Okta-shaped)"]
+   ["virtual-clock"  "contract `state.clock`, or implied by store.ttl, limit, sign or a `now` bind; `mocksys clock` moves it"]
+   ["jwt-signing"    "the `sign` effect verb; `kit okta` wires it with a key generated at kit time"]])
