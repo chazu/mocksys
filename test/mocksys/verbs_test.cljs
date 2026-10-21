@@ -11,6 +11,9 @@
             ["node:net" :as net]
             [mocksys.harness :as h]
             [mocksys.contract :as contract]
+            [mocksys.lifecycle :as lifecycle]
+            [mocksys.store :as store]
+            [mocksys.cli.author :as author]
             [mocksys.runtime :as runtime]))
 
 ;; --- the generated injection ---------------------------------------------------
@@ -143,29 +146,33 @@
   (is (thrown-with-msg? js/Error #"modules: .* needs the scenario directory"
                         (contract/lower (shout-contract ["./verbs.js"])))))
 
-(deftest a-broken-module-is-named
-  (let [dir (scenario-dir! {"none.js" "module.exports = {};"
-                            "esm.js"  "export const verbs = {};"
-                            "num.js"  "module.exports = { verbs: { upper: 1 } };"})]
-    (is (some #(str/includes? % "modules: ./gone.js: no such file") (errors (shout-contract ["./gone.js"]) dir)))
-    (is (some #(str/includes? % "modules: ./none.js exports no `verbs` object") (errors (shout-contract ["./none.js"]) dir)))
-    (is (some #(str/includes? % "modules: ./esm.js does not load") (errors (shout-contract ["./esm.js"]) dir)))
-    (is (some #(str/includes? % "CommonJS") (errors (shout-contract ["./esm.js"]) dir)))
-    (is (some #(str/includes? % "modules: ./num.js: verb 'upper' is not a function") (errors (shout-contract ["./num.js"]) dir)))))
+(def ^:private side-effecting-module
+  "A module whose top level leaves a file behind, so a test can tell whether it ran."
+  (str "require('node:fs').writeFileSync(require('node:path').join(__dirname, 'ran'), 'top level ran');"
+       "module.exports = { verbs: { lower() {} } };"))
 
-(deftest a-call-must-name-an-exported-verb
-  (let [dir (scenario-dir! {"verbs.js" "module.exports = { verbs: { lower() {}, title() {} } };"})]
-    (is (= ["shout: call: verb 'upper' is not exported by the modules (they export lower, title)"]
-           (errors (shout-contract ["./verbs.js"]) dir)))
+(deftest the-cli-never-runs-module-code
+  (let [dir (scenario-dir! {"verbs.js" side-effecting-module})
+        c   (shout-contract ["./verbs.js"])]
+    (contract/lower c nil dir)
+    (is (= [] (errors c dir)) "validate leaves the verb check to the daemon")
+    (is (not (fs/existsSync (path/join dir "ran"))) "neither lower nor validate ran the module")))
+
+(deftest a-module-must-exist
+  (let [dir (scenario-dir! {})]
+    (is (some #(str/includes? % "modules: ./gone.js: no such file") (errors (shout-contract ["./gone.js"]) dir)))))
+
+(deftest a-call-must-be-well-formed
+  (let [dir       (scenario-dir! {"verbs.js" upper-module})
+        with-call #(assoc-in (shout-contract ["./verbs.js"]) ["operations" 0 "effect" "call"] %)]
     (is (= ["shout: call: verb 'upper' needs a module that exports it; list one under `modules:`"]
            (errors (dissoc (shout-contract nil) "modules") dir)))
-    (is (some #(str/includes? % "call needs a `verb` name")
-              (errors (assoc-in (shout-contract ["./verbs.js"]) ["operations" 0 "effect" "call"] {"as" "x"}) dir)))))
-
-(deftest two-modules-exporting-one-verb-is-an-error
-  (let [dir (scenario-dir! {"a.js" upper-module "b.js" upper-module})]
-    (is (some #(str/includes? % "modules: verb 'upper' is exported by both ./a.js and ./b.js")
-              (errors (shout-contract ["./a.js" "./b.js"]) dir)))))
+    (doseq [[spec msg] [[{"as" "x"} "shout: call needs a `verb` name"]
+                        [{"verb" ""} "shout: call needs a `verb` name"]
+                        [{"verb" "upper" "args" ["a"]} "shout: call: verb 'upper': `args` must be an object"]
+                        [{"verb" "upper" "as" 3} "shout: call: verb 'upper': `as` must be a variable name"]
+                        [{"verb" "upper" "bogus" 1} "shout: call: verb 'upper': unknown key(s) bogus (use verb, args, as)"]]]
+      (is (= [msg] (errors (with-call spec) dir)) (pr-str spec)))))
 
 ;; --- the daemon ----------------------------------------------------------------
 
@@ -246,3 +253,93 @@
                   after  (call (str "http://127.0.0.1:" port "/shout"))]
             (is (= "1700000000" (get-in before [:json "loud"])))
             (is (= "1700000060" (get-in after [:json "loud"])))))))))
+
+(defn- post-error [admin dir modules]
+  (p/let [port (free-port)
+          r    (post! admin (contract/lower (shout-contract modules) nil dir) port)]
+    [(:status r) (get-in r [:json "errors" 0 "message"])]))
+
+(deftest the-daemon-checks-modules-and-verbs-on-post
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (let [dir (scenario-dir! {"none.js"  "module.exports = 5;"
+                                  "esm.js"   "export const verbs = {};"
+                                  "num.js"   "module.exports = { verbs: { upper: 1 } };"
+                                  "other.js" "module.exports = { verbs: { lower() {}, title() {} } };"
+                                  "a.js"     upper-module
+                                  "b.js"     upper-module})
+              abs #(path/join dir %)]
+          (p/let [none  (post-error admin dir ["./none.js"])
+                  esm   (post-error admin dir ["./esm.js"])
+                  num   (post-error admin dir ["./num.js"])
+                  other (post-error admin dir ["./other.js"])
+                  both  (post-error admin dir ["./a.js" "./b.js"])]
+            (is (= [400 (str "modules: " (abs "none.js") " exports no `verbs` object")] none))
+            (is (= 400 (first esm)))
+            (is (str/includes? (str (second esm)) (str "modules: " (abs "esm.js") " does not load")))
+            (is (str/includes? (str (second esm)) "CommonJS"))
+            (is (= [400 (str "modules: " (abs "num.js") ": verb 'upper' is not a function")] num))
+            (is (= [400 "call: verb 'upper' is not exported by the modules (they export lower, title)"] other))
+            (is (= [400 (str "modules: verb 'upper' is exported by both " (abs "a.js") " and " (abs "b.js"))] both))))))))
+
+;; --- the lifecycle -------------------------------------------------------------
+
+(defn- with-store
+  "Call (f dir) with a fresh store whose scenario demo/shout holds `contract` and
+   `files`, and, given `admin`, with that daemon as the store's daemon. Restores the
+   store and the environment once f settles."
+  [admin files contract f]
+  (let [home  (fs/realpathSync (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-home-")))
+        env   js/process.env
+        saved {:root store/root :services store/services-dir :port (.-MOCKSYS_ADMIN_PORT env)}]
+    (set! store/root home)
+    (set! store/services-dir (path/join home "services"))
+    (when admin (set! (.-MOCKSYS_ADMIN_PORT env) (.-port (js/URL. admin))))
+    (store/write-contract! "demo/shout" contract)
+    (doseq [[n src] files] (fs/writeFileSync (path/join (store/scenario-dir "demo/shout") n) src))
+    (-> (p/resolved nil)
+        (p/then (fn [_] (f (store/scenario-dir "demo/shout"))))
+        (p/finally (fn []
+                     (set! store/root (:root saved))
+                     (set! store/services-dir (:services saved))
+                     (if (:port saved) (set! (.-MOCKSYS_ADMIN_PORT env) (:port saved)) (js-delete env "MOCKSYS_ADMIN_PORT")))))))
+
+(defn- rejection [pr] (-> pr (p/then (constantly nil)) (p/catch ex-message)))
+
+(deftest run-checks-verbs-up-front
+  (async done
+    (with-daemon done
+      (fn [admin]
+        (with-store admin {"verbs.js" "module.exports = { verbs: { lower() {} } };"} (shout-contract ["./verbs.js"])
+          (fn [_]
+            (p/let [err (rejection (lifecycle/ensure-running! "demo/shout" nil))]
+              (is (str/includes? (str err) "call: verb 'upper' is not exported by the modules (they export lower)")))))))))
+
+(deftest validate-says-when-verbs-are-checked
+  (async done
+    (-> (with-store nil {"verbs.js" side-effecting-module} (shout-contract ["./verbs.js"])
+          (fn [dir]
+            (let [out  (atom [])
+                  exit (.-exit js/process)]
+              (set! (.-exit js/process) (fn [code] (swap! out conj (str "exit " code))))
+              (try (binding [*print-fn* #(swap! out conj %) *print-err-fn* #(swap! out conj %)]
+                     (author/cmd-validate {:pos ["demo/shout"]}))
+                   (finally (set! (.-exit js/process) exit)))
+              (is (not-any? #(str/starts-with? % "exit") @out) "validate passes")
+              (is (some #(str/includes? % "verbs are checked when the scenario runs") @out) (pr-str @out))
+              (is (not (fs/existsSync (path/join dir "ran")))))))
+        (p/finally done))))
+
+(deftest no-injection-refuses-modules-before-they-run
+  (async done
+    (let [env js/process.env]
+      (-> (with-store nil {"verbs.js" side-effecting-module} (shout-contract ["./verbs.js"])
+            (fn [dir]
+              (set! (.-MOCKSYS_NO_INJECTION env) "1")
+              (p/let [err (rejection (p/then (p/resolved nil) #(lifecycle/ensure-running! "demo/shout" nil)))]
+                (is (str/includes? (str err) "MOCKSYS_NO_INJECTION"))
+                (is (str/includes? (str err) "./verbs.js") "the refusal names the modules")
+                (is (not (fs/existsSync (path/join dir "ran"))) "the module's top level did not run")
+                (is (not (fs/existsSync (path/join dir "imposter.json"))) "nothing was compiled"))))
+          (p/finally (fn [] (js-delete env "MOCKSYS_NO_INJECTION") (done)))))))
