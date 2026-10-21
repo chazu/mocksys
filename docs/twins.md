@@ -130,7 +130,9 @@ $MOCKSYS_HOME/kits/webhooks/
   modules.
 - `kit` checks everything before it writes anything: the contract, each module path, and
   each place a module will be copied to. It refuses to write through a symlink that leads
-  out of the scenario directory.
+  out of the scenario directory, or below a file. It copies the modules before it writes
+  `contract.yaml`, so a copy that fails, for lack of permission or space, leaves no new
+  contract.
 - `kit` never runs a module. It prints the same notice `unpack` prints: the scenario runs
   JavaScript in the daemon when you `run` it.
 - A single-file kit that lists `modules:` is skipped, with a warning that names the

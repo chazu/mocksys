@@ -95,9 +95,6 @@ contract:
 
 (defn- scenario-file [home & parts] (apply path/join home "hooks" "hooks" parts))
 
-(defn- nothing-written? [home]
-  (not (fs/existsSync (scenario-file home "contract.yaml"))))
-
 (defn- tree
   "Everything under `file`, links not followed: relative path -> the file's text,
    :dir, or the link's target. {} when nothing is there."
@@ -143,15 +140,15 @@ contract:
 
 (deftest a-kit-module-must-stay-inside-the-kit-directory
   (testing "a path that climbs out"
-    (let [{:keys [home died]} (run-kit {"hooks/kit.yaml" (hooks-kit "../outside.js") "outside.js" verbs} ["hooks"] {})]
+    (let [{:keys [died untouched?]} (refused (store! {"hooks/kit.yaml" (hooks-kit "../outside.js") "outside.js" verbs}) {})]
       (is (str/includes? (str died) "modules: ../outside.js is outside the kit directory"))
-      (is (nothing-written? home))))
+      (is untouched?)))
   (testing "a link that points out"
     (let [home (store! {"hooks/kit.yaml" (hooks-kit "./linked.js") "outside.js" verbs})]
       (fs/symlinkSync (path/join home "kits" "outside.js") (path/join home "kits" "hooks" "linked.js"))
-      (let [{:keys [died]} (kit-in home ["hooks"] {})]
+      (let [{:keys [died untouched?]} (refused home {})]
         (is (str/includes? (str died) "modules: ./linked.js is outside the kit directory"))
-        (is (nothing-written? home))))))
+        (is untouched?)))))
 
 (defn- hooks-store []
   (store! {"hooks/kit.yaml" (hooks-kit "./lib/verbs.js") "hooks/lib/verbs.js" verbs}))
@@ -163,19 +160,19 @@ contract:
       (fs/mkdirSync (scenario-file home) #js {:recursive true})
       (fs/symlinkSync elsewhere (scenario-file home "lib"))
       (doseq [opts [{} {:force true}]]
-        (let [{:keys [died]} (kit-in home ["hooks"] opts)]
+        (let [{:keys [died untouched?]} (refused home opts)]
           (is (str/includes? (str died) "outside") (str "refused with " opts))
           (is (empty? (fs/readdirSync elsewhere)))
-          (is (nothing-written? home))))))
+          (is untouched?)))))
   (testing "through a link to nothing where the module goes"
     (let [home      (hooks-store)
           elsewhere (tmp "mocksys-elsewhere-")]
       (fs/mkdirSync (scenario-file home "lib") #js {:recursive true})
       (fs/symlinkSync (path/join elsewhere "planted.js") (scenario-file home "lib" "verbs.js"))
-      (let [{:keys [died]} (kit-in home ["hooks"] {:force true})]
-        (is (some? died))
+      (let [{:keys [died untouched?]} (refused home {:force true})]
+        (is (str/includes? (str died) "link to nothing"))
         (is (not (fs/existsSync (path/join elsewhere "planted.js"))))
-        (is (nothing-written? home))))))
+        (is untouched?)))))
 
 (deftest rerunning-a-kit-keeps-a-hand-edited-module
   (let [home     (hooks-store)
@@ -225,3 +222,24 @@ contract:
           (is (= verbs (slurp (scenario-file home "a.js"))))
           (is (= ["a.js"] (get (js->clj (yaml/load (slurp (scenario-file home "contract.yaml")))) "modules")))
           (is (= ["a.js"] (get (js->clj (js/JSON.parse (slurp (scenario-file home "imposter.json")))) "modules"))))))))
+
+(deftest a-refused-kit-writes-none-of-its-modules
+  (let [home (two-module-store)]
+    (fs/mkdirSync (scenario-file home "lib") #js {:recursive true})
+    (fs/writeFileSync (scenario-file home "lib" "b.js") "// edited by hand")
+    (let [{:keys [died untouched?]} (refused home {})]
+      (is (str/includes? (str died) "lib/b.js in "))
+      (is (str/includes? (str died) "differs from the kit's copy"))
+      (is untouched? "a.js, which is new, was not written either"))))
+
+(deftest a-module-that-cannot-be-copied-stops-kit-before-the-contract
+  (let [home (two-module-store)
+        lib  (scenario-file home "lib")]
+    (fs/mkdirSync lib #js {:recursive true})
+    (fs/chmodSync lib 0555)
+    (try
+      (let [{:keys [died]} (kit-in home ["hooks"] {})]
+        (is (str/includes? (str died) "EACCES"))
+        (is (not (fs/existsSync (scenario-file home "contract.yaml"))))
+        (is (not (fs/existsSync (scenario-file home "imposter.json")))))
+      (finally (fs/chmodSync lib 0755)))))

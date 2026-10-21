@@ -190,8 +190,9 @@
                                " from the kit's copy; nothing was written. "
                                "Rerun with --force to replace it, or pick another --scenario")))
           expanded (contract/expand built)]
+      (try (modules/copy! kit-dir sdir plan)
+           (catch :default e (die (str "kit " kind ": " (.-message e) "; contract.yaml was not written"))))
       (store/write-contract! scenario built)
-      (modules/copy! kit-dir sdir plan)
       (lifecycle/compile! scenario)
       (println (str "✦ generated '" scenario "' from kit '" kind "'"))
       (doseq [p changed]

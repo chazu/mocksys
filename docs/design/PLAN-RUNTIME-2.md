@@ -44,7 +44,9 @@ were dropped. `assert` says when a dropped request could change its answer.
 - `mocksys kits` marks kits that ship modules. `mocksys kit` prints the same warning
   `unpack` prints about module JavaScript.
 - `kit` checks every destination before it writes: a copy may not land outside the
-  scenario directory through a symlink in it, or through a dangling one.
+  scenario directory through a symlink in it, or through a dangling one, or below a
+  file. It copies the modules before it writes `contract.yaml`, so a copy that fails
+  at write time (permissions, a full disk) leaves no new contract behind.
 - Running `kit` again rewrites `contract.yaml`, since flags change it, but no flag changes
   a module, so a module that differs from the kit's copy is a hand edit. `kit` then writes
   nothing and names the file; `--force` replaces it. A matching module is left alone.
