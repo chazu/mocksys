@@ -114,7 +114,7 @@
                (js/setTimeout
                 (fn []
                   (-> (ensure-running! scenario nil)
-                      (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ http://localhost:" port))))
+                      (p/then (fn [port] (println (str "  ↻ reloaded '" scenario "' @ " (address scenario port)))))
                       (p/catch (fn [e] (binding [*print-fn* *print-err-fn*]
                                          (println (str "  ✗ reload failed: " (.-message e))))))))
                 150))))))

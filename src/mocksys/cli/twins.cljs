@@ -7,6 +7,8 @@
             [mocksys.service :as service]
             [mocksys.inject :as inject]
             [mocksys.contract :as contract]
+            [mocksys.proto :as proto]
+            [mocksys.runtime.grpc :as grpc]
             [mocksys.conform :as conform]
             [mocksys.kits :as kits]
             [mocksys.lifecycle :as lifecycle]
@@ -24,6 +26,8 @@
   [{:keys [pos opts]}]
   (let [scenario (first pos)]
     (when-not scenario (die "conform needs a scenario: conform <name> --corpus FILE [--against URL]"))
+    (when (proto/grpc? (store/read-contract scenario))
+      (die (str "conform replays HTTP requests; '" scenario "' is a gRPC mock, which it cannot replay")))
     (let [prof     (service/effective scenario)
           against  (when (string? (:against opts)) (:against opts))
           ignore   (when (string? (:ignore opts)) (vec (remove str/blank? (str/split (:ignore opts) #","))))
@@ -111,12 +115,14 @@
                  (die (str "unknown clock verb '" verb "' — use: advance <dur> | set <ts> | (nothing)")))]
       (p/let [live (mb/list-imposters)
               imp  (running-imposter scenario live)
-              res  (js/fetch (str "http://localhost:" (:port imp) "/_mocksys/clock")
-                             #js {:method "POST"
-                                  :headers #js {"Content-Type" "application/json"}
-                                  :body (js/JSON.stringify (clj->js body))})
-              text (.text res)
-              out  (try (js->clj (js/JSON.parse text)) (catch :default _ nil))]
+              out  (if (proto/grpc? (store/read-contract scenario))
+                     (grpc/clock-call (:port imp) body)
+                     (p/let [res  (js/fetch (str "http://localhost:" (:port imp) "/_mocksys/clock")
+                                            #js {:method "POST"
+                                                 :headers #js {"Content-Type" "application/json"}
+                                                 :body (js/JSON.stringify (clj->js body))})
+                             text (.text res)]
+                       (try (js->clj (js/JSON.parse text)) (catch :default _ nil))))]
         (if (and (map? out) (get out "now"))
           (println (str "🕐 " scenario " — virtual time " (get out "iso")
                         "  (epoch " (get out "now") ")"))
