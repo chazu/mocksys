@@ -30,7 +30,7 @@
            (:errors (contract/validate (grpc (op "get" {"rpc" "kv.Store/Get" "method" "GET" "path" "/x"})))))))
   (testing "a grpc operation needs an rpc of the form pkg.Service/Method"
     (is (= ["get: request.rpc missing (pkg.Service/Method)"]
-           (:errors (contract/validate (grpc (op "get" {"method" "POST" "path" "/kv.Store/Get"}))))))
+           (:errors (contract/validate (grpc (op "get" {}))))))
     (is (= ["get: request.rpc must look like pkg.Service/Method, got \"kv.Store.Get\""]
            (:errors (contract/validate (grpc (op "get" {"rpc" "kv.Store.Get"})))))))
   (testing "a grpc contract names its proto"

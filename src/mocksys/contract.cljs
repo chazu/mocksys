@@ -182,6 +182,14 @@
       (contains? c "matches") {"matches" {"body" (get c "matches")}           "jsonpath" {"selector" selector}}
       :else                   {"equals"  {"body" (get c "equals")}            "jsonpath" {"selector" selector}})))
 
+(defn http-request
+  "An operation's request as the daemon sees it. A gRPC call arrives as POST
+   /pkg.Service/Method, so `rpc: pkg.Service/Method` stands for that method and path."
+  [req]
+  (if-let [rpc (get req "rpc")]
+    (assoc req "method" "POST" "path" (str "/" rpc))
+    req))
+
 (defn- predicates-for
   "Build the predicate array for an operation's request. `match`
    selects which of method/path are matched (default both); `query`/`headers`/`body`
@@ -318,7 +326,7 @@
          issuer      (get contract "issuer")
          stubs (mapv (fn [op]
                        (try
-                         {"predicates" (predicates-for (get op "request"))
+                         {"predicates" (predicates-for (http-request (get op "request")))
                           "responses"
                           (if (inject/stateful? op)
                             ;; stateful op: a generated injection over the shared state
@@ -333,7 +341,7 @@
          ;; a twin that uses a virtual clock gets a built-in /_mocksys/clock control op
          stubs (cond-> stubs
                  clock? (conj (inject/clock-control-stub clock-start)))]
-     (cond-> {"protocol" "http" "stubs" stubs "name" (get contract "scenario")}
+     (cond-> {"protocol" (get contract "protocol" "http") "stubs" stubs "name" (get contract "scenario")}
        port (assoc "port" port)))))
 
 ;; --- lift: recorded imposter -> contract ----------------------------------
@@ -482,8 +490,8 @@
         :when (or (nil? op-filter) (= op-filter (get op "id")))]
     {:id     (get op "id")
      :gene   (get op "gene")
-     :method (get-in op ["request" "method"])
-     :path   (get-in op ["request" "path"])
+     :method (get (http-request (get op "request")) "method")
+     :path   (get (http-request (get op "request")) "path")
      :responses
      (for [r (get op "responses")]
        {:status   (get r "status")
@@ -531,11 +539,37 @@
       (mapcat #(schema-violations (get schema "items") % (str path "[]")) value)
       :else [])))
 
+(def ^:private rpc-name #"^[A-Za-z_][A-Za-z0-9_.]*/[A-Za-z_][A-Za-z0-9_]*$")
+
+(defn- protocol-errors [contract]
+  (let [protocol (get contract "protocol" "http")]
+    (cond
+      (not (contains? #{"http" "grpc"} protocol))
+      [(str "protocol: unsupported " (pr-str protocol) " (http or grpc)")]
+      (and (= "grpc" protocol) (not (string? (get contract "proto"))))
+      ["proto: protocol grpc needs a proto file (a path relative to the scenario directory)"]
+      :else [])))
+
+(defn- request-errors
+  "What is wrong with operation `id`'s request: a grpc operation names only an
+   rpc, an http one a method and an absolute path."
+  [grpc? id {:strs [rpc method path]}]
+  (cond
+    (and grpc? (or method path)) [(str id ": a grpc operation names request.rpc, not request.method or request.path")]
+    (and grpc? (nil? rpc))       [(str id ": request.rpc missing (pkg.Service/Method)")]
+    grpc?                        (when-not (and (string? rpc) (re-matches rpc-name rpc))
+                                   [(str id ": request.rpc must look like pkg.Service/Method, got " (pr-str rpc))])
+    rpc                          [(str id ": request.rpc needs protocol: grpc")]
+    :else (cond-> []
+            (not (string? method)) (conj (str id ": request.method missing"))
+            (not (and (string? path) (str/starts-with? path "/"))) (conj (str id ": request.path missing or not absolute")))))
+
 (defn- validate-expanded
   [contract]
   (let [ops (get contract "operations")
         errs (atom []) warns (atom [])
         err! #(swap! errs conj %) warn! #(swap! warns conj %)]
+    (run! err! (protocol-errors contract))
     (when (empty? ops) (err! "contract has no operations"))
     (doseq [[id same] (group-by #(get % "id") ops)
             :when (and id (> (count same) 1))]
@@ -544,13 +578,10 @@
                  ")")))
     (doseq [op ops]
       (let [id  (or (get op "id") "<no id>")
-            req (get op "request")
-            m   (get req "method") p (get req "path")
             effect (get op "effect")
-            responses (get op "responses")]
-        (when-not (string? m) (err! (str id ": request.method missing")))
-        (when-not (and (string? p) (str/starts-with? p "/"))
-          (err! (str id ": request.path missing or not absolute")))
+            responses (get op "responses")
+            req-errs (request-errors (= "grpc" (get contract "protocol")) id (get op "request"))]
+        (run! err! req-errs)
         (when (and effect
                    (not (get effect "respond"))
                    (not (some #(get effect %)
@@ -558,8 +589,9 @@
                                "link" "unlink" "listJoin" "render"])))
           (err! (str id ": effect has no `respond` or collection action "
                      "(create/get/update/remove/list/link/unlink/listJoin/render)")))
-        (try (lower (assoc contract "operations" [op]))
-             (catch :default e (err! (.-message e))))
+        (when (empty? req-errs)
+          (try (lower (assoc contract "operations" [op]))
+               (catch :default e (err! (.-message e)))))
         (when (and (not effect) (empty? responses)) (err! (str id ": no responses")))
         (doseq [r responses]
           (when-not (number? (get r "status"))
