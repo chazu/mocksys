@@ -188,17 +188,27 @@
 
 (defn- error-body [code message] {"errors" [{"code" code "message" message}]})
 
-(defn- create! [registry body]
-  (let [spec (try (js->clj (js/JSON.parse body))
-                  (catch :default _ (throw (ex-info "the imposter is not valid JSON" {:code "bad data"}))))
-        imp  (imposter/create spec)
-        port (imposter/port imp)]
+(defn- create!
+  "Register the imposter, then start its servers. The port is claimed in the
+   registry before the servers listen, so a delete can land in between; the
+   servers are only attached if the entry still holds this imposter."
+  [registry body]
+  (let [spec  (try (js->clj (js/JSON.parse body))
+                   (catch :default _ (throw (ex-info "the imposter is not valid JSON" {:code "bad data"}))))
+        imp   (imposter/create spec)
+        port  (imposter/port imp)
+        mine? #(identical? imp (get-in @registry [port :imp]))]
     (when (contains? @registry port) (throw (in-use port)))
     (swap! registry assoc port {:imp imp :servers []})
-    (-> (p/let [servers (start-imposter! imp)]
-          (swap! registry assoc-in [port :servers] servers)
-          [201 (imposter/to-json imp {})])
-        (p/catch (fn [e] (swap! registry dissoc port) (throw e))))))
+    (-> (start-imposter! imp)
+        (p/catch (fn [e] (when (mine?) (swap! registry dissoc port)) (throw e)))
+        (p/then (fn [servers]
+                  (if (mine?)
+                    (do (swap! registry assoc-in [port :servers] servers)
+                        [201 (imposter/to-json imp {})])
+                    (p/do (p/all (map close! servers))
+                          (throw (ex-info (str "the imposter on port " port " was deleted while it started")
+                                          {:code "resource conflict"})))))))))
 
 (defn- delete! [registry port]
   (if-let [{:keys [imp servers]} (get @registry port)]
