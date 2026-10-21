@@ -164,20 +164,21 @@
                                                 "responses" [{"is" {"statusCode" 200 "body" {"now" 42}}}]}]})
                 trusting (kv-client dir port (.createSsl (.-credentials grpc) (js/Buffer.from (:cert ca))))
                 plain    (kv-client dir port (.createInsecure (.-credentials grpc)))
-                ok    (get-key trusting "a")
-                nope  (get-key plain "a")
-                warned  (atom [])
-                on-warn (fn [^js w] (swap! warned conj (.-code w)))
-                _     (.on js/process "warning" on-warn)
-                clock (rgrpc/clock-call port {} true)]
-          (.off js/process "warning" on-warn)
-          (.close trusting)
-          (.close plain)
-          (is (= 201 (:status made)) (pr-str (:json made)))
-          (testing "a client with the CA as its root gets the reply"
-            (is (= "apple" (get-in ok [:ok "value"]))))
-          (testing "an insecure client cannot connect"
-            (is (= (fx/status "UNAVAILABLE") (:code nope))))
-          (testing "mocksys clock reaches a twin's clock over TLS"
-            (is (= {"now" 42} clock))
-            (is (not-any? #{"DEP0123"} @warned) "naming localhost to TLS, not an IP address")))))))
+                warned   (atom [])
+                on-warn  (fn [^js w] (swap! warned conj (.-code w)))]
+          (.on js/process "warning" on-warn)
+          (-> (p/let [ok    (get-key trusting "a")
+                      nope  (get-key plain "a")
+                      clock (rgrpc/clock-call port {} true)]
+                (is (= 201 (:status made)) (pr-str (:json made)))
+                (testing "a client with the CA as its root gets the reply"
+                  (is (= "apple" (get-in ok [:ok "value"]))))
+                (testing "an insecure client cannot connect"
+                  (is (= (fx/status "UNAVAILABLE") (:code nope))))
+                (testing "mocksys clock reaches a twin's clock over TLS"
+                  (is (= {"now" 42} clock))
+                  (is (not-any? #{"DEP0123"} @warned) "naming localhost to TLS, not an IP address")))
+              (p/finally (fn []
+                           (.off js/process "warning" on-warn)
+                           (.close trusting)
+                           (.close plain)))))))))

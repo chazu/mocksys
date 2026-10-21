@@ -81,26 +81,36 @@
                                                   :body (js->clj (js/JSON.parse (.toString (js/Buffer.concat chunks) "utf8")))})))))]
        (.on rq "error" (fn [^js e] (resolve {:error (or (.-code e) (.-message e))})))))))
 
+(defn- with-store-daemon
+  "Run `f` with the store at `home` and a fresh in-process daemon on
+   MOCKSYS_ADMIN_PORT, where the CLI looks for it. Report a rejection as a
+   failure, then stop the daemon, restore the store and the variable, and call
+   `done`."
+  [done home f]
+  (let [env    (.-env js/process)
+        prev   (.-MOCKSYS_ADMIN_PORT env)
+        saved  [store/root store/services-dir]
+        daemon (atom nil)]
+    (-> (p/let [admin (fx/free-port)
+                _     (set! (.-MOCKSYS_ADMIN_PORT env) (str admin))
+                _     (set! store/root home)
+                _     (set! store/services-dir (path/join home "services"))
+                d     (runtime/start! {:host "127.0.0.1" :port admin})
+                _     (reset! daemon d)]
+          (f))
+        (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
+        (p/finally (fn []
+                     (p/do (when-let [d @daemon] ((:stop! d)))
+                           (set! store/root (first saved))
+                           (set! store/services-dir (second saved))
+                           (if (nil? prev) (js-delete env "MOCKSYS_ADMIN_PORT") (set! (.-MOCKSYS_ADMIN_PORT env) prev))
+                           (done)))))))
+
 (deftest run-serves-a-certificate-from-the-ca
   (async done
-    (let [home (home-with {"t/secure/contract.yaml" (contract-yaml "tls: true")})
-          env  (.-env js/process)
-          prev (.-MOCKSYS_ADMIN_PORT env)
-          saved [store/root store/services-dir]]
-      (-> (p/let [admin (fx/free-port)
-                  _     (set! (.-MOCKSYS_ADMIN_PORT env) (str admin))
-                  _     (set! store/root home)
-                  _     (set! store/services-dir (path/join home "services"))
-                  d     (runtime/start! {:host "127.0.0.1" :port admin})
-                  port  (fx/free-port)
-                  _     (lifecycle/ensure-running! "t/secure" (str port))
-                  ca    (fs/readFileSync (tls/ca-file) "utf8")
-                  res   (get-https port ca)]
-            ((:stop! d))
-            (is (= {:status 200 :body {"hi" "there"}} res)))
-          (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
-          (p/finally (fn []
-                       (set! store/root (first saved))
-                       (set! store/services-dir (second saved))
-                       (if (nil? prev) (js-delete env "MOCKSYS_ADMIN_PORT") (set! (.-MOCKSYS_ADMIN_PORT env) prev))
-                       (done)))))))
+    (with-store-daemon done (home-with {"t/secure/contract.yaml" (contract-yaml "tls: true")})
+      (fn []
+        (p/let [port (fx/free-port)
+                _    (lifecycle/ensure-running! "t/secure" (str port))
+                res  (get-https port (fs/readFileSync (tls/ca-file) "utf8"))]
+          (is (= {:status 200 :body {"hi" "there"}} res)))))))
