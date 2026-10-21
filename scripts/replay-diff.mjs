@@ -9,7 +9,10 @@
 //
 // `okta` and `limited` run stateful sequences against twins built by
 // `mocksys kit okta` and `mocksys kit okta --rate-limit 3 --token-ttl 600`. Each
-// step is built from the previous answers of twin a. Exits 1 on any difference.
+// step is built from the previous answers of twin a. Twin a must also answer each
+// request with its expected status (a corpus entry's `expect`, or the sequence's list
+// below), so two twins that fail the same way do not pass. Exits 1 on any difference
+// or unexpected status.
 import http from "node:http";
 import fs from "node:fs";
 
@@ -95,6 +98,11 @@ const sequences = {
   ],
 };
 
+const expected = {
+  okta: [201, 200, 200, 200, 200, 200, 200, 400, 400, 204, 200, 200, 200, 302, 200, 400, 200, 401, 302, 204, 404, 401, 404, 200, 200, 200, 200],
+  limited: [200, 200, 200, 200, 429, 200, 200, 302, 200, 200, 200, 200, 200, 401, 200],
+};
+
 function differences(i, req, a, b) {
   const out = [];
   const at = `#${i} ${req.method || "GET"} ${req.path}`;
@@ -105,24 +113,30 @@ function differences(i, req, a, b) {
 }
 
 const [mode, aUrl, bUrl, corpusFile] = process.argv.slice(2);
-const steps = mode === "corpus"
-  ? JSON.parse(fs.readFileSync(corpusFile, "utf8")).map(({ method, path, headers, body }) => ({ method, path, headers, body }))
-  : sequences[mode];
+const corpus = mode === "corpus" ? JSON.parse(fs.readFileSync(corpusFile, "utf8")) : null;
+const steps = corpus ? corpus.map(({ method, path, headers, body }) => ({ method, path, headers, body })) : sequences[mode];
+const expect = corpus ? corpus.map((c) => c.expect) : expected[mode];
 if (!steps || !aUrl || !bUrl) {
   console.error("usage: replay-diff.mjs corpus|okta|limited <a-url> <b-url> [corpus.json]");
+  process.exit(2);
+}
+if (expect.length !== steps.length || !expect.every(Number.isInteger)) {
+  console.error(`${mode}: every request needs an expected status`);
   process.exit(2);
 }
 
 const answers = [];
 const diffs = [];
+const unexpected = [];
 for (const [i, step] of steps.entries()) {
   const req = typeof step === "function" ? step(answers) : step;
   const a = await send(aUrl, req);
   const b = await send(bUrl, req);
   answers.push(a);
   diffs.push(...differences(i, req, a, b));
+  if (a.status !== expect[i]) unexpected.push(`#${i} ${req.method || "GET"} ${req.path}: status ${a.status}, expected ${expect[i]}`);
 }
 const statuses = answers.map((r) => r.status).join(" ");
-console.log(`${mode}: ${steps.length} request(s), ${diffs.length} difference(s); statuses ${statuses}`);
-for (const d of diffs) console.log("  " + d);
-process.exit(diffs.length ? 1 : 0);
+console.log(`${mode}: ${steps.length} request(s), ${diffs.length} difference(s), ${unexpected.length} unexpected status(es); statuses ${statuses}`);
+for (const d of [...diffs, ...unexpected]) console.log("  " + d);
+process.exit(diffs.length || unexpected.length ? 1 : 0);

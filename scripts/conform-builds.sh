@@ -50,6 +50,7 @@ stubs() { # <admin-port> <imposter-port>: the imposter's response kinds, e.g. "e
     const kinds=new Set(JSON.parse(s).stubs.flatMap(st=>st.responses.flatMap(Object.keys)));console.log([...kinds].sort().join(" "))})'
 }
 echo "# response kinds: $REF [$(stubs "$OLD_ADMIN" "$PORT")], this build [$(stubs "$NEW_ADMIN" "$((PORT + 1))")]"
+case " $(stubs "$OLD_ADMIN" "$PORT") " in *" inject "*) ;; *) echo "$REF serves no inject stubs, so this compares no codegen"; exit 1 ;; esac
 case " $(stubs "$NEW_ADMIN" "$((PORT + 1))") " in *" effect "*) ;; *) echo "this build serves no effect stubs"; exit 1 ;; esac
 # conform sends each twin its own Host, so only the URLs built from it may differ
 host_keys="issuer,authorization_endpoint,token_endpoint,userinfo_endpoint,jwks_uri,iss,aud"
