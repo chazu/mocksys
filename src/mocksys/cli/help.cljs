@@ -21,6 +21,7 @@
      "A *kit* generates a whole behavioral clone — stateful, seeded, runnable:"
      "  mocksys kit okta                              # Okta twin: users+groups CRUD, SCIM filter, OIDC"
      "  mocksys kit oauth2 --provider github          # OAuth2 provider: picker, single-use codes, userinfo"
+     "  mocksys kits                                  # every kit + its flags (yours: $MOCKSYS_HOME/kits/*.yaml)"
      "  mocksys genes                                 # reusable genes + their params (list them under `genes:`)"
      "A twin is one stateful scenario sharing one port/state; `run` it like any other."
      ""
@@ -97,6 +98,8 @@
   (println "  TWINS (full behavioral clones in one command — see `mocksys genes`)")
   (println "  mocksys kit okta [--users F.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--scenario NAME] [--port N]")
   (println "  mocksys kit oauth2 [--provider github|codeberg] [--users F.json] [--token-ttl S] [--port N]   OAuth2 provider twin")
+  (println "  mocksys kit <name> [--<flag> VALUE ...]         any kit, built in or from $MOCKSYS_HOME/kits/*.yaml")
+  (println "  mocksys kits                                    list kits (built in and yours) with their flags")
   (println "  mocksys genes                                   list the genes (and their params) a contract or kit composes")
   (println "  mocksys conform <name> --corpus FILE [--against URL] [--ignore k1,k2]   replay+diff (exit 1 on drift)")
   (println "  mocksys clock <name> [advance <1h|30m|45s> | set <ts>]   read/move a twin's deterministic virtual clock")

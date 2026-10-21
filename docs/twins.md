@@ -23,10 +23,11 @@ mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use 
 | Kit | Options | Produces |
 |---|---|---|
 | `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--issuer URL` `--signing-key FILE.pem` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo minting **signed RS256 JWTs** with published JWKS + discovery — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` sets the OIDC token lifetime on the virtual clock (default 3600 s), `--signing-key` pins the JWT key, `--issuer` sets the JWT `iss`/`aud` for requests that carry no `Host` header. |
-| `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--token-ttl S` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
+| `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--token-ttl S` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. A YAML kit over the `oauth2-provider` gene. |
+| yours | the flags your kit declares, plus `--scenario NAME` `--port N` | whatever its contract template describes. See [Writing a kit](#writing-a-kit). |
 
-The default scenario id is `oauth/<provider>` for `oauth2` and `okta/okta` for `okta`;
-override with `--scenario`. After generation, treat the twin like any scenario: `run`,
+The default scenario id is `oauth/<provider>` for `oauth2` and `<kit>/<kit>` for any
+other kit, such as `okta/okta`; override with `--scenario`. After generation, treat the twin like any scenario: `run`,
 `env`, `inspect`, `conform`, `stack`/`up`.
 
 ```sh
@@ -34,6 +35,50 @@ mocksys kit okta --port 9200
 mocksys run okta/okta --port 9200
 eval "$(mocksys env okta/okta)"           # exports BASE_URL=http://localhost:9200
 ```
+
+`kit` rejects any option the kit does not declare, apart from `--scenario` and `--port`.
+`mocksys kits` lists every kit with its flags and their defaults.
+
+### Writing a kit
+
+A kit is a YAML file: a contract template plus the flags it accepts, each with a default.
+
+```yaml
+name: directory
+doc: users, groups and memberships composed from genes
+flags:                     # flag -> default; `kit directory --<flag> VALUE` overrides it
+  users-base: /api/v1/users
+  rate-limit: 100
+contract:                  # any contract; usually a list of genes
+  seed:
+    users: [ { id: u1, status: ACTIVE, profile: { login: alice@example.com } } ]
+  genes:
+    - crud-collection: { coll: users, base: "{users-base}", seed-name: users,
+                         rate-limit: { max: "{rate-limit}" } }
+```
+
+- A string that is **exactly** `"{flag}"` becomes the flag's value with its type, so
+  `"{rate-limit}"` above becomes the number `100`. A flag inside a longer string, such as
+  `"/v2{users-base}"`, is left as written, and so is a template that names no flag, such
+  as an effect's `"{token}"`.
+- A command-line value takes the type of the flag's default. A number default parses the
+  value as a number, and a `true`/`false` default as a boolean. `--users` and
+  `--signing-key` always read a file (a JSON array, a PEM).
+- `kit` sets `service`, `scenario` and `origin: kit` on the generated contract. Without a
+  `summary` in the template, the kit's `doc` is used. `contract.yaml` keeps the template's
+  `genes:` form.
+
+Put your kits in `$MOCKSYS_HOME/kits/*.yaml`. A kit without `name` is named after its
+file. A user kit with a built-in's name replaces the built-in, and `kit` and `kits` print a
+warning saying so. A kit file that does not parse is skipped with a warning.
+[`examples/kits/directory.yaml`](../examples/kits/directory.yaml) is a complete user kit.
+
+The built-in `oauth2` kit is a YAML file (`src/mocksys/kits/oauth2.yaml`), inlined into the
+CLI at build time. Its provider-shaped paths (`/github/login/oauth/...`), default accounts
+and account index come from the `oauth2-provider` gene, because whole-value substitution
+cannot build `"/{provider}/login/..."`. The `okta` kit stays a builder function in
+`src/mocksys/kits.cljs`. It generates an RSA signing key on each `kit` run and publishes the
+derived JWK, which a fixed template cannot do.
 
 ## Genes
 
@@ -58,6 +103,7 @@ mocksys genes        # every gene with its params, and what is built in rather t
 | `crud-collection` | A REST resource: create / list / get / update / delete, SCIM filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). `rate-limit: {max, window}` adds a per-client budget. | `coll`, `base` |
 | `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Users come from a **seed array** (`seed-name`, `users`) or, with `user-source: {collection, login-field, active-only, claims}`, from a **live collection** with a dynamic picker and `status`-gated issuance. Optional `token-ttl`. | `authz`, `token`, `userinfo` |
 | `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). | none |
+| `oauth2-provider` | A GitHub- or Codeberg-shaped OAuth2 provider: `oidc-handshake` over seed accounts at `/<provider>/login/oauth/...`, the provider's userinfo path, its default accounts (or `users`), and an account index at `/`. The `oauth2` kit is this gene plus flags. | none |
 
 Some behavior is not a standalone gene. `mocksys genes` lists where each piece lives:
 

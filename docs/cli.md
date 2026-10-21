@@ -4,7 +4,7 @@ Every command. Run `mocksys help` for the terse flag list, `mocksys prime` for a
 orientation. A scenario id is `service/name`. Commands that start a mock recompile
 `imposter.json` from the contract first.
 
-Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides how the
+Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`); user kits live in its `kits/`. `MOCKSYS_MB` overrides how the
 `mb` daemon is launched (else `mb` on `PATH`, else the bundled `mountebank` package).
 `MOCKSYS_NO_INJECTION=1` refuses stateful scenarios.
 
@@ -13,7 +13,9 @@ Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides
 | Command | Notes |
 |---|---|
 | `kit okta [--users FILE.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--issuer URL] [--signing-key FILE.pem] [--scenario NAME] [--port N]` | Generate an Okta twin (users/groups CRUD + OIDC). `--rate-limit` adds 429s (window `--rate-window`, default 60s); `--token-ttl` expires OIDC tokens on the virtual clock. `--signing-key` signs JWTs with your PEM instead of a key generated per `kit` run; `--issuer` is the issuer used when a request has no `Host`. |
-| `kit oauth2 [--provider github\|codeberg] [--users FILE.json] [--token-ttl S] [--scenario NAME] [--port N]` | Generate an OAuth2 provider twin. `--token-ttl` expires tokens on the virtual clock. A flag the kit can't honor, such as `--rate-limit`, is an error. |
+| `kit oauth2 [--provider github\|codeberg] [--users FILE.json] [--token-ttl S] [--scenario NAME] [--port N]` | Generate an OAuth2 provider twin. `--token-ttl` expires tokens on the virtual clock. |
+| `kit <name> [--<flag> VALUE ...] [--scenario NAME] [--port N]` | Generate a twin from any kit, built in or in `$MOCKSYS_HOME/kits/*.yaml`. A value takes the type of the flag's default. A flag the kit doesn't declare, such as `--rate-limit` on `oauth2`, is an error. See [twins.md](twins.md#writing-a-kit). |
+| `kits` | List every kit (built in and from `$MOCKSYS_HOME/kits`) with its source, flags and defaults. Warns about a user kit that shadows a built-in or fails to parse. |
 | `genes` | List each gene a contract can name under `genes:`, with its params (`*` = required), plus the capabilities that are built in rather than genes. See [contracts.md](contracts.md#genes). |
 | `conform <name> --corpus FILE [--against URL] [--ignore k1,k2] [--headers] [--port N]` | Replay a corpus at the twin (and, with `--against`, the live service); diff; exit 1 on drift. Omit `--corpus` to replay recorded traffic. See [twins.md](twins.md). |
 | `clock <name> [advance <dur> \| set <ts>]` | Read or move the twin's deterministic virtual clock. `advance 1h`/`30m`/`45s`/`2d`/`<secs>`; `set <epoch\|ISO>`. The twin must be running. See [effects.md](effects.md#the-virtual-clock). |

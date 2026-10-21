@@ -28,6 +28,7 @@ the source of truth.** If a command here ever disagrees with `prime`, trust `pri
 
 ```sh
 mocksys prime     # full agent orientation — read it before doing anything else
+mocksys kits      # the kits available, built in and yours, with their flags
 mocksys genes     # the genes (with params) a contract can list under `genes:`
 mocksys help      # terse flag list
 ```
@@ -49,8 +50,10 @@ mocksys run okta/okta --port 9200
 eval "$(mocksys env okta/okta)"         # exports BASE_URL=http://localhost:9200 — point code at it
 ```
 
-`mocksys kit oauth2 --provider github` is the other built-in twin. `mocksys genes` lists
-the reusable genes a kit composes, with their params.
+`mocksys kit oauth2 --provider github` is the other built-in twin. `mocksys kits` lists
+every kit with its flags; `mocksys genes` lists the reusable genes a kit composes, with
+their params. A kit is a YAML file (a contract template plus flags with defaults); drop
+your own in `$MOCKSYS_HOME/kits/` and `mocksys kit <name>` uses it (see `docs/twins.md`).
 
 ## Authoring your own (no kit)
 

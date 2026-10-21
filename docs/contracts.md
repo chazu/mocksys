@@ -156,9 +156,10 @@ When the contract compiles, each gene expands into operations, collections and s
   gene operation with its gene.
 
 `mocksys genes` lists every gene with its params, and marks the required ones with `*`.
-Today's genes are `crud-collection`, `oidc-handshake` and `membership`, described in
-[twins.md](twins.md#genes). Rate limiting, the Okta error envelope, the virtual clock and
-JWT signing are not standalone genes. `mocksys genes` says where each one lives.
+Today's genes are `crud-collection`, `oidc-handshake`, `membership` and
+`oauth2-provider`, described in [twins.md](twins.md#genes). Rate limiting, the Okta error
+envelope, the virtual clock and JWT signing are not standalone genes. `mocksys genes` says
+where each one lives.
 
 The editing commands (`use`, `add`, `parameterize`) act on hand-written operations only.
 `use` or `parameterize` on a gene operation fails with a message naming the gene. To

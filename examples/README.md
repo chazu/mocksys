@@ -9,6 +9,7 @@ Runnable contracts and a conform corpus that back the
 | [`users.yaml`](users.yaml)                   | A hand-authored **resource collection**: CRUD + SCIM-ish filter + cursor pagination — the building block behind `kit okta`.                                              |
 | [`login-throttle.yaml`](login-throttle.yaml) | The three **time-aware primitives** by hand: a `limit` (rate limit → 429), `store.ttl` (an expiring session token), and `state.clock` (the deterministic virtual clock). |
 | [`directory.yaml`](directory.yaml)           | A twin built **only from genes**: `crud-collection` for users and groups plus `membership`, with no hand-written operations.                                              |
+| [`kits/directory.yaml`](kits/directory.yaml) | A **user kit**: the directory twin as a template with flags (`--users-base`, `--rate-limit`, ...). Copy it to `$MOCKSYS_HOME/kits/` and run `mocksys kit directory`. |
 | [`okta-corpus.json`](okta-corpus.json)       | A request corpus for `mocksys conform` — golden expectations for the Okta twin.                                                                                          |
 
 ## Quick start
@@ -34,6 +35,13 @@ mkdir -p .mocks/demo/directory && cp examples/directory.yaml .mocks/demo/directo
 mocksys run demo/directory --port 9130
 curl -X PUT localhost:9130/api/v1/groups/g1/users/u2        # 204, assign
 curl localhost:9130/api/v1/groups/g1/users                  # [bob], hydrated
+
+# the same twin as a user kit, with flags
+mkdir -p .mocks/kits && cp examples/kits/directory.yaml .mocks/kits/
+mocksys kits                                                # lists it next to the built-ins
+mocksys kit directory --users-base /scim/v2/Users --port 9140
+mocksys run directory/directory
+curl localhost:9140/scim/v2/Users
 
 # the rate-limit + expiring-session demo
 mkdir -p .mocks/demo/login-throttle && cp examples/login-throttle.yaml .mocks/demo/login-throttle/contract.yaml
