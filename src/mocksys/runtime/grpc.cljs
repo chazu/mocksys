@@ -91,7 +91,6 @@
   (let [fields (filter #(and (.-repeated ^js %) (not (.-map ^js %))) (.-fieldsArray reply-type))]
     (when (= 1 (count fields)) (.-name ^js (first fields)))))
 
-
 (defn- internal
   "An INTERNAL answer for a mock whose reply cannot be sent; the daemon log says
    the same, since the mock's author may not be the one reading the error."
@@ -158,10 +157,11 @@
       (-> (p/let [out (imposter/respond imp (request-of call path) {:proxy! no-proxy})
                   _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
             (let [{:keys [metadata value error unknown log]} (outcome->reply out reply-type)
-                  keys (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
-              (when (and (seq keys) (not (@warned keys)))
-                (swap! warned conj keys)
-                (say (str "dropped reply field(s) " (subs (.-fullName reply-type) 1) " does not declare: " (str/join ", " keys))))
+                  dropped (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
+              (when (and (seq dropped) (not (@warned dropped)))
+                (swap! warned conj dropped)
+                (say (str "dropped reply field(s) " (subs (.-fullName reply-type) 1) " does not declare: "
+                          (str/join ", " dropped))))
               (run! say log)
               (when metadata (.sendMetadata call metadata))
               (if error
