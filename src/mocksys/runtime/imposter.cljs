@@ -3,7 +3,8 @@
   of Mountebank's imposter format that mocksys emits, plus its live state.
 
   The inventory, and nothing else:
-    imposter   protocol http, port, name, recordRequests, stubs
+    imposter   protocol http or grpc, port, name, recordRequests, stubs, and for
+               grpc the proto's descriptor (served by mocksys.runtime.grpc)
     stub       predicates (see mocksys.runtime.match), responses
     response   exactly one of
                  is      {statusCode headers body _mode}
@@ -132,9 +133,12 @@
 
 (defn- validate! [spec]
   (when-not (map? spec) (bad "" "an imposter must be a JSON object"))
-  (only-keys! "" spec #{"protocol" "port" "name" "recordRequests" "stubs"})
-  (when-not (= "http" (get spec "protocol"))
-    (bad "" (str "unsupported protocol " (pr-str (get spec "protocol")) " (only http)")))
+  (only-keys! "" spec (cond-> #{"protocol" "port" "name" "recordRequests" "stubs"}
+                        (= "grpc" (get spec "protocol")) (conj "descriptor")))
+  (when-not (contains? #{"http" "grpc"} (get spec "protocol"))
+    (bad "" (str "unsupported protocol " (pr-str (get spec "protocol")) " (http or grpc)")))
+  (when (and (= "grpc" (get spec "protocol")) (not (map? (get spec "descriptor"))))
+    (bad "" "protocol grpc needs a descriptor"))
   (let [port (get spec "port")]
     (when-not (and (integer? port) (< 0 port 65536)) (bad "" "port must be an integer from 1 to 65535")))
   (when-not ((some-fn nil? string?) (get spec "name")) (bad "" "name must be a string"))
@@ -338,6 +342,7 @@
   (swap! imp assoc :requests []))
 
 (defn port [imp] (get-in @imp [:spec "port"]))
+(defn protocol [imp] (get-in @imp [:spec "protocol"]))
 
 (defn to-json
   "The imposter as the admin API shows it. `:list?` is the summary row;
@@ -347,6 +352,7 @@
   (let [{:keys [spec stubs requests] n :count} @imp
         header (cond-> (select-keys spec ["protocol" "port" "name"])
                  (not replayable?) (assoc "numberOfRequests" n))
+        body   (merge header (select-keys spec ["descriptor"]))
         strip  (fn [r] (cond-> r (contains? r "is") (update "is" dissoc "_proxyResponseTime")))
         proxy? (fn [r] (contains? r "proxy"))
         stubs  (cond->> (mapv :spec stubs)
@@ -355,6 +361,6 @@
                  remove-proxies? (filterv #(seq (get % "responses"))))]
     (cond
       list?       header
-      replayable? (assoc header "recordRequests" (boolean (get spec "recordRequests")) "stubs" stubs)
-      :else       (assoc header "recordRequests" (boolean (get spec "recordRequests"))
+      replayable? (assoc body "recordRequests" (boolean (get spec "recordRequests")) "stubs" stubs)
+      :else       (assoc body "recordRequests" (boolean (get spec "recordRequests"))
                          "requests" requests "stubs" stubs))))

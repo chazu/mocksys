@@ -152,7 +152,8 @@
         (p/let [dir     (fx/kv-dir)
                 port    (free-port)
                 no-desc (admin-call (str admin "/imposters") "POST" (dissoc (kv-imposter dir port []) "descriptor"))
-                junk    (admin-call (str admin "/imposters") "POST" (assoc (kv-imposter dir port []) "descriptor" {"nested" 7}))
+                junk    (admin-call (str admin "/imposters") "POST" (assoc (kv-imposter dir port []) "descriptor"
+                                                                    {"nested" {"S" {"methods" {"M" {"requestType" "Gone" "responseType" "Gone"}}}}}))
                 on-http (admin-call (str admin "/imposters") "POST" (assoc (kv-imposter dir port []) "protocol" "http"))
                 listed  (admin-call (str admin "/imposters") "GET" nil)]
           (is (= [400 "protocol grpc needs a descriptor"]

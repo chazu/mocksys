@@ -16,6 +16,7 @@
             ["node:http" :as http]
             ["node:https" :as https]
             [mocksys.runtime.imposter :as imposter]
+            [mocksys.runtime.grpc :as grpc]
             [mocksys.version :refer [version]]))
 
 (def identity-name "mocksys")
@@ -161,11 +162,13 @@
      (.once server "error" reject)
      (.listen server port host (fn [] (resolve t))))))
 
-(defn- close! [{:keys [^js server sockets]}]
-  (js/Promise.
-   (fn [resolve]
-     (.close server (fn [_] (resolve nil)))
-     (doseq [^js s @sockets] (.destroy s)))))
+(defn- close! [{:keys [^js server sockets stop]}]
+  (if stop
+    (stop)
+    (js/Promise.
+     (fn [resolve]
+       (.close server (fn [_] (resolve nil)))
+       (doseq [^js s @sockets] (.destroy s))))))
 
 (defn- in-use [port]
   (ex-info (str "Port " port " is already in use") {:code "resource conflict"}))
@@ -202,7 +205,7 @@
         mine? #(identical? imp (get-in @registry [port :imp]))]
     (when (contains? @registry port) (throw (in-use port)))
     (swap! registry assoc port {:imp imp :servers []})
-    (-> (start-imposter! imp)
+    (-> (p/do (if (= "grpc" (imposter/protocol imp)) (grpc/start! imp) (start-imposter! imp)))
         (p/catch (fn [e] (when (mine?) (swap! registry dissoc port)) (throw e)))
         (p/then (fn [servers]
                   (if (mine?)
