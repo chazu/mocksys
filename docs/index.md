@@ -24,6 +24,13 @@ that builds a digital twin of Okta and explains every part as it goes.
 
 Runnable contracts that back the walkthrough live in [`examples/`](../examples/).
 
+Design history (the original idea, assessments, and feature plans with their shipped
+status) lives in [`design/`](design/): [idea.md](design/idea.md),
+[ASSESSMENT.md](design/ASSESSMENT.md), [PLAN.md](design/PLAN.md),
+[PLAN-DTU.md](design/PLAN-DTU.md), [PLAN-CLOCK.md](design/PLAN-CLOCK.md),
+[PLAN-OKTA-DEEPEN.md](design/PLAN-OKTA-DEEPEN.md), and recorded design dialectics in
+[design/dialectics/](design/dialectics/).
+
 ## The shape of the system in one paragraph
 
 A **scenario** (named `service/name`) is described by a `contract.yaml` — the single

@@ -307,7 +307,7 @@ declarative stateful layer — handshakes + resource collections, compiled to ge
 Mountebank injections), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
 (differential fidelity vs reality), `openapi` (spec import, via
 `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle` (pack/unpack), `git` (the
-shared store).
+shared store). Design notes and plans live in [`docs/design/`](docs/design/).
 
 ## License
 

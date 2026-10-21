@@ -21,7 +21,7 @@
 (def services-dir (path/join root "services"))
 
 ;; A scenario id may be nested ("github/create-issue") — node's path join turns
-;; that into a real subdirectory, giving the idea.md layout for free.
+;; that into a real subdirectory, giving the docs/design/idea.md layout for free.
 (defn scenario-dir [name] (path/join root name))
 
 (defn- ensure-dir! [dir]

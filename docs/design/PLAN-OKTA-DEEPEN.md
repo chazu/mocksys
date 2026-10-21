@@ -21,8 +21,8 @@ runtime (`src/mocksys/inject.cljs`, `contract.cljs`, `conform.cljs`, `docs/effec
 > Only the four terminal verbs need the §1.4 compiler edits; `find`/`sign` are read-phase.
 
 > **Rev 3** — the seven §7 open questions were resolved via a recorded dlktk dialectic.
-> Decisions, bases, and the losing arguments: `design/dialectics/okta-twin-deepening.md`
-> (machine-checkable graph: `design/dialectics/okta-twin-deepening.ndjson`, `dlktk check`).
+> Decisions, bases, and the losing arguments: `docs/design/dialectics/okta-twin-deepening.md`
+> (machine-checkable graph: `docs/design/dialectics/okta-twin-deepening.ndjson`, `dlktk check`).
 > That doc also fixes the **mocksys-feature / gene / okta-kit boundary** for every new
 > capability (the three-tier taxonomy). Scope deltas from the decisions: conform's
 > JWT-normalizer moves to "now, with feature 2" (Q5); picker/issuance gains a
@@ -639,7 +639,7 @@ the minted id), so this is a scripted integration test.
 ## 7. Resolved questions (dlktk dialectic `jivog-lisas`)
 
 All seven resolved. Full reasoning + rejected alternatives:
-`design/dialectics/okta-twin-deepening.md`. Re-check for drift: `dlktk check --all`.
+`docs/design/dialectics/okta-twin-deepening.md`. Re-check for drift: `dlktk check --all`.
 
 | # | Question | Decision | Basis |
 |---|----------|----------|-------|
