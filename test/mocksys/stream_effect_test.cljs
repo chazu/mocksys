@@ -66,6 +66,16 @@
     (is (= [] (ids (h/run e {:headers {"last-event-id" "c"}}))))
     (is (= ["1" "2" "3"] (ids (h/run e {:headers {"Last-Event-ID" "zzz"}}))) "an unknown id replays the whole script")))
 
+(deftest last-event-id-matches-the-ids-this-connection-renders
+  (let [e    (op {"bind" {"room" {"query" "room"}}
+                  "sse"  {"events" [{"id" "{room}-1" "data" "1"} {"id" "dup" "data" "2"}
+                                    {"id" "{room}-3" "data" "3"} {"id" "dup" "data" "4"}]}})
+        data #(mapv (fn [ev] (get ev "data")) (get-in (h/run e {:query {"room" %1} :headers {"Last-Event-ID" %2}}) [:stream "events"]))]
+    (is (= ["2" "3" "4"] (data "r1" "r1-1")) "an interpolated id resumes when this connection renders it the same")
+    (is (= ["1" "2" "3" "4"] (data "r2" "r1-1")) "but not when it renders differently")
+    (is (= ["1" "2" "3" "4"] (data "r1" "{room}-1")) "nor by its template")
+    (is (= ["3" "4"] (data "r1" "dup")) "a repeated id resumes after its first occurrence")))
+
 (deftest a-websocket-answer-carries-its-messages
   (let [r (h/run (op {"bind" {"room" {"query" "room"}}
                       "websocket" {"channel" "room-{room}" "messages" [{"data" {"hello" "{room}"}} {"data" "bye" "delay" 10}]}})

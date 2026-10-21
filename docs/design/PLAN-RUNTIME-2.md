@@ -206,8 +206,9 @@ as everything else.
   `: keep-alive` comment goes out every `keepAlive` ms (default 15000, 0 turns it off).
   When a write finds more than 1 MiB unsent (`writableLength`), the client is not
   reading: the response is destroyed, which unsubscribes it.
-  `Last-Event-ID` resumes the script after the event with that id; channel events are
-  live only, never replayed.
+  `Last-Event-ID` resumes the script after the first event whose id, as the
+  reconnecting request renders it, equals the header; an id that renders differently
+  on reconnect replays the whole script. Channel events are live only, never replayed.
 - **WebSockets.** Only an imposter with a `websocket` answer listens for `upgrade`,
   and only for `Upgrade: websocket` (`shouldUpgradeCallback`), so an h2c upgrade keeps
   its body. Node before 22.21 and 24.9 ignores `shouldUpgradeCallback`; there an

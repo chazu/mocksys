@@ -483,7 +483,11 @@ ends after its last scripted event; one with a channel stays open until the clie
 leaves. A `: keep-alive` comment goes out every 15 seconds (`keepAlive`, in ms; `0`
 turns it off). A client that stops reading is disconnected once 1 MiB is waiting for it,
 so a stalled reader does not hold every publish in memory. A client that reconnects with `Last-Event-ID` resumes the script after
-the event with that id. Channel events are not replayed.
+the event with that id. The id is compared with each scripted `id` as the reconnecting
+request renders it. An id built from a value that differs between the two requests,
+such as a query parameter the client changed, matches nothing, and the whole script is
+sent again. When two scripted events share an id, the stream resumes after the first.
+Channel events are not replayed.
 
 **WebSockets.** A `websocket` answer accepts the upgrade on the operation's path.
 Each message the client sends is then a request through the same contract:
