@@ -343,11 +343,14 @@ for unary ones.
 | Bidirectional | each message the client sends is a request of its own, in order | each request's reply is zero or more messages, as for a server stream |
 
 Each message of a stream is checked against the reply type, as a unary reply is, and a
-problem names the message (`[1].version: expected an integer`). A stream that has a
-problem, or whose outcome is an error status, ends with that error before it sends a
-message. A bidirectional stream ends when the client half-closes and every reply is sent,
-or at the first error; the first reply's headers become the stream's metadata, and
-`requests` shows each inbound message as its own call.
+problem names the message (`[1].version: expected an integer`). A reply with a problem
+ends the stream with `INTERNAL`, and an error status ends it with that error. An error
+body's `messages` array is sent before the error, so a stream can fail partway:
+`{ grpcCode: NOT_FOUND, message: gone, messages: [{ id: t1 }] }` sends one message, then
+`NOT_FOUND`. A bidirectional stream ends when the client half-closes and every reply is
+sent, or at the first error, after the replies to the messages before it; the first
+reply's headers become the stream's metadata, and `requests` shows each inbound message
+as its own call.
 
 A collection's `list` returns an array, so it streams one message per record. A client
 stream reads its batch with `bodyJson: true`:
@@ -397,12 +400,17 @@ mocksys freeze acme/todos                                                  # pro
 ```
 
 `record` copies the proto, and the files it imports, into the scenario directory, so the
-frozen contract compiles from what the scenario holds. The proxy forwards each call
+frozen contract compiles from what the scenario holds. The imports must sit beside the
+proto or in a directory below it; `record` refuses a proto that imports a file from
+elsewhere. Google's well-known types are built in and need no copy. The proxy forwards each call
 with grpc-js, the metadata as it came, and keeps the first answer for each rpc, as the
 HTTP proxy keeps the first for each method and path. A reply is a 200 body, and a
 server stream's messages are a 200 array. An error is the HTTP status that
 `google.rpc.Code` maps its code to, with a `{ grpcCode, message }` body, so it replays
-with the same code. A client stream is recorded with its reply. A bidirectional stream
+with the same code. A server stream that fails partway keeps the messages it sent as
+the body's `messages`, and replays them before the error; a stream still open when the
+60-second default deadline passes is recorded so, with `DEADLINE_EXCEEDED`. A client
+stream is recorded with its reply. A bidirectional stream
 is not recorded: the proxy answers it `UNIMPLEMENTED`. An upstream that does not
 connect fails the call `UNAVAILABLE`, and nothing is saved. The upstream call carries
 the client's deadline, or 60 seconds when the client sets none; a call the client

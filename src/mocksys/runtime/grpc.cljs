@@ -11,17 +11,18 @@
   The outcome maps back as follows. A 2xx JSON object body is the reply message,
   checked against the reply type by mocksys.runtime.proto-json; a JSON array fills
   the reply type's one repeated field, or for a server or bidirectional stream is
-  the messages to send. A reply that does not fit its type is
-  INTERNAL, and the daemon log (stderr) says why. Any other status is a
-  gRPC error: a body {grpcCode, message} picks the code (a name or a number),
-  otherwise `http->grpc` does. Response headers become initial metadata. A fault
-  is UNAVAILABLE.
+  the messages to send. A reply that does not fit its type is INTERNAL, and the
+  daemon log (stderr) says why. Any other status is a gRPC error: a body
+  {grpcCode, message} picks the code (a name or a number), otherwise `http->grpc`
+  does, and a stream sends the body's `messages` before it. Response headers become
+  initial metadata. A fault is UNAVAILABLE.
 
   A proxyOnce proxy (what `mocksys record` posts) forwards each call upstream with
   grpc-js and saves the outcome as a stub of that shape, the status as HTTP by
-  `grpc->http` and the code as grpcCode. The upstream call carries the client's
-  deadline, and is cancelled when the client cancels, which saves nothing. A
-  bidirectional stream is not recorded."
+  `grpc->http`, the code as grpcCode and the messages a stream sent before it
+  failed as `messages`. The upstream call carries the client's deadline, and is
+  cancelled when the client cancels, which saves nothing. A bidirectional stream
+  is not recorded."
   (:require [clojure.string :as str]
             [promesa.core :as p]
             ["@grpc/grpc-js" :as grpc]
@@ -155,13 +156,18 @@
           (update :log #(into (vec refused) %)))
 
       :else
-      (let [obj (when (one-message? doc) (js->clj doc))]
-        {:metadata meta
-         :log      refused
-         :error {:code    (or (code-of (get obj "grpcCode")) (codes (get http->grpc status "UNKNOWN")))
-                 :details (or (some #(when (string? %) %) [(get obj "message") (get obj "error")])
-                              (when (and (= ::none doc) (not (str/blank? body))) body)
-                              (str "HTTP " status))}}))))
+      (let [obj  (when (one-message? doc) (js->clj doc))
+            msgs (when (one-message? doc) (.-messages ^js doc))
+            sent (when (and stream? (array? msgs)) (replies-of msgs body reply-type true))]
+        (if (:error sent)
+          sent
+          (merge sent
+                 {:metadata meta
+                  :log      (into (vec refused) (:log sent))
+                  :error {:code    (or (code-of (get obj "grpcCode")) (codes (get http->grpc status "UNKNOWN")))
+                          :details (or (some #(when (string? %) %) [(get obj "message") (get obj "error")])
+                                       (when (and (= ::none doc) (not (str/blank? body))) body)
+                                       (str "HTTP " status))}}))))))
 
 (defn- log! [line] (.write js/process.stderr (str line "\n")))
 
@@ -217,14 +223,13 @@
       (.on call "end" #(reply! ask call (request-of call path msgs) callback)))))
 
 (defn- server-stream-handler
-  "Answer the one request with every message of the reply, or the error before any."
+  "Answer the one request with every message of the reply, then the error if any."
   [ask path]
   (fn [^js call]
     (-> (p/let [{:keys [metadata values error]} (ask call (request-of call path (.-request call)))]
           (when metadata (.sendMetadata call metadata))
-          (if error
-            (.emit call "error" (clj->js error))
-            (do (run! #(.write call %) values) (.end call))))
+          (run! #(.write call %) values)
+          (if error (.emit call "error" (clj->js error)) (.end call)))
         (p/catch #(.emit call "error" (call-error %))))))
 
 (defn- bidi-handler
@@ -243,7 +248,8 @@
                       (-> (p/let [{:keys [metadata values error]} (ask call (request-of call path msg))]
                             (when-not @over?
                               (when (and metadata (not @md?)) (reset! md? true) (.sendMetadata call metadata))
-                              (if error (stop! (clj->js error)) (run! #(.write call %) values))))
+                              (run! #(.write call %) values)
+                              (when error (stop! (clj->js error)))))
                           (p/catch #(stop! (call-error %)))))))]
       (.on call "data" (fn [msg] (swap! turns p/then (turn msg))))
       (.on call "end" (fn [] (swap! turns p/then (fn [_] (stop! nil)))))
@@ -312,10 +318,11 @@
            msg     (js/JSON.parse (get request "body"))
            headers (atom {})
            ok      #(resolve {"statusCode" 200 "headers" @headers "body" (js->clj %)})
-           fail    (fn [^js e]
+           fail    (fn [^js e & [sent]]
                      (let [code (get code-names (.-code e) "UNKNOWN")]
                        (resolve {"statusCode" (grpc->http code) "headers" @headers
-                                 "body" {"grpcCode" code "message" (.-details e)}})))
+                                 "body" (cond-> {"grpcCode" code "message" (.-details e)}
+                                          (seq sent) (assoc "messages" (js->clj sent)))})))
            done    (fn [err reply] (if err (fail err) (ok reply)))
            ^js call (cond
                       (.-requestStream md)  (let [^js c (.makeClientStreamRequest client path ser de meta opts done)]
@@ -326,7 +333,7 @@
                                                   msgs  #js []]
                                               (.on c "data" #(.push msgs %))
                                               (.on c "end" #(ok msgs))
-                                              (.on c "error" fail)
+                                              (.on c "error" #(fail % msgs))
                                               c)
                       :else                 (.makeUnaryRequest client path ser de msg meta opts done))
            gone    (fn []

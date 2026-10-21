@@ -136,11 +136,16 @@
           (is (< took 2000) "without waiting out a timeout")
           (is (= [] (get-in saved [:json "stubs"])) "and nothing is saved"))))))
 
+(def ^:private hanging
+  "Handlers whose Get never answers and whose Watch sends one message and never ends."
+  {:Get   (fn [_ _])
+   :Watch (fn [^js call] (.write call #js {:key "w1"}))})
+
 (defn- raw-upstream
-  "A grpc-js server for kv.Store on `port` whose Get never answers and whose Watch
-   sends one message and never ends. Resolves {:server :calls}, where `calls` is an
-   atom of {:rpc :deadline :cancelled (a promise of the cancel)} for each call."
-  [dir port]
+  "A grpc-js server for kv.Store on `port`, its methods answered by `handlers`
+   ({:Method fn}). Resolves {:server :calls}, where `calls` is an atom of {:rpc
+   :deadline :cancelled (a promise of the cancel)} for each call."
+  [dir port handlers]
   (let [def    (.loadSync loader (path/join dir "kv.proto") #js {:keepCase true :includeDirs #js [dir]})
         svc    (.. (.loadPackageDefinition grpc def) -kv -Store -service)
         calls  (atom [])
@@ -148,8 +153,8 @@
                  (swap! calls conj {:rpc rpc :deadline (js/Number (.getDeadline call))
                                     :cancelled (js/Promise. (fn [resolve] (.on call "cancelled" #(resolve true))))}))
         server (grpc/Server.)]
-    (.addService server svc #js {:Get   (fn [call _] (note! "Get" call))
-                                 :Watch (fn [^js call] (note! "Watch" call) (.write call #js {:key "w1"}))})
+    (.addService server svc (clj->js (into {} (for [[k f] handlers]
+                                                [k (fn [call & more] (note! (name k) call) (apply f call more))]))))
     (js/Promise.
      (fn [resolve reject]
        (.bindAsync server (str "127.0.0.1:" port) (.createInsecure grpc/ServerCredentials)
@@ -170,7 +175,7 @@
                 desc  (:descriptor (proto/read-proto (path/join dir "kv.proto")))
                 up    (fx/free-port)
                 port  (fx/free-port)
-                {:keys [server calls]} (raw-upstream dir up)
+                {:keys [server calls]} (raw-upstream dir up hanging)
                 _     (fx/admin-call (str admin "/imposters") "POST" (recorder desc up port))
                 ^js c (fx/connect (path/join dir "kv.proto") "kv.Store" port)
                 ^js w (.Watch c #js {:key "x"})
@@ -189,6 +194,37 @@
           (is (< (:deadline get1) (+ (js/Date.now) 2000)) "the client's deadline goes upstream")
           (is (= true ggone) "and a call past it is cancelled upstream at once, not at the upstream's own deadline")
           (is (= [] (get-in saved [:json "stubs"])) "and neither is saved"))))))
+
+(deftest a-stream-that-fails-partway-is-recorded-with-what-it-sent
+  (async done
+    (fx/with-daemon done
+      (fn [admin]
+        (p/let [dir    (fx/kv-dir)
+                desc   (:descriptor (proto/read-proto (path/join dir "kv.proto")))
+                up     (fx/free-port)
+                port   (fx/free-port)
+                {:keys [server]} (raw-upstream dir up {:Watch (fn [^js call]
+                                                                (.write call #js {:key "w1"})
+                                                                (.write call #js {:key "w2"})
+                                                                (.emit call "error" #js {:code (codes "NOT_FOUND") :details "gone"}))})
+                _      (fx/admin-call (str admin "/imposters") "POST" (recorder desc up port))
+                c      (fx/connect (path/join dir "kv.proto") "kv.Store" port)
+                live   (fx/server-stream c "Watch" {:key "x"})
+                _      (fx/close c)
+                _      (.forceShutdown ^js server)
+                saved  (fx/admin-call (str admin "/imposters/" port "?replayable=true&removeProxies=true") "GET" nil)
+                replay (fx/free-port)
+                _      (fx/admin-call (str admin "/imposters") "POST" (assoc (:json saved) "port" replay "name" "t/replay"))
+                r      (fx/connect (path/join dir "kv.proto") "kv.Store" replay)
+                again  (fx/server-stream r "Watch" {:key "x"})]
+          (fx/close r)
+          (let [shape (juxt #(mapv (fn [m] (get m "key")) (:messages %)) :code :details)]
+            (is (= [["w1" "w2"] (codes "NOT_FOUND") "gone"] (shape live)) "the client gets the messages, then the error")
+            (is (= {"statusCode" 404 "body" {"grpcCode" "NOT_FOUND" "message" "gone" "messages" [{"key" "w1"} {"key" "w2"}]}}
+                   (-> (get-in saved [:json "stubs" 0 "responses" 0 "is"])
+                       (select-keys ["statusCode" "body"])
+                       (update-in ["body" "messages"] #(mapv (fn [m] (select-keys m ["key"])) %)))))
+            (is (= (shape live) (shape again)) "and the replay sends the same")))))))
 
 (deftest a-recorded-grpc-imposter-lifts-to-a-grpc-contract
   (let [imp {"protocol" "grpc" "descriptor" {}
