@@ -93,6 +93,29 @@
         added (last (get c "operations"))]
     (is (not (contains? (set (ids (contract/expand (dissoc with-genes "operations")))) (get added "id"))))))
 
+;; --- parameterize leaves gene operations alone --------------------------------
+
+(def ^:private concrete-thing
+  {"id" "one-thing"
+   "request" {"method" "GET" "path" "/api/v1/users/42"}
+   "responses" [{"status" 200 "examples" {"ok" {"select" true "body" {}}}}]})
+
+(deftest parameterize-skips-gene-ops-that-are-already-templated
+  (testing "no authored op matches: nothing changes and nothing is refused"
+    (is (= {:contract with-genes :changed 0}
+           (contract/parameterize with-genes "/api/v1/users/{uid}"))))
+  (testing "an authored op matches: it widens, the gene's /api/v1/users/{id} is not in the way"
+    (let [c (assoc with-genes "operations" [concrete-thing])
+          {:keys [contract changed]} (contract/parameterize c "/api/v1/users/{uid}")]
+      (is (= 1 changed))
+      (is (= "/api/v1/users/{uid}" (get-in contract ["operations" 0 "request" "path"])))
+      (is (= (get c "genes") (get contract "genes"))))))
+
+(deftest parameterize-refuses-to-widen-a-gene-op
+  (let [c {"genes" [{"oauth2-provider" {}}]}]
+    (is (= {:refused {:op "authorize" :gene "oauth2-provider"}}
+           (contract/parameterize c "/github/login/oauth/{step}")))))
+
 ;; --- params: required, shaped, and no collisions ------------------------------
 
 (defn- errors-of [genes & [ops]]

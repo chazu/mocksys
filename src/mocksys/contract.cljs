@@ -424,6 +424,22 @@
 (defn- op-by-id [contract op-id]
   (some (fn [op] (when (= op-id (get op "id")) op)) (get contract "operations")))
 
+(defn parameterize
+  "Loosen every authored operation whose path the `{param}` template `tmpl`
+   matches to that template. Returns {:contract :changed n}, or {:refused {:op
+   :gene}} when a gene operation's path would have to change too."
+  [contract tmpl]
+  (let [re      (re-pattern (path->regex tmpl))
+        widens? #(let [path (get-in % ["request" "path"])]
+                   (and path (not= path tmpl) (re-matches re path)))]
+    (if-let [op (first (filter #(and (get % "gene") (widens? %)) (get (expand contract) "operations")))]
+      {:refused {:op (get op "id") :gene (get op "gene")}}
+      (let [ops (get contract "operations")]
+        {:contract (cond-> contract
+                     (contains? contract "operations")
+                     (assoc "operations" (mapv #(cond-> % (widens? %) (assoc-in ["request" "path"] tmpl)) ops)))
+         :changed  (count (filter widens? ops))}))))
+
 (defn example-locations
   "Every [response-index example-name] pair where `ex-name` appears in operation
    `op-id`. Used to detect ambiguity across status codes."
