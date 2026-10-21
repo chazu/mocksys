@@ -10,6 +10,11 @@
             [mocksys.lifecycle :as lifecycle]
             [mocksys.cli.util :refer [die parse-kv parse-conditions]]))
 
+(defn- gene-op-refusal [op-id gene]
+  (str "operation '" op-id "' comes from gene '" gene "' and cannot be edited; change "
+       "the gene's params under `genes:`, or author an operation with the same request "
+       "(authored operations are served first)"))
+
 (defn cmd-import
   "Seed scenarios from an OpenAPI/Swagger spec — one per operation, schema + named
    examples, plus a synthesized service profile:
@@ -75,7 +80,7 @@
       (doseq [w warnings] (println (str "  ⚠ " w)))
       (doseq [e errors]   (println (str "  ✗ " e)))
       (when (and (empty? errors) (empty? warnings))
-        (println (str "  ✓ valid — " (count (get c "operations")) " operation(s)")))
+        (println (str "  ✓ valid — " (count (get (contract/expand c) "operations")) " operation(s)")))
       (when (seq errors)
         (binding [*print-fn* *print-err-fn*] (println (str (count errors) " error(s)")))
         (js/process.exit 1)))))
@@ -90,8 +95,8 @@
           op (when (string? (:op opts)) (:op opts))
           rows (contract/examples-overview c op)]
       (println (str "# examples: " scenario))
-      (doseq [{:keys [id method path responses]} rows]
-        (println (str "  " id "  (" method " " path ")"))
+      (doseq [{:keys [id gene method path responses]} rows]
+        (println (str "  " id "  (" method " " path ")" (when gene (str "  [gene " gene "]"))))
         (doseq [{:keys [status schema? examples]} responses]
           (println (str "    " status (when schema? "  [schema]")))
           (doseq [{:keys [name select]} examples]
@@ -113,6 +118,8 @@
     (let [c   (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
           ids (map #(get % "id") (get c "operations"))]
       (when-not (some #{op} ids)
+        (when-let [gene (contract/gene-of c op)]
+          (die (gene-op-refusal op gene)))
         (die (str "no operation '" op "' in '" scenario "'. known: " (str/join ", " ids))))
       (when (empty? (contract/example-locations c op ex))
         (die (str "no example '" ex "' on operation '" op "' — see `examples " scenario "`")))
@@ -195,21 +202,15 @@
         tmpl     (:path opts)]
     (when-not scenario (die "parameterize needs a scenario: parameterize <name> --path '/a/{x}/b'"))
     (when-not (string? tmpl) (die "parameterize needs --path '/template/{with}/{vars}'"))
-    (let [c       (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
-          re      (re-pattern (contract/path->regex tmpl))
-          changed (atom 0)
-          c'      (update c "operations"
-                          (fn [ops]
-                            (mapv (fn [op]
-                                    (let [path (get-in op ["request" "path"])]
-                                      (if (and path (not= path tmpl) (re-matches re path))
-                                        (do (swap! changed inc)
-                                            (assoc-in op ["request" "path"] tmpl))
-                                        op)))
-                                  ops)))]
-      (if (zero? @changed)
+    (let [c (or (lifecycle/ensure-contract! scenario) (die (str "no contract for '" scenario "'")))
+          {:keys [contract changed refused]} (contract/parameterize c tmpl)]
+      (cond
+        refused
+        (die (gene-op-refusal (:op refused) (:gene refused)))
+        (zero? changed)
         (println (str "no operations matched " tmpl " - nothing parameterized"))
-        (do (store/write-contract! scenario c')
+        :else
+        (do (store/write-contract! scenario contract)
             (lifecycle/compile! scenario)
-            (println (str "parameterized " @changed " operation(s) in '" scenario "' to " tmpl)))))))
+            (println (str "parameterized " changed " operation(s) in '" scenario "' to " tmpl)))))))
 

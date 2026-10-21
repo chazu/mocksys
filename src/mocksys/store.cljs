@@ -176,3 +176,28 @@
          (map #(path/dirname %))
          (remove #(str/starts-with? % "services"))
          sort)))
+
+;; --- user kits ------------------------------------------------------------
+
+(def kits-dir (path/join root "kits"))
+
+(defn- read-kit-file
+  "[file text], or [file nil reason] when `file` is not a readable regular file."
+  [file]
+  (try
+    (if (.isFile (fs/statSync file))
+      [file (fs/readFileSync file "utf8")]
+      [file nil "not a file"])
+    (catch :default e [file nil (.-message e)])))
+
+(defn kit-files
+  "[[path text] ...] for every *.yaml and *.yml entry in `dir`, sorted by name; an
+   entry that cannot be read is [path nil reason]. Empty when `dir` does not exist."
+  [dir]
+  (if-not (fs/existsSync dir)
+    []
+    (->> (fs/readdirSync dir)
+         (map str)
+         (filter #(re-find #"\.ya?ml$" %))
+         sort
+         (mapv #(read-kit-file (path/join dir %))))))

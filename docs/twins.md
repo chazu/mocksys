@@ -23,10 +23,11 @@ mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use 
 | Kit | Options | Produces |
 |---|---|---|
 | `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--issuer URL` `--signing-key FILE.pem` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo minting **signed RS256 JWTs** with published JWKS + discovery — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` sets the OIDC token lifetime on the virtual clock (default 3600 s), `--signing-key` pins the JWT key, `--issuer` sets the JWT `iss`/`aud` for requests that carry no `Host` header. |
-| `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--token-ttl S` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. |
+| `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--token-ttl S` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. A YAML kit over the `oauth2-provider` gene. |
+| yours | the flags your kit declares, plus `--scenario NAME` `--port N` | whatever its contract template describes. See [Writing a kit](#writing-a-kit). |
 
-The default scenario id is `oauth/<provider>` for `oauth2` and `okta/okta` for `okta`;
-override with `--scenario`. After generation, treat the twin like any scenario: `run`,
+The default scenario id is `oauth/<provider>` for `oauth2` and `<kit>/<kit>` for any
+other kit, such as `okta/okta`; override with `--scenario`. After generation, treat the twin like any scenario: `run`,
 `env`, `inspect`, `conform`, `stack`/`up`.
 
 ```sh
@@ -35,38 +36,123 @@ mocksys run okta/okta --port 9200
 eval "$(mocksys env okta/okta)"           # exports BASE_URL=http://localhost:9200
 ```
 
-## Genes
+A kit whose template lists `genes:`, such as `oauth2` or the `directory` example, writes
+those genes into `contract.yaml` and not their operations. `examples` marks each of those
+operations `[gene NAME]`, and `use` refuses to toggle their examples, because the operation
+exists only in the expansion. `okta` is a builder function that writes its operations out
+in full, so `use` works on all of them. To change what a gene operation serves, do one of
+the following:
 
-A **gene** is a small, parameterized contract fragment — a proven behavioral pattern — that
-a kit composes. A twin is *composed from genes* rather than written from scratch; that is
-gene transfusion in practice.
+- Change the gene's params under `genes:` in `contract.yaml`, then `compile`.
+- Shadow the operation. `mocksys add <name> --request 'GET /github/user' --status 500`
+  adds an authored operation with the same request, and authored operations are served
+  before gene operations. `add` picks an id that no gene operation uses, and `use` works on
+  the new operation.
 
-```sh
-mocksys genes        # list the genes (and kits) available
+`kit` rejects any option the kit does not declare, apart from `--scenario` and `--port`.
+`mocksys kits` lists every kit with its flags and their defaults.
+
+### Writing a kit
+
+A kit is a YAML file: a contract template plus the flags it accepts, each with a default
+and a type.
+
+```yaml
+name: directory
+doc: users, groups and memberships composed from genes
+flags:                     # `kit directory --<flag> VALUE` overrides a default
+  users-base: /api/v1/users
+  rate-limit: 100
+  window: { type: number }   # no default; a number when given
+contract:                  # any contract; usually a list of genes
+  seed:
+    users: [ { id: u1, status: ACTIVE, profile: { login: alice@example.com } } ]
+  genes:
+    - crud-collection: { coll: users, base: "{users-base}", seed-name: users,
+                         rate-limit: { max: "{rate-limit}", window: "{window}" } }
 ```
 
-| Gene | Behavior |
-|---|---|
-| `crud-collection` | A REST resource: create / list / get / update / delete, SCIM-ish filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). |
-| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Sources users from a **seed array** (oauth2) or a **live collection** with a dynamic picker + `status`-gated issuance (okta). Optional token TTL. |
-| `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). |
-| `jwt-signing` | RS256-signed access + id JWTs via the [`sign`](effects.md#sign--issue-a-signed-jwt-non-terminal) verb, with a published JWKS and OIDC discovery. |
-| `error-envelope` | Provider-shaped error bodies for misses (e.g. Okta `errorCode`/`errorSummary`). |
-| `rate-limit` | A per-client request budget over a [virtual-clock](effects.md#the-virtual-clock) window → `429` + `X-Rate-Limit-*` headers. |
-| `virtual-clock` | Deterministic, advanceable time (TTL expiry, rate-limit windows, `now` binds); driven by `mocksys clock`. |
+- A string that is **exactly** `"{flag}"` becomes the flag's value with its type, so
+  `"{rate-limit}"` above becomes the number `100`. A flag inside a longer string, such as
+  `"/v2{users-base}"`, is left as written, and so is a template that names no flag, such
+  as an effect's `"{token}"`.
+- Each flag is a bare default, such as `rate-limit: 100`, or a map
+  `{default: VALUE, type: TYPE}` in which either key may be left out. A bare default
+  cannot be a map; write `{default: {...}, type: json}` instead.
+- A flag's type is its declared `type`. Without one, the type comes from the default: a
+  number is `number`, `true` or `false` is `boolean`, a list is `json`, and a string or
+  `null` (or no default) is `string`. A declared default must fit its type.
+- `kit` parses each command-line value by the flag's type:
 
-Genes live in the `kits` module, but not every gene is a function. `crud-collection`,
-`oidc-handshake` and `membership` are functions returning a fragment `{:operations
-:collections :seed}`, and a kit merges fragments with `compose`. The others are options or
-helpers on those: `rate-limit` is `crud-collection`'s `:rate-limit` option, `jwt-signing`
-is the `:jwt` entry of `oidc-handshake`'s `:user-source`, `error-envelope` is the
-`okta-error` body helper, and `virtual-clock` is the contract's `state.clock` (or turns on
-implicitly, see [effects.md](effects.md#the-virtual-clock)). The `genes` list that `mocksys
-genes` prints is display-only. To extend mocksys with a new twin, write a builder that
-composes the genes it needs and register it in the `kits` map with the `:flags` it honors.
-`kit` rejects a flag that a kit doesn't list. A brand-new flag also needs parsing in
-`cmd-kit` (`src/mocksys/cli/twins.cljs`), which passes the parsed flags to every builder. `oauth2` and
-`okta` are the worked examples.
+  | Type | `--flag VALUE` becomes |
+  |---|---|
+  | `string` | VALUE as written |
+  | `number` | VALUE as a number; anything else is an error |
+  | `boolean` | `true` or `false`; a bare `--flag` with no value is `true` |
+  | `file` | the text of the file at path VALUE, such as a PEM key |
+  | `json` | the parsed JSON in the file at path VALUE, such as a list of users |
+
+  A flag of any type other than `boolean` needs a value, so a bare `--provider` is an
+  error. The built-in kits declare their types: `okta` and `oauth2` read `--users` as
+  `json`, `okta` reads `--signing-key` as `file`, and `--token-ttl`, `--rate-limit` and
+  `--rate-window` are `number`. `mocksys kits` shows each flag's type.
+- `kit` sets `service`, `scenario` and `origin: kit` on the generated contract. Without a
+  `summary` in the template, the kit's `doc` is used. `contract.yaml` keeps the template's
+  `genes:` form.
+
+Put your kits in `$MOCKSYS_HOME/kits/`, as `*.yaml` or `*.yml` files. A kit without
+`name` is named after its file. A user kit with a built-in's name replaces the built-in,
+and `kit` and `kits` print a warning saying so. When two user files declare one name, the
+file that sorts last wins, and the warning names both files. A kit file that cannot be
+read or parsed is skipped with a warning.
+[`examples/kits/directory.yaml`](../examples/kits/directory.yaml) is a complete user kit.
+
+The built-in `oauth2` kit is a YAML file (`src/mocksys/kits/oauth2.yaml`), inlined into the
+CLI at build time. Its provider-shaped paths (`/github/login/oauth/...`), default accounts
+and account index come from the `oauth2-provider` gene, because whole-value substitution
+cannot build `"/{provider}/login/..."`. The `okta` kit stays a builder function in
+`src/mocksys/kits.cljs`. It generates an RSA signing key on each `kit` run and publishes the
+derived JWK, which a fixed template cannot do.
+
+## Genes
+
+A **gene** is a small, parameterized contract fragment. It is a proven behavioral pattern
+such as a REST resource or an OAuth handshake. A twin is *composed from genes* rather than
+written from scratch, which is gene transfusion in practice. Any contract can list genes
+under `genes:` (see [contracts.md](contracts.md#genes)), and a kit composes them the same
+way.
+
+```yaml
+genes:
+  - crud-collection: { coll: users, base: /api/v1/users, seed-name: users, id-prefix: u }
+  - membership: { users-coll: users, groups-coll: groups }
+```
+
+```sh
+mocksys genes        # every gene with its params, and what is built in rather than a gene
+```
+
+| Gene | Behavior | Required params |
+|---|---|---|
+| `crud-collection` | A REST resource: create / list / get / update / delete, SCIM filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). `rate-limit: {max, window}` adds a per-client budget. | `coll`, `base` |
+| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Users come from a **seed array** (`seed-name`, `users`) or, with `user-source: {collection, login-field, active-only, claims}`, from a **live collection** with a dynamic picker and `status`-gated issuance. Optional `token-ttl`. | `authz`, `token`, `userinfo` |
+| `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). | none |
+| `oauth2-provider` | A GitHub- or Codeberg-shaped OAuth2 provider: `oidc-handshake` over seed accounts at `/<provider>/login/oauth/...`, the provider's userinfo path, its default accounts (or `users`), and an account index at `/`. The `oauth2` kit is this gene plus flags. | none |
+
+Some behavior is not a standalone gene. `mocksys genes` lists where each piece lives:
+
+| Capability | Where it lives |
+|---|---|
+| `rate-limit` | `crud-collection`'s `rate-limit` param, or a hand-written [`limit`](effects.md#limit--rate-limiting). A budget over a virtual-clock window, then `429` + `X-Rate-Limit-*`. |
+| `error-envelope` | The default `not-found` and `invalid-filter` responses of `crud-collection` and `membership` (Okta `errorCode`/`errorSummary`). Override them with those params. |
+| `virtual-clock` | The contract's `state.clock`, or implied by `store.ttl`, `limit`, `sign` or a `now` bind ([effects.md](effects.md#the-virtual-clock)). `mocksys clock` moves it. |
+| `jwt-signing` | The [`sign`](effects.md#sign--issue-a-signed-jwt-non-terminal) verb. `kit okta` wires it with an RSA key generated at kit time, so it is an option only code can pass to `oidc-handshake`, not a YAML param. |
+
+Genes are functions in `src/mocksys/kits.cljs` that return a fragment `{:operations
+:collections :seed}`, registered in `kits/genes` with their `:params`. `compose` merges
+fragments, and earlier entries win. A new gene needs a function and a registry entry. The
+`every-declared-param-changes-the-gene` test fails when a declared param has no effect,
+which keeps `mocksys genes` truthful.
 
 ### Anatomy of the `okta` twin
 

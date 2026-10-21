@@ -257,7 +257,8 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `requests <name> [--clear]` | what the running mock received |
 | `assert <name> --saw 'METHOD /path'` | verify a call happened (exit 1 on miss) |
 | `kit <okta\|oauth2> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
-| `genes` | list the behavioral genes (and kits) available |
+| `kits` | list the kits, built in and in `$MOCKSYS_HOME/kits`, with their flags |
+| `genes` | list the genes a contract can list under `genes:`, with their params |
 | `conform <name> --corpus FILE [--against URL] [--ignore k1,k2]` | replay+diff vs reality (exit 1 on drift) |
 | `clock <name> [advance <1h\|30m> \| set <ts>]` | read/move a twin's deterministic virtual clock |
 | `import openapi <spec> [--service NAME] [--target URL]` | spec → one scenario per operation |

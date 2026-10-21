@@ -550,6 +550,7 @@ stateful scenario.
 
 ## Building twins this way
 
-You rarely author a whole twin by hand — a **kit** composes reusable **genes**
-(`crud-collection`, `oidc-handshake`, ...) into one. See [twins.md](twins.md). The genes
-*are* these effects, parameterized.
+You rarely author a whole twin by hand. List reusable **genes** (`crud-collection`,
+`oidc-handshake`, ...) under a contract's `genes:` ([contracts.md](contracts.md#genes)), or
+let a **kit** compose them for you. See [twins.md](twins.md). The genes *are* these effects,
+parameterized.

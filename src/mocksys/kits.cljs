@@ -6,27 +6,32 @@
   A *gene* is a small, parameterized contract fragment ({:operations :collections
   :seed}) — a proven behavioral pattern: an OIDC authorize/token/userinfo handshake,
   a REST resource with CRUD+filter+pagination, a provider error envelope. A *kit*
-  composes genes into a complete, runnable contract.
+  composes genes into a complete, runnable contract. Most kits are YAML templates
+  (built in, or in $MOCKSYS_HOME/kits); a kit that must compute at build time is a
+  builder function.
 
   This is `gene transfusion` made concrete: a new twin is *composed from existing
   genes* rather than written from scratch. `oauth2` reproduces snooker's mockoauth;
   `okta` composes a users + groups CRUD twin with the Okta error envelope and an
   OIDC token flow — a digital twin of Okta in one command."
   (:require [clojure.string :as str]
-            ["crypto" :as crypto]))
+            [shadow.resource :as rc]
+            ["crypto" :as crypto]
+            ["js-yaml" :as yaml]))
 
 ;; --- composition ----------------------------------------------------------
 
-(defn- compose
+(defn compose
   "Merge gene fragments into one contract. Each fragment may carry :operations
-   (concatenated, in order — Mountebank serves the first matching stub),
-   :collections (merged), and :seed (merged)."
+   (concatenated, in order), :collections and :seed. Earlier wins throughout, as
+   Mountebank serves the first matching stub: `base` keeps its own collections and
+   seed arrays over a fragment's of the same name."
   [base & fragments]
   (reduce (fn [c {:keys [operations collections seed]}]
             (cond-> c
               (seq operations)   (update "operations" (fnil into []) operations)
-              (seq collections)  (update-in ["state" "collections"] merge collections)
-              (seq seed)         (update "seed" merge seed)))
+              (seq collections)  (update-in ["state" "collections"] #(merge collections %))
+              (seq seed)         (update "seed" #(merge seed %))))
           (merge {"operations" [] "state" {"collections" {}} "seed" {}} base)
           fragments))
 
@@ -48,7 +53,7 @@
      POST   {base}/{id}       merge-patch
      DELETE {base}/{id}       delete
    `opts`: :coll :base :id-field :seed-name :id-prefix :create-defaults :not-found
-   :invalid-filter."
+   :invalid-filter :rate-limit {\"max\" N \"window\" S}."
   [{:keys [coll base id-field seed-name id-prefix create-defaults not-found invalid-filter rate-limit]}]
   (let [id-field (or id-field "id")
         id-regex (str base "/([^/]+)$")
@@ -60,7 +65,7 @@
         rl-bind  (when rate-limit {"__cli" {"header" "authorization" "bearer" true}})
         rl       (when rate-limit
                    {"bucket" "rl" "key" "{__cli}"
-                    "max"    (:max rate-limit) "window" (or (:window rate-limit) 60)})
+                    "max"    (get rate-limit "max") "window" (or (get rate-limit "window") 60)})
         eff      (fn [m] (cond-> m
                            rl-bind (update "bind" merge rl-bind)
                            rl      (assoc "limit" rl)))]
@@ -186,12 +191,12 @@
 (defn- oidc-live-ops
   "The live-collection handshake (okta): a `render` picker over the mutable
    collection, a uid carried through the code→token buckets, and userinfo shaped by
-   `find`+dotted `respond`. `active-only?` gates issuance and the picker to
+   `find`+dotted `respond`. `active-only` gates issuance and the picker to
    `status eq \"ACTIVE\"` (Q7). `claims` is the (dotted) userinfo claim template."
-  [{:keys [authz token userinfo token-ttl user-source]}]
-  (let [{:keys [collection login-field active-only? claims jwt]} user-source
+  [{:keys [authz token userinfo token-ttl user-source jwt]}]
+  (let [{:strs [collection login-field active-only claims]} user-source
         login-field (or login-field "profile.login")
-        active-flt  (when active-only? "status eq \"ACTIVE\"")
+        active-flt  (when active-only "status eq \"ACTIVE\"")
         claims      (or claims {"sub" "{user.id}"})
         ;; the access-token op: opaque bucket token, or a signed RS256 JWT pair when
         ;; the kit supplies a `:jwt` config (private PEM + kid + claim templates).
@@ -263,15 +268,16 @@
                  "respond" {"status" 200 "json" claims}}}]))
 
 (defn oidc-handshake
-  "OIDC genes over `authz`/`token`/`userinfo` paths. `:user-source` forks the source:
-     {:seed <name>}                            → seed-array resolve (oauth2, default)
-     {:collection <c> :login-field <p> :active-only? bool :claims <tpl>}
-                                               → live mutable collection (okta)
+  "OIDC genes over `authz`/`token`/`userinfo` paths. Users come from the seed array
+   `:seed-name` (oauth2, default; `:users` feeds the static picker), or from a live
+   collection when `:user-source` is
+     {\"collection\" c \"login-field\" p \"active-only\" bool \"claims\" tpl}  (okta)
    Returns authorize(+picker), token, userinfo. With `:token-ttl` (seconds), issued
-   tokens expire on the virtual clock."
+   tokens expire on the virtual clock. `:jwt` (live source only) signs RS256 tokens;
+   it carries a private key made at kit time, so only code can supply it."
   [{:keys [user-source] :as opts}]
   {:operations
-   (if (:collection user-source)
+   (if (get user-source "collection")
      (oidc-live-ops opts)
      (oidc-seed-ops opts))})
 
@@ -358,32 +364,30 @@
   (str "mock OAuth2 — accounts:\n"
        (str/join (for [u users] (str "  - " (get u "login") " (" (get u "email") ")\n")))))
 
-;; --- kit: oauth2 (snooker's mockoauth) ------------------------------------
+;; --- gene: oauth2 provider (snooker's mockoauth) ---------------------------
 
-(defn oauth2
-  "An OAuth2 provider twin: account picker, single-use codes, token table, userinfo.
-   Composed from the OIDC handshake gene. With `token-ttl` (seconds), issued tokens
-   expire on the virtual clock."
-  [scenario provider users token-ttl]
-  (let [users (or (seq users) (get default-users provider) (get default-users "github"))
-        authz (str "/" provider "/login/oauth/authorize")
-        token (str "/" provider "/login/oauth/access_token")]
-    (compose
-     {"service"  (or (first (str/split scenario #"/")) "oauth")
-      "scenario" scenario
-      "origin"   "kit"
-      "summary"  (str provider " OAuth2 provider (mock) — picker, single-use codes, userinfo")
-      "seed"     {"users" users}}
-     (oidc-handshake {:authz authz :token token :userinfo (user-path provider)
-                      :seed-name "users" :users users :token-ttl token-ttl})
-     {:operations
-      [{"id"      "index"
-        "summary" "account index"
-        "request" {"method" "GET" "path" "/"}
-        "responses"
-        [{"status"  200
-          "headers" {"Content-Type" "text/plain; charset=utf-8"}
-          "examples" {"index" {"select" true "body" (index-text users)}}}]}]})))
+(defn oauth2-provider
+  "A GitHub- or Codeberg-shaped OAuth2 provider: the seed-array OIDC handshake at
+   /{provider}/login/oauth/..., the provider's userinfo path, its default accounts
+   (or `:users`) as the `users` seed, and an account index at /. With `:token-ttl`
+   (seconds), issued tokens expire on the virtual clock."
+  [{:keys [provider users token-ttl]}]
+  (let [provider (or provider "github")
+        users    (if (seq users) users (get default-users provider (get default-users "github")))]
+    {:seed {"users" users}
+     :operations
+     (conj (:operations
+            (oidc-handshake {:authz     (str "/" provider "/login/oauth/authorize")
+                             :token     (str "/" provider "/login/oauth/access_token")
+                             :userinfo  (user-path provider)
+                             :seed-name "users" :users users :token-ttl token-ttl}))
+           {"id"      "index"
+            "summary" "account index"
+            "request" {"method" "GET" "path" "/"}
+            "responses"
+            [{"status"  200
+              "headers" {"Content-Type" "text/plain; charset=utf-8"}
+              "examples" {"index" {"select" true "body" (index-text users)}}}]})}))
 
 ;; --- kit: okta (users + groups CRUD twin + OIDC) --------------------------
 
@@ -491,8 +495,12 @@
   "A digital twin of Okta: users + groups CRUD (SCIM-ish filter + pagination), the
    Okta error envelope on misses, and an OIDC authorize/token/userinfo flow — all on
    one stateful imposter. Composed entirely from genes.
-     :rate-limit {:max N :window S}  rate-limit the CRUD ops (429 + X-Rate-Limit-*)
-     :token-ttl  S                   OIDC tokens expire after S seconds (virtual clock)"
+     :rate-limit {\"max\" N \"window\" S}  rate-limit the CRUD ops (429 + X-Rate-Limit-*)
+     :token-ttl  S                   OIDC tokens expire after S seconds (virtual clock)
+   Stays in code rather than a YAML kit: each build generates an RSA keypair (or
+   reads --signing-key) and publishes the derived JWK and kid in the JWKS op and the
+   signed-token op. A YAML kit only substitutes flag values into a fixed template,
+   so it has no step that can run code at kit time."
   [scenario users {:keys [rate-limit token-ttl issuer signing-key]}]
   (let [users  (or (seq users) okta-users)
         groups okta-groups
@@ -520,9 +528,9 @@
       ;; login→uid, and userinfo all read the same mutable collection the CRUD ops
       ;; write, so SCIM-created users can log in. Issuance + picker gate to ACTIVE (Q7).
       (oidc-handshake {:authz "/oauth2/v1/authorize" :token "/oauth2/v1/token"
-                       :userinfo "/oauth2/v1/userinfo" :token-ttl token-ttl
-                       :user-source {:collection "users" :login-field "profile.login"
-                                     :active-only? true :claims okta-userinfo-claims :jwt jwt}})
+                       :userinfo "/oauth2/v1/userinfo" :token-ttl token-ttl :jwt jwt
+                       :user-source {"collection" "users" "login-field" "profile.login"
+                                     "active-only" true "claims" okta-userinfo-claims}})
       ;; JWKS + discovery so third-party validators can verify the twin's tokens
       {:operations [(jwks-op (:jwk cfg))
                     (discovery-op "openid-config" "/.well-known/openid-configuration"
@@ -530,36 +538,231 @@
                     (discovery-op "oauth-authz-server" "/.well-known/oauth-authorization-server"
                                   (discovery-body "http://"))]}))))
 
-;; --- registry -------------------------------------------------------------
+;; --- gene registry ------------------------------------------------------------
 
-(def kits
-  "name -> {:doc :flags :build}. `:flags` are the `kit` options the builder honors.
-   Each builder takes [scenario opts] and returns a contract."
-  {"oauth2" {:doc "OAuth2 provider (picker, single-use codes, userinfo) [--token-ttl S]"
-             :flags #{:provider :users :token-ttl}
-             :build (fn [scenario {:keys [provider users token-ttl]}]
-                      (oauth2 scenario (or provider "github") users token-ttl))}
-   "okta"   {:doc "Okta twin: users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + membership [--rate-limit N] [--token-ttl S] [--issuer URL] [--signing-key FILE.pem]"
-             :flags #{:users :rate-limit :rate-window :token-ttl :issuer :signing-key}
-             :build (fn [scenario {:keys [users rate-limit token-ttl issuer signing-key]}]
-                      (okta scenario users {:rate-limit rate-limit :token-ttl token-ttl
-                                            :issuer issuer :signing-key signing-key}))}})
-
-(defn unsupported-flags
-  "The kit flags present in `opts` that kit `kind` would ignore, in sorted order."
-  [kind opts]
-  (let [all-flags (into #{} (mapcat :flags) (vals kits))]
-    (->> (keys opts)
-         (filter #(and (all-flags %) (not ((get-in kits [kind :flags]) %))))
-         sort
-         vec)))
+(def param-shapes
+  "shape -> predicate: what a gene param's value must be when it is set."
+  {:string string?
+   :number number?
+   :map    map?
+   :list   sequential?})
 
 (def genes
-  "The reusable behavioral genes a kit composes — shown by `mocksys genes`."
-  [{:name "crud-collection" :doc "REST resource: create/list/get/update/delete, SCIM-ish filter + cursor pagination"}
-   {:name "oidc-handshake"  :doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"}
-   {:name "membership"      :doc "Group membership: assign/unassign (idempotent, FK-guarded) + list either side of the relation, hydrated + paginated"}
-   {:name "jwt-signing"     :doc "RS256-signed access/id JWTs (require('crypto')), published JWKS + OIDC discovery; typed claims via the sign verb"}
-   {:name "error-envelope"  :doc "Provider-shaped error bodies for misses (e.g. Okta errorCode/errorSummary)"}
-   {:name "rate-limit"      :doc "Per-client request budget over a virtual-clock window → 429 + X-Rate-Limit-* headers"}
-   {:name "virtual-clock"   :doc "Deterministic, advanceable time (store.ttl expiry, now bind); driven by `mocksys clock`"}])
+  "name -> {:doc :params :required :build}: the genes a contract may list under
+   `genes:`. `:params` is [[option shape doc] ...] in display order, each shape a
+   key of `param-shapes`. `:build` takes the options keyword-keyed, values as
+   written in YAML, and returns a fragment."
+  {"crud-collection"
+   {:doc "REST resource: create/list/get/update/delete, SCIM filter + cursor pagination"
+    :params [[:coll :string "collection name; also names the ops (list-<coll>, ...)"]
+             [:base :string "resource path, e.g. /api/v1/users"]
+             [:seed-name :string "seed array the collection starts from"]
+             [:id-field :string "row id field (default id)"]
+             [:id-prefix :string "prefix for minted ids (default none)"]
+             [:create-defaults :map "fields a created row gets unless the body sets them"]
+             [:not-found :map "miss response {status, json} (default Okta E0000007)"]
+             [:invalid-filter :map "bad-filter response {status, json} (default Okta E0000031)"]
+             [:rate-limit :map "{max, window}: per-client budget per window seconds (default 60), then 429 + X-Rate-Limit-*"]]
+    :required #{:coll :base}
+    :build crud-collection}
+   "oidc-handshake"
+   {:doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"
+    :params [[:authz :string "authorize path"]
+             [:token :string "token path"]
+             [:userinfo :string "userinfo path"]
+             [:seed-name :string "seed array userinfo resolves logins in (seed source)"]
+             [:users :list "accounts the static picker lists (seed source)"]
+             [:token-ttl :number "seconds until an issued token expires on the virtual clock"]
+             [:user-source :map "{collection, login-field, active-only, claims}: read users from a live collection instead"]]
+    :required #{:authz :token :userinfo}
+    :build oidc-handshake}
+   "membership"
+   {:doc "Many-to-many membership: assign/unassign (idempotent, FK-guarded) + list either side, hydrated + paginated"
+    :params [[:coll :string "relation collection (default memberships)"]
+             [:users-coll :string "member collection (default users)"]
+             [:groups-coll :string "group collection (default groups)"]
+             [:users-base :string "member resource path (default /api/v1/users)"]
+             [:groups-base :string "group resource path (default /api/v1/groups)"]
+             [:not-found :map "miss response {status, json} (default Okta E0000007)"]]
+    :required #{}
+    :build membership}
+   "oauth2-provider"
+   {:doc "GitHub/Codeberg-shaped OAuth2 provider: oidc-handshake over seed accounts + an account index at /"
+    :params [[:provider :string "github | codeberg; another name gets /<name>/... paths (default github)"]
+             [:users :list "accounts to seed and list (default: the provider's)"]
+             [:token-ttl :number "seconds until an issued token expires on the virtual clock"]]
+    :required #{}
+    :build oauth2-provider}})
+
+(def capabilities
+  "Behavior that is not a standalone gene, and where it lives instead."
+  [["rate-limit"     "crud-collection's rate-limit param, or the `limit` effect verb"]
+   ["error-envelope" "the default not-found / invalid-filter of crud-collection and membership (Okta-shaped)"]
+   ["virtual-clock"  "contract `state.clock`, or implied by store.ttl, limit, sign or a `now` bind; `mocksys clock` moves it"]
+   ["jwt-signing"    "the `sign` effect verb; `kit okta` wires it with a key generated at kit time"]])
+
+;; --- kits: YAML templates and code -------------------------------------------
+
+(defn- substitute
+  "Replace every string that is exactly \"{flag}\" with that flag's value, keeping
+   the value's type. Any other string is left alone, including effect templates
+   such as \"{token}\" that name no flag."
+  [x vals]
+  (cond
+    (string? x) (if-let [[_ flag] (re-matches #"\{([^{}]+)\}" x)]
+                  (let [k (keyword flag)] (if (contains? vals k) (get vals k) x))
+                  x)
+    (map? x)    (update-vals x #(substitute % vals))
+    (vector? x) (mapv #(substitute % vals) x)
+    :else       x))
+
+(def flag-types
+  "type -> {:fits? :parse :bad}: the types a kit flag can declare. `:fits?` checks
+   a declared default. `:parse` turns a command-line string into the value,
+   reading a path with `slurp`, and returns ::bad when it does not parse; `:bad`
+   then words the error from the flag and the string."
+  {:string  {:fits? string?  :parse (fn [v _] v)}
+   :number  {:fits? number?
+             :parse (fn [v _] (let [n (js/Number v)] (if (or (str/blank? v) (js/isNaN n)) ::bad n)))
+             :bad   #(str %1 " needs a number, got " %2)}
+   :boolean {:fits? boolean?
+             :parse (fn [v _] (case v "true" true "false" false ::bad))
+             :bad   #(str %1 " needs true or false, got " %2)}
+   :file    {:fits? string?
+             :parse (fn [v slurp] (try (slurp v) (catch :default _ ::bad)))
+             :bad   #(str "could not read " %1 " as a file: " %2)}
+   :json    {:fits? any?
+             :parse (fn [v slurp] (try (js->clj (js/JSON.parse (slurp v))) (catch :default _ ::bad)))
+             :bad   #(str "could not read " %1 " as a JSON file: " %2)}})
+
+(defn- inferred-type [default]
+  (cond (number? default) :number (boolean? default) :boolean (sequential? default) :json :else :string))
+
+(defn- flag-decl
+  "A kit's `flags` entry -> {:default :type}. `spec` is a bare default, or a map
+   with `default` and/or `type`. Throws when it is malformed."
+  [k spec]
+  (let [bad #(throw (js/Error. (str "kit flag '" (name k) "': " %)))]
+    (if-not (map? spec)
+      (do (when-not (or (nil? spec) (string? spec) (number? spec) (boolean? spec) (sequential? spec))
+            (bad (str "unsupported default " (pr-str spec))))
+          {:default spec :type (inferred-type spec)})
+      (let [extra   (remove #{"default" "type"} (keys spec))
+            default (get spec "default")
+            t       (if (contains? spec "type") (keyword (str (get spec "type"))) (inferred-type default))
+            ok?     (get-in flag-types [t :fits?])]
+        (cond
+          (seq extra) (bad (str "unknown key '" (first extra) "' (a declaration has only default and type)"))
+          (not ok?)   (bad (str "unknown type '" (name t) "' (types: "
+                                (str/join ", " (map name (keys flag-types))) ")"))
+          (and (some? default) (not (ok? default)))
+          (bad (str "default " (pr-str default) " is not a " (name t)))
+          :else {:default default :type t})))))
+
+(defn parse-kit
+  "A kit from YAML `text`: `name` (else `default-name`), `doc`, `flags` and a
+   `contract` template. Each flag is a bare default, whose type it takes, or
+   {default, type}. `source` records where the kit came from. Throws when the
+   shape is wrong."
+  [text source default-name]
+  (let [m        (js->clj (yaml/load text))
+        flags    (get m "flags")
+        template (get m "contract")]
+    (when-not (map? m) (throw (js/Error. "a kit is a YAML map with name, doc, flags and contract")))
+    (when-not (or (nil? flags) (map? flags)) (throw (js/Error. "kit `flags` must map each flag to a default or {default, type}")))
+    (when-not (map? template) (throw (js/Error. "a kit needs a `contract` map (the contract template)")))
+    (let [decls    (into {} (for [[k spec] flags :let [k (keyword k)]] [k (flag-decl k spec)]))
+          defaults (update-vals decls :default)
+          doc      (str (get m "doc" ""))]
+      {:name   (str (get m "name" default-name))
+       :doc    doc
+       :source source
+       :flags  decls
+       :build  (fn [scenario opts]
+                 (let [given (into {} (filter (comp some? val)) (select-keys opts (keys decls)))]
+                   (-> (substitute template (merge defaults given))
+                       (assoc "service" (first (str/split scenario #"/"))
+                              "scenario" scenario
+                              "origin" "kit")
+                       (update "summary" #(or % doc)))))})))
+
+(def ^:private builtin-yaml
+  "Built-in YAML kits, inlined at build time: the bun binary cannot read repo files."
+  {"oauth2" (rc/inline "./kits/oauth2.yaml")})
+
+(def builtin-kits
+  "name -> kit. A kit is {:name :doc :source :flags :build}. `:flags` maps each
+   `kit` option it honors to {:default :type}, the type a key of `flag-types`;
+   `:build` takes [scenario parsed-flags] and returns the contract to write."
+  (merge
+   {"okta" {:name   "okta"
+            :doc    "Okta twin: users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + membership"
+            :source "built-in"
+            :flags  {:users       {:default nil :type :json}
+                     :rate-limit  {:default nil :type :number}
+                     :rate-window {:default nil :type :number}
+                     :token-ttl   {:default nil :type :number}
+                     :issuer      {:default nil :type :string}
+                     :signing-key {:default nil :type :file}}
+            :build  (fn [scenario {:keys [users rate-limit rate-window token-ttl issuer signing-key]}]
+                      (okta scenario users {:rate-limit (when rate-limit
+                                                          (cond-> {"max" rate-limit}
+                                                            rate-window (assoc "window" rate-window)))
+                                            :token-ttl token-ttl
+                                            :issuer issuer :signing-key signing-key}))}}
+   (update-vals builtin-yaml #(parse-kit % "built-in" nil))))
+
+(defn with-user-kits
+  "The built-in kits plus the user kits in `files` ([[path text] ...], or [path nil
+   reason] for a file that could not be read), as {:kits name->kit :warnings [...]}.
+   A user kit named like a built-in replaces it; of two user kits with one name,
+   the later file wins. Both warn. A file that cannot be read or parsed is skipped,
+   with a warning."
+  [files]
+  (reduce (fn [acc [file text unreadable]]
+            (let [skip #(update acc :warnings conj (str "skipped kit " file ": " %))]
+              (if unreadable
+                (skip unreadable)
+                (try
+                  (let [kit   (parse-kit text file (str/replace file #"^.*/|\.ya?ml$" ""))
+                        n     (:name kit)
+                        prior (get-in acc [:kits n :source])]
+                    (cond-> (assoc-in acc [:kits n] kit)
+                      (contains? builtin-kits n)
+                      (update :warnings conj (str "user kit '" n "' (" file ") shadows the built-in kit"))
+                      (and prior (not= prior "built-in"))
+                      (update :warnings conj (str "user kit '" n "' is declared by " prior " and " file
+                                                  "; using " file))))
+                  (catch :default e
+                    (skip (first (str/split-lines (.-message e)))))))))
+          {:kits builtin-kits :warnings []}
+          files))
+
+(defn parse-flags
+  "The kit flags in command-line `opts` (a string, or true for a bare `--flag`),
+   parsed by each flag's declared type. `slurp` reads a file's text. Throws with a
+   message naming the flag when a value is missing or does not parse."
+  [kit opts slurp]
+  (into {}
+        (for [[k v] opts
+              :let [t (get-in kit [:flags k :type])]
+              :when t]
+          (let [flag                (str "--" (name k))
+                {:keys [parse bad]} (get flag-types t)
+                value               (cond
+                                      (and (true? v) (= t :boolean)) true
+                                      (true? v) (throw (js/Error. (str flag " needs a value")))
+                                      :else     (parse v slurp))]
+            (if (= ::bad value)
+              (throw (js/Error. (bad flag v)))
+              [k value])))))
+
+(defn unsupported-flags
+  "The options in `opts` that `kit` does not declare, in sorted order. `scenario`
+   and `port` belong to the `kit` command itself."
+  [kit opts]
+  (->> (keys opts)
+       (remove #(contains? (:flags kit) %))
+       (remove #{:scenario :port})
+       sort
+       vec))

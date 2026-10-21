@@ -30,6 +30,7 @@
    "up"           serve/cmd-up
    "down"         serve/cmd-down
    "kit"          twins/cmd-kit
+   "kits"         twins/cmd-kits
    "genes"        twins/cmd-genes
    "conform"      twins/cmd-conform
    "clock"        twins/cmd-clock

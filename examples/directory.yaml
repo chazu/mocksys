@@ -1,0 +1,30 @@
+# A small directory twin built only from genes: users and groups as REST resources,
+# plus the membership relation between them. There are no hand-written operations;
+# `genes:` expands into 14 of them when the contract compiles.
+#
+# Stand it up:
+#   export MOCKSYS_HOME=./.mocks
+#   mkdir -p .mocks/demo/directory && cp examples/directory.yaml .mocks/demo/directory/contract.yaml
+#   mocksys validate demo/directory && mocksys run demo/directory --port 9130
+# Drive it:
+#   curl -G localhost:9130/api/v1/users --data-urlencode 'filter=status eq "ACTIVE"'
+#   curl -X POST localhost:9130/api/v1/users -H 'Content-Type: application/json' -d '{"profile":{"login":"dan@example.com"}}'
+#   curl -X PUT localhost:9130/api/v1/groups/g1/users/u2       # 204, assign
+#   curl localhost:9130/api/v1/groups/g1/users                 # the group's users, hydrated
+service: demo
+scenario: demo/directory
+origin: authored
+summary: users, groups and memberships, composed from genes
+seed:
+  users:
+    - { id: u1, status: ACTIVE, profile: { login: alice@example.com, email: alice@example.com } }
+    - { id: u2, status: ACTIVE, profile: { login: bob@example.com, email: bob@example.com } }
+    - { id: u3, status: STAGED, profile: { login: carol@example.com, email: carol@example.com } }
+  groups:
+    - { id: g1, profile: { name: Admins } }
+genes:
+  - crud-collection: { coll: users, base: /api/v1/users, seed-name: users, id-prefix: u,
+                       create-defaults: { status: STAGED } }
+  - crud-collection: { coll: groups, base: /api/v1/groups, seed-name: groups, id-prefix: g }
+  - membership: { coll: memberships, users-coll: users, groups-coll: groups,
+                  users-base: /api/v1/users, groups-base: /api/v1/groups }

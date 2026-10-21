@@ -51,3 +51,19 @@
          json    (when (and (string? body) (seq body) (str/includes? ct "json"))
                    (try (js->clj (js/JSON.parse body)) (catch :default _ nil)))]
      {:status (.-statusCode r) :headers headers :body body :json json})))
+
+(defn contract-opts
+  "The `inject/gen` opts for an effective contract: each collection's seed name
+   resolved to its array, exactly as `contract/lower` does."
+  [contract]
+  (let [seed (get contract "seed")]
+    {:seed seed
+     :collections (into {} (for [[n spec] (get-in contract ["state" "collections"])]
+                             [n {"idField" (get spec "idField") "seed" (get seed (get spec "seed"))}]))}))
+
+(defn run-op
+  "Run operation `op-id` of an effective contract against `req` over `state`."
+  [contract op-id req state]
+  (let [op (some #(when (= op-id (get % "id")) %) (get contract "operations"))]
+    (when-not op (throw (js/Error. (str "no operation " op-id))))
+    (run op req (contract-opts contract) state)))
