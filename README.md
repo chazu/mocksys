@@ -74,6 +74,18 @@ first command that serves a mock replaces a daemon from the old version and prin
 which mocks stopped. The daemon logs to `$MOCKSYS_HOME/daemon.log` (else
 `~/.mocksys/daemon.log`).
 
+### Upgrading from a version that used Mountebank
+
+Earlier versions of mocksys served mocks from a Mountebank process on port 2525, and
+the upgrade does not stop that process. If it still runs, it holds the ports of the
+mocks it served. A scenario with a pinned `--port` then fails to start with
+`Port N is already in use`. To find the process that listens on 2525, and then stop it:
+
+```sh
+lsof -nP -iTCP:2525 -sTCP:LISTEN     # make sure it is the Mountebank that mocksys started
+kill <pid>
+```
+
 ## Develop / build
 
 `mocksys` is ClojureScript compiled with [shadow-cljs](https://github.com/thheller/shadow-cljs).
