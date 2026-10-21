@@ -505,6 +505,12 @@ works. The reply becomes outbound messages:
 | status below 400, any other body | the body as one message |
 | status 400 or above | the socket closes with code 4000 + status, the body as the reason |
 
+Messages are handled one at a time, in the order they arrive. An inbound message over
+1 MiB closes the socket with `1009`. A client with 1000 messages already waiting for
+their replies is sending faster than the mock answers: its next message closes the
+socket with `1008` (policy violation), and the waiting messages are dropped unanswered.
+`1008` rather than `4413`, because a `4xxx` code always means an operation's reply.
+
 ```yaml
   - id: room-socket
     request: { method: GET, path: "/rooms/{room}/socket" }

@@ -236,7 +236,7 @@
   [imp]
   (let [port    (imposter/port imp)
         handler (fn [rq rs] (serve! imp rq rs))
-        wss     (WebSocketServer. #js {:noServer true :clientTracking false})
+        wss     (WebSocketServer. #js {:noServer true :clientTracking false :maxPayload stream/max-payload})
         server  #(tracked-server handler {:tls        (imposter/tls imp)
                                           :on-upgrade (when (imposter/websockets? imp)
                                                         (fn [rq socket head] (upgrade! imp wss rq socket head)))})]

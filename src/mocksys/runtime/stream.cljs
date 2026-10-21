@@ -117,17 +117,36 @@
                 :else                  (doseq [m (outbound (:body out))] (.send ws m)))))
       (p/catch (fn [e] (when (open? ws) (.close ws 4500 (close-reason (ex-message e))))))))
 
+(def max-payload
+  "Bytes in one inbound WebSocket message; a bigger one closes the socket with 1009."
+  (* 1024 1024))
+
+(def ^:private max-waiting
+  "Inbound messages a WebSocket may have waiting for their replies. One more closes the
+   socket with 1008 and drops them, so a client that outpaces slow replies cannot queue
+   without end."
+  1000)
+
 (defn websocket!
   "Serve an accepted WebSocket. `request` is the upgrade request and `out` its
    outcome, a `websocket` answer."
   [imp ^js ws request {:keys [stream]}]
   (let [{:strs [events channel]} stream
-        send!  #(when (open? ws) (.send ws (get % "data")))
-        unsub  (if channel (effect/subscribe! (imposter/channels imp) channel send!) (fn []))
-        cancel (play! events send! (fn []))
-        queue  (atom (p/resolved nil))]
+        send!    #(when (open? ws) (.send ws (get % "data")))
+        unsub    (if channel (effect/subscribe! (imposter/channels imp) channel send!) (fn []))
+        cancel   (play! events send! (fn []))
+        queue    (atom (p/resolved nil))
+        waiting  (atom 0)
+        dropped? (atom false)]
     (.on ws "message" (fn [data _]
-                        (let [m (assoc request "method" "MESSAGE" "body" (.toString data "utf8"))]
-                          (swap! queue p/then #(reply! imp ws m)))))
+                        (cond
+                          @dropped?                  nil
+                          (= max-waiting @waiting)   (do (reset! dropped? true)
+                                                         (.close ws 1008 "too many messages waiting for a reply"))
+                          :else
+                          (let [m (assoc request "method" "MESSAGE" "body" (.toString data "utf8"))]
+                            (swap! waiting inc)
+                            (swap! queue p/then #(when-not @dropped?
+                                                   (p/finally (reply! imp ws m) (fn [] (swap! waiting dec)))))))))
     (.on ws "close" (fn [] (unsub) (cancel)))
     (.on ws "error" (fn [_]))))

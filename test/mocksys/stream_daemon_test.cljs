@@ -206,6 +206,41 @@
               "the upgrade and every inbound message are recorded")
           (is (= "t1" (get-in full [:json "requests" 2 "query" "token"])) "a message carries the upgrade's query"))))))
 
+(def ^:private slow-socket
+  [(stub "GET" "^/slow$" {"websocket" {}})
+   {"predicates" [{"deepEquals" {"method" "MESSAGE"}}]
+    "responses"  [{"effect" {"respond" {"text" "ok"}} "behaviors" [{"wait" 20}]}]}])
+
+(defn- with-slow-socket
+  "Run `(f client)` with a WebSocket open on an imposter whose replies take 20ms."
+  [done f]
+  (daemon/with-daemon done
+    (fn [admin]
+      (p/let [port (free-port)
+              made (call (str admin "/imposters") {:method "POST" :body (imposter port slow-socket)})
+              c    (ws-open (str "ws://127.0.0.1:" port "/slow"))]
+        (is (= 201 (:status made)) (pr-str (:json made)))
+        (f c)))))
+
+(deftest an-inbound-websocket-message-is-at-most-1-mib
+  (async done
+    (with-slow-socket done
+      (fn [c]
+        (p/let [_ (.send (:ws c) (.repeat "x" (* 1024 1024)))
+                _ (until "the reply to 1 MiB" #(= ["ok"] @(:messages c)))
+                _ (.send (:ws c) (.repeat "x" (inc (* 1024 1024))))
+                _ (until "the close" #(some? @(:closed c)))]
+          (is (= 1009 (first @(:closed c))) "a bigger message closes the socket as too big"))))))
+
+(deftest a-websocket-queues-at-most-1000-inbound-messages
+  (async done
+    (with-slow-socket done
+      (fn [c]
+        (p/let [_ (dotimes [i 1001] (.send (:ws c) (str i)))
+                _ (until "the close" #(some? @(:closed c)))]
+          (is (= 1008 (first @(:closed c))) "the 1001st message waiting for a reply closes the socket")
+          (is (> 2 (count @(:messages c))) "the queued messages are dropped, not answered"))))))
+
 (defn- raw-upgrade
   "Ask for a WebSocket upgrade with node's http client; resolves the HTTP status of
    a refusal, or :upgraded."

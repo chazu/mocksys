@@ -221,7 +221,10 @@ as everything else.
   operations, body predicates, effects, state and `assert --saw 'MESSAGE /path'`
   apply. A 1xx–3xx reply sends a JSON array body as one message per element, any
   other non-empty body as one message, an empty body as none. A 4xx/5xx reply closes
-  the socket with code 4000 + status and the body as the reason. `ws` serves the
+  the socket with code 4000 + status and the body as the reason. An inbound message
+  over 1 MiB closes with 1009 (`maxPayload`). A 1001st message waiting behind
+  unfinished replies closes with 1008 and drops the queue; not 4413, which would read
+  as an operation's 413. `ws` serves the
   upgrade; it runs under node, bun and the bun binary.
 - **`publish`.** `publish: {channel, data | dataVar, event, id}`, or a list, runs
   after the terminal and only when the effect's answer is below 400, so a miss or a
