@@ -58,32 +58,55 @@
     (.sign cert private (.create (.. forge -md -sha256)))
     {:cert (.certificateToPem pki cert) :key pem}))
 
-(defn- read-ca []
-  (let [cert-pem  (fs/readFileSync (ca-file) "utf8")
-        key-pem   (fs/readFileSync (key-file) "utf8")
-        ^js cert  (.certificateFromPem pki cert-pem)
-        ^js k     (.privateKeyFromPem pki key-pem)]
-    (when-not (.equals (.. cert -publicKey -n) (.-n k))
-      (throw (js/Error. "ca.key is not the key of ca.pem")))
-    {:cert cert-pem :key key-pem :forge-cert cert :forge-key k}))
+(defn- unusable
+  "Throw for a CA file that is there but cannot be used. mocksys never deletes it:
+   the user may have put it there, and running mocks hold certificates it issued."
+  [file why]
+  (throw (js/Error. (str "tls: cannot use " file " (" why "). The local CA needs ca.pem and its "
+                         "unencrypted RSA key ca.key, both PEM. Fix the file, or move " (ca-dir)
+                         " aside and mocksys makes a new CA, which clients must then trust"))))
+
+(defn- read-ca-file
+  "The text of `file` and what `parse` makes of it, or nil when it is missing."
+  [file parse]
+  (when-let [text (try (fs/readFileSync file "utf8")
+                       (catch :default e (when-not (= "ENOENT" (.-code e)) (unusable file (ex-message e)))))]
+    [text (try (parse text) (catch :default e (unusable file (ex-message e))))]))
+
+(defn- read-ca
+  "The CA on disk, or {:missing file} when ca.pem or ca.key is not there."
+  []
+  (let [[cert-pem ^js cert] (read-ca-file (ca-file) #(.certificateFromPem pki %))
+        [key-pem ^js k]     (read-ca-file (key-file) #(.privateKeyFromPem pki %))]
+    (cond
+      (nil? cert-pem) {:missing "ca.pem"}
+      (nil? key-pem)  {:missing "ca.key"}
+      (not (.equals (.. cert -publicKey -n) (.-n k))) (unusable (key-file) "it is not the key of ca.pem")
+      :else {:cert cert-pem :key key-pem :forge-cert cert :forge-key k})))
 
 (defn- load-ca
-  "{:ca ca} for the CA on disk, or {:problem why} it cannot sign at `now`."
+  "{:ca ca} for the CA on disk, or {:problem why} it must be replaced: it is
+   missing, or expires within renew-days of `now`. Throws for a CA that is there
+   but unusable, since replacing it would lose it."
   [now]
-  (try
-    (let [{:keys [^js forge-cert] :as ca} (read-ca)
-          ends (.. forge-cert -validity -notAfter)]
-      (if (< (.getTime ends) (+ now (* renew-days day)))
-        {:problem (str "it expires " (.toISOString ends))}
-        {:ca ca}))
-    (catch :default e
-      {:problem (if (= "ENOENT" (.-code e))
-                  (str (path/basename (.-path e)) " is missing")
-                  (ex-message e))})))
+  (let [{:keys [missing ^js forge-cert] :as ca} (read-ca)]
+    (if missing
+      {:problem (str missing " is missing")}
+      (let [ends (.. forge-cert -validity -notAfter)]
+        (if (< (.getTime ends) (+ now (* renew-days day)))
+          {:problem (str "it expires " (.toISOString ends))}
+          {:ca ca})))))
 
 (defn- tighten! []
   (fs/chmodSync (ca-dir) 8r700)
   (fs/chmodSync (key-file) 8r600))
+
+(defn- move-aside!
+  "Rename ca-dir to tls.bak-<time> beside it, keeping the old CA. Returns the new name."
+  []
+  (let [bak (str (ca-dir) ".bak-" (str/replace (.toISOString (js/Date.)) #"[-:.]" ""))]
+    (fs/renameSync (ca-dir) bak)
+    bak))
 
 (defn- create!
   "Write a new CA into a private directory beside ca-dir, then rename it into
@@ -107,9 +130,10 @@
 
 (defn ensure-ca!
   "The local CA, created on first use: {:cert :key} PEM, plus the parsed forms
-   `issue` signs with. A CA that cannot be read, or expires within 30 days, is
-   replaced; :replaced then says why, and stderr says that clients must trust the
-   new one."
+   `issue` signs with. A CA that is missing a file, or expires within 30 days, is
+   moved aside to tls.bak-<time> and replaced; :replaced then says why, and stderr
+   says that clients must trust the new one and mocks must be run again. A CA that
+   is there but cannot be read or parsed is an error that names the file."
   ([] (ensure-ca! {}))
   ([{:keys [now] :or {now (js/Date.now)}}]
    (if-not (fs/existsSync (ca-dir))
@@ -117,10 +141,12 @@
      (let [{:keys [ca problem]} (load-ca now)]
        (if ca
          (do (tighten!) ca)
-         (do (fs/rmSync (ca-dir) #js {:recursive true :force true})
-             (.write js/process.stderr (str "mocksys: replaced the local CA in " (ca-dir) " (" problem
-                                            "); clients that trusted the old ca.pem must trust the new one\n"))
-             (assoc (create! now) :replaced problem)))))))
+         (let [bak (move-aside!)]
+           (.write js/process.stderr
+                   (str "mocksys: replaced the local CA in " (ca-dir) " (" problem "); the old one is now " bak
+                        ". Clients that trusted the old ca.pem must trust the new one, and a mock running"
+                        " with a certificate from the old CA keeps it until you `mocksys run` it again\n"))
+           (assoc (create! now) :replaced problem)))))))
 
 (defn issue
   "A certificate for localhost, 127.0.0.1 and ::1 with a new key, signed by `ca`

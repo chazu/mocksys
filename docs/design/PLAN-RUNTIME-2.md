@@ -91,8 +91,11 @@ As built:
 - **The CA.** `$MOCKSYS_HOME/tls/` at 0700, `ca.key` at 0600, both re-tightened on use,
   and a `.gitignore` of `*`, because `publish` runs `git add -A` over the store and a
   project may commit `./.mocks`. Created in a temp directory and renamed into place.
-  Ten years; replaced, with a stderr line, when it expires within 30 days or cannot be
-  read. A mock's certificate lasts at most 397 days and is new on every run, so it
+  Ten years. Replaced when it expires within 30 days or a file is missing:
+  the old directory is renamed to `tls.bak-<time>`, never deleted, and a stderr line
+  says that clients must trust the new CA and running mocks must be run again. A file
+  that is there but unusable (unreadable, not RSA, encrypted, a key of another
+  certificate) is an error naming it, since replacing it would lose the user's CA. A mock's certificate lasts at most 397 days and is new on every run, so it
   needs no renewal. node-forge signs RSA keys from node's crypto.
 - **Trust.** `tls ca` prints only the path on stdout (`NODE_EXTRA_CA_CERTS=$(mocksys
   tls ca)`), and the curl, grpc-js, gRPC C core and grpcurl forms on stderr. `run`

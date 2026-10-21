@@ -78,9 +78,16 @@ The CA:
 - Lasts ten years. A mock's certificate lasts 397 days at most, since some clients
   refuse a longer one, and a new one is issued on every `run`, so a mock's
   certificate never needs renewal.
-- Is replaced when it expires within 30 days or cannot be read. stderr then says so,
-  and clients must trust the new `ca.pem`. To replace it on purpose, delete
-  `$MOCKSYS_HOME/tls/`; the next `run` or `tls ca` makes a new one.
+- Is replaced when it expires within 30 days, or when `ca.pem` or `ca.key` is
+  missing. mocksys renames the old directory to `tls.bak-<time>` beside it, so
+  nothing is deleted, and stderr says so. Clients must then trust the new `ca.pem`.
+  A mock that is already running keeps its certificate from the old CA until you
+  `run` it again, so a client that trusts only the new CA refuses it until then.
+- Is never replaced when a file is there but cannot be used: an unreadable file, a
+  key that is not RSA, an encrypted key, or a key that does not match `ca.pem`.
+  mocksys stops with an error that names the file. Fix the file, or move
+  `$MOCKSYS_HOME/tls/` aside to make a new CA on the next `run` or `tls ca`. Moving
+  it aside is also how to replace the CA on purpose.
 - Belongs to one store. A project that sets `MOCKSYS_HOME=./.mocks` has its own CA.
 
 ## Stacks — bring up a named set together

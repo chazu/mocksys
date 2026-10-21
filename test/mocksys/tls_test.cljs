@@ -51,7 +51,13 @@
     (let [status (.toString (cp/execFileSync "git" #js ["status" "--porcelain" "--untracked-files=all"] #js {:cwd home}))]
       (is (= "" (str/trim status)) "publish adds the store with git add -A, which must skip tls/"))))
 
-(deftest a-broken-or-expiring-ca-is-replaced
+(defn- backups
+  "The ca.pem of each CA moved aside in `home`, oldest first."
+  [home]
+  (->> (fs/readdirSync home) (filter #(str/starts-with? % "tls.bak-")) sort
+       (mapv #(let [f (path/join home % "ca.pem")] (when (fs/existsSync f) (fs/readFileSync f "utf8"))))))
+
+(deftest an-expiring-or-missing-ca-is-replaced-and-kept
   (let [home (fresh-home)]
     (in-store home
       (fn []
@@ -59,12 +65,58 @@
           (testing "near the end of its life"
             (let [later (tls/ensure-ca! {:now (+ (js/Date.now) (* 3640 day))})]
               (is (not= (:cert old) (:cert later)))
-              (is (str/includes? (str (:replaced later)) "expires"))))
+              (is (str/includes? (str (:replaced later)) "expires"))
+              (is (= [(:cert old)] (backups home)) "the old CA is moved aside, not deleted")))
           (testing "with its key gone"
-            (fs/unlinkSync (path/join home "tls" "ca.key"))
-            (let [again (tls/ensure-ca!)]
-              (is (some? (:replaced again)))
-              (is (fs/existsSync (path/join home "tls" "ca.key"))))))))))
+            (let [before (fs/readFileSync (tls/ca-file) "utf8")]
+              (fs/unlinkSync (path/join home "tls" "ca.key"))
+              (let [again (tls/ensure-ca!)]
+                (is (= "ca.key is missing" (:replaced again)))
+                (is (fs/existsSync (path/join home "tls" "ca.key")))
+                (is (= before (last (backups home))) "what was left of it is kept too")))))))))
+
+(defn- ec-key []
+  (-> (crypto/generateKeyPairSync "ec" #js {:namedCurve "P-256"}) .-privateKey
+      (.export #js {:type "pkcs8" :format "pem"})))
+
+(defn- encrypted-key []
+  (-> (crypto/generateKeyPairSync "rsa" #js {:modulusLength 2048}) .-privateKey
+      (.export #js {:type "pkcs8" :format "pem" :cipher "aes-256-cbc" :passphrase "secret"})))
+
+(deftest an-unusable-ca-is-never-deleted
+  (doseq [[label file text] [["an EC key" "ca.key" (ec-key)]
+                             ["an encrypted key" "ca.key" (encrypted-key)]
+                             ["another CA's key" "ca.key" (:key (in-store (fresh-home) tls/ensure-ca!))]
+                             ["a garbled certificate" "ca.pem" "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n"]]]
+    (testing label
+      (let [home (fresh-home)
+            dir  (path/join home "tls")]
+        (in-store home
+          (fn []
+            (tls/ensure-ca!)
+            (fs/writeFileSync (path/join dir file) text)
+            (let [cert-before (fs/readFileSync (path/join dir "ca.pem") "utf8")
+                  msg         (thrown tls/ensure-ca!)]
+              (is (str/includes? (str msg) (path/join dir file)) "the error names the file")
+              (is (str/includes? (str msg) (str "move " dir " aside")) "and the fix")
+              (is (= text (fs/readFileSync (path/join dir file) "utf8")) "the hand-placed file is left as it was")
+              (is (= cert-before (fs/readFileSync (path/join dir "ca.pem") "utf8")))
+              (is (= [] (backups home)) "nothing is replaced"))))))))
+
+(deftest an-unreadable-ca-key-is-never-deleted
+  (let [home (fresh-home)
+        key  (path/join home "tls" "ca.key")]
+    (in-store home
+      (fn []
+        (tls/ensure-ca!)
+        (fs/chmodSync key 0)
+        (try
+          (let [msg (thrown tls/ensure-ca!)]
+            (is (str/includes? (str msg) key))
+            (is (str/includes? (str msg) "EACCES"))
+            (is (= [] (backups home))))
+          (finally (fs/chmodSync key 8r600)))
+        (is (str/includes? (fs/readFileSync key "utf8") "PRIVATE KEY") "the key is still there")))))
 
 (deftest a-mock-certificate-verifies-against-the-ca
   (let [home (fresh-home)]
