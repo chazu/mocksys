@@ -129,7 +129,7 @@
                      "state.collections.constructor")))
 
 (deftest the-cli-refuses-a-reserved-name
-  (let [errors #(:errors (contract/validate {"operations" [{"id" "op" "request" {"method" "GET" "path" "/x"} "effect" %}]
-                                             "state" {"collections" {"constructor" {}}}}))]
-    (is (some #(str/includes? % "op: bind.__proto__") (errors {"bind" {"__proto__" {"query" "q"}} "respond" {}})))
-    (is (some #(str/includes? % "state.collections.constructor") (errors {"respond" {}})))))
+  (let [errors #(:errors (contract/validate {"operations" [{"id" "op" "request" {"method" "GET" "path" "/x"} "effect" %2}]
+                                             "state" {"collections" %1}}))]
+    (is (some #(str/includes? % "op: bind.__proto__") (errors {} {"bind" {"__proto__" {"query" "q"}} "respond" {}})))
+    (is (some #(str/includes? % "state.collections.constructor") (errors {"constructor" {}} {"respond" {}})))))

@@ -40,3 +40,16 @@
   (is (not (contains? (contract/lower {"operations" [{"id" "s" "request" {"method" "GET" "path" "/s"}
                                                       "responses" [{"status" 200 "examples" {"e" {"select" true "body" {}}}}]}]})
                       "state"))))
+
+(deftest an-effect-names-only-declared-collections
+  (let [errors #(:errors (contract/validate {"state" {"collections" {"users" {}}} "operations" [(op %)]}))]
+    (is (= ["op: create.collection names users2, which state.collections does not declare"]
+           (errors {"create" {"collection" "users2"}})))
+    (is (= ["op: find[1].collection names groups, which state.collections does not declare"]
+           (errors {"find" [{"collection" "users" "key" "k"} {"collection" "groups" "key" "k"}] "respond" {}})))
+    (is (= ["op: listJoin.via names members, which state.collections does not declare"]
+           (errors {"listJoin" {"via" "members" "byField" "g" "byValue" "1" "hydrate" "users" "hydrateVia" "u"}})))
+    (is (= [] (errors {"link" {"collection" "users" "id" "k"}})))
+    (is (= ["op: link.collection names users, which state.collections does not declare"]
+           (:errors (contract/validate {"operations" [(op {"link" {"collection" "users" "id" "k"}})]})))
+        "with no collections declared at all")))

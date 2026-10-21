@@ -157,6 +157,8 @@
       (check-predicate! (str path ".predicates[" j "]") pred))
     (doseq [[j r] (map-indexed vector (get stub "responses"))]
       (check-response! (str path ".responses[" j "]") r)
+      (when-let [es (seq (effect/collection-errors (get r "effect") (get spec "state")))]
+        (bad (str path ".responses[" j "].effect") (str/join "; " es)))
       (when (and (contains? r "clock") (not (number? (get-in spec ["state" "clock"]))))
         (bad (str path ".responses[" j "]") "a clock response needs the imposter's state.clock")))))
 

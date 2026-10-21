@@ -84,7 +84,11 @@
                      "stubs[0].responses[0].effect"))
   (is (= "stubs[0].responses[0]: a clock response needs the imposter's state.clock"
          (rejects (spec [{"responses" [{"clock" true}]}]))))
-  (is (nil? (rejects (spec [{"responses" [{"effect" {"respond" {"status" 201}}}]}])))))
+  (is (nil? (rejects (spec [{"responses" [{"effect" {"respond" {"status" 201}}}]}]))))
+  (is (= "stubs[0].responses[0].effect: create.collection names users, which state.collections does not declare"
+         (rejects (spec [{"responses" [{"effect" {"create" {"collection" "users"}}}]}]))))
+  (is (nil? (rejects (spec [{"responses" [{"effect" {"create" {"collection" "users"}}}]}]
+                           "state" {"collections" {"users" {}}})))))
 
 (deftest a-proxy-target-is-a-bare-origin
   (let [proxy-to (fn [to] (rejects (spec [{"responses" [{"proxy" {"to" to "mode" "proxyOnce"}}]}])))]

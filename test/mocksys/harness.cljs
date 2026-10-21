@@ -38,8 +38,10 @@
      "body"    (cond (map? body) (js/JSON.stringify (clj->js body)) (nil? body) "" :else body)}))
 
 (defn- run-effect [op request opts state]
-  (is (= [] (effect/errors (get op "effect"))) (str (get op "id") ": the effect validates"))
-  (effect/run (get op "effect") {:state state :request request :settings (settings-of opts) :verbs (:verbs opts)}))
+  (let [settings (settings-of opts)]
+    (is (= [] (effect/errors (get op "effect")) (effect/collection-errors (get op "effect") settings))
+        (str (get op "id") ": the effect validates"))
+    (effect/run (get op "effect") {:state state :request request :settings settings :verbs (:verbs opts)})))
 
 (defn clock!
   "Send `body` (a map) to the twin's clock control over `state`, whose clock starts

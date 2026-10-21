@@ -733,8 +733,9 @@
 
 (def verbs
   "Every effect verb in the order a request runs it. `:check` returns the problems
-   with a spec as messages. The terminal verbs come last, collection verbs first:
-   an effect has exactly one, or `store` then `respond`."
+   with a spec as messages, and `:collections` names the fields that name a
+   collection. The terminal verbs come last, collection verbs first: an effect has
+   exactly one, or `store` then `respond`."
   [{:verb "bind"    :run run-bind    :check bind-errors}
    {:verb "limit"   :run run-limit
     :check (fields-check {"bucket" :name "key" :template "max" :number "window" :number "miss" response-fields} #{"bucket"})}
@@ -744,7 +745,7 @@
     :check (fields-check {"bucket" :name "key" :template "as" :name "miss" response-fields} #{"bucket" "key"})}
    {:verb "resolve" :run run-resolve
     :check (fields-check {"seed" :string "by" :string "eq" :template "as" :name "miss" response-fields} #{"seed" "by"})}
-   {:verb "find"    :run run-find
+   {:verb "find"    :run run-find    :collections ["collection"]
     :check (fn [at x]
              (each-errors at x (fields-check (assoc (dissoc keyed "status") "field" :string "eq" :template "pick" :string
                                                     "filter" :template "invalid" response-fields)
@@ -757,24 +758,24 @@
     :check (fn [at x] (each-errors at x (fields-check {"as" :name "key" :string "header" :object "claims" :any}
                                                       #{"as" "key"}
                                                       (fn [at s] (claim-errors (str at ".claims") (get s "claims" {}))))))}
-   {:verb "create"   :terminal :collection :run run-create
+   {:verb "create"   :terminal :collection :collections ["collection"] :run run-create
     :check (fields-check {"collection" :name "merge" :names "body" :object "as" :name "status" :status} #{"collection"})}
-   {:verb "get"      :terminal :collection :run run-get    :check (fields-check keyed #{"collection" "key"})}
-   {:verb "update"   :terminal :collection :run run-update
+   {:verb "get"      :terminal :collection :collections ["collection"] :run run-get    :check (fields-check keyed #{"collection" "key"})}
+   {:verb "update"   :terminal :collection :collections ["collection"] :run run-update
     :check (fields-check (assoc keyed "mergeVar" :string "patch" :object) #{"collection" "key"})}
-   {:verb "remove"   :terminal :collection :run run-remove :check (fields-check (dissoc keyed "as") #{"collection" "key"})}
-   {:verb "list"     :terminal :collection :run run-list
+   {:verb "remove"   :terminal :collection :collections ["collection"] :run run-remove :check (fields-check (dissoc keyed "as") #{"collection" "key"})}
+   {:verb "list"     :terminal :collection :collections ["collection"] :run run-list
     :check (fields-check (merge paged {"collection" :name "filter" :template "status" :status "invalid" response-fields})
                          #{"collection"})}
-   {:verb "link"     :terminal :collection :run run-link
+   {:verb "link"     :terminal :collection :collections ["collection"] :run run-link
     :check (fields-check {"collection" :name "id" :template "row" :object "status" :status} #{"collection" "id"})}
-   {:verb "unlink"   :terminal :collection :run run-unlink
+   {:verb "unlink"   :terminal :collection :collections ["collection"] :run run-unlink
     :check (fields-check {"collection" :name "id" :template "status" :status} #{"collection" "id"})}
-   {:verb "listJoin" :terminal :collection :run run-list-join
+   {:verb "listJoin" :terminal :collection :collections ["via" "hydrate"] :run run-list-join
     :check (fields-check (merge paged {"via" :name "byField" :string "byValue" :template "hydrate" :name
                                        "hydrateVia" :string "status" :status})
                          #{"via" "byField" "byValue" "hydrate" "hydrateVia"})}
-   {:verb "render"   :terminal :collection :run run-render
+   {:verb "render"   :terminal :collection :collections ["collection"] :run run-render
     :check (fields-check {"collection" :name "filter" :template "row" :string "wrap" :string "status" :status
                           "invalid" response-fields}
                          #{"collection"})}
@@ -805,6 +806,19 @@
           (> (count terminal) 1)
           [(str "effect has more than one collection action (" (str/join ", " terminal) ")")])
         (mapcat (fn [[k v]] (when-let [{:keys [check]} (by-name k)] (check k v))) (sort effect)))))))
+
+(defn collection-errors
+  "Problems with the collections `effect` names that the imposter's `state`
+   `settings` do not declare: a write to one would be lost, a read would fail."
+  [effect settings]
+  (let [declared (get settings "collections")]
+    (vec (for [{:keys [verb collections]} verbs
+               :let [x (get effect verb)]
+               [at spec] (cond (map? x) [[verb x]] (sequential? x) (map-indexed (fn [i m] [(str verb "[" i "]") m]) x))
+               f collections
+               :let [n (get spec f)]
+               :when (and (string? n) (not (contains? declared n)))]
+           (str at "." f " names " n ", which state.collections does not declare")))))
 
 ;; --- running an effect -------------------------------------------------------------------
 

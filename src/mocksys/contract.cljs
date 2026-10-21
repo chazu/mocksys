@@ -310,10 +310,10 @@
       (seq copies) (update "behaviors" (fnil into []) copies))))
 
 (defn- check-effect!
-  "Throw the first problem with `op`'s effect. Whether a called verb exists is left
-   to the daemon, the only process that runs module code."
-  [op modules?]
-  (when-let [e (first (effect/errors (get op "effect")))]
+  "Throw the first problem with `op`'s effect, which runs over `settings`. Whether a
+   called verb exists is left to the daemon, the only process that runs module code."
+  [op settings modules?]
+  (when-let [e (first (concat (effect/errors (get op "effect")) (effect/collection-errors (get op "effect") settings)))]
     (throw (js/Error. e)))
   (when-let [verb (and (not modules?) (get (first (effect/calls-of (get op "effect"))) "verb"))]
     (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`")))))
@@ -347,12 +347,16 @@
          mods     (modules/scenario-paths dir (get contract "modules"))
          fault    (get contract "fault")
          clock?   (effect/contract-uses-clock? contract)
+         settings (when (or clock? (effect/contract-stateful? contract))
+                    (let [s (effect-settings contract clock?)]
+                      (when-let [e (first (effect/settings-errors s))] (throw (js/Error. e)))
+                      s))
          stubs (mapv (fn [op]
                        (try
                          {"predicates" (predicates-for (http-request (get op "request")))
                           "responses"
                           (if (effect/stateful? op)
-                            (do (check-effect! op (seq mods))
+                            (do (check-effect! op settings (seq mods))
                                 [{"effect" (get op "effect")}])
                             (mapv #(-> % templatize (apply-fault fault))
                                   (operation-responses op)))}
@@ -365,10 +369,7 @@
      (cond-> {"protocol" (get contract "protocol" "http") "stubs" stubs "name" (get contract "scenario")}
        port       (assoc "port" port)
        (seq mods) (assoc "modules" mods)
-       (or clock? (effect/contract-stateful? contract))
-       (assoc "state" (let [s (effect-settings contract clock?)]
-                        (when-let [e (first (effect/settings-errors s))] (throw (js/Error. e)))
-                        s))))))
+       settings   (assoc "state" settings)))))
 
 ;; --- lift: recorded imposter -> contract ----------------------------------
 

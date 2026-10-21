@@ -254,6 +254,15 @@ state:
 Each collection verb is **terminal** — it forms and returns its own response — so a CRUD
 endpoint is one verb.
 
+Every collection an effect names (`collection`, or `via` and `hydrate` for `listJoin`)
+must be declared here. `mocksys validate` and the daemon both reject an effect that names
+an undeclared one, such as a misspelling that would otherwise drop every `create`.
+
+A bucket, collection, `idField` or variable (a `bind`, `mint` or `as` name) cannot be named
+`__proto__`, `constructor` or `prototype`. JavaScript gives those names meaning on every
+object, so validation rejects them. Ids that come from a request, such as
+`/users/constructor`, are only keys: such a request finds no row and answers 404.
+
 ### `create`
 
 Insert a row. The id is whatever the resulting object's `idField` holds, so mint it in
