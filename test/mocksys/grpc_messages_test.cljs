@@ -51,3 +51,20 @@
           (testing "the recorded body holds what the caller sent, without defaults"
             (is (= {"id" "r1" "display_name" "Rex"}
                    (js->clj (js/JSON.parse (get-in full [:json "requests" 0 "body"])))))))))))
+
+(defn- stubbed
+  "An imposter answering `rpc` (\"rec.Recs/Get\") with the `is` response."
+  [& rpc-is]
+  {"protocol" "grpc" "name" "t/rec"
+   "stubs" (vec (for [[rpc is] (partition 2 rpc-is)]
+                  {"predicates" [{"deepEquals" {"path" (str "/" rpc)}}] "responses" [{"is" is}]}))})
+
+(deftest a-map-field-is-not-the-repeated-field-an-array-fills
+  (async done
+    (fx/with-daemon done
+      (fn [admin]
+        (p/let [[_ c made] (serve-rec! admin (stubbed "rec.Recs/List" {"statusCode" 200 "body" [{"id" "r1"} {"id" "r2"}]}) {})
+                lst        (fx/unary c "List" {})]
+          (fx/close c)
+          (is (= 201 (:status made)) (pr-str (:json made)))
+          (is (= ["r1" "r2"] (map #(get % "id") (get-in lst [:ok "recs"]))) (pr-str lst)))))))
