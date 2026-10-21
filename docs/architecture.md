@@ -37,6 +37,7 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff status and canonical bodies (`--ignore` keys masked; volatile headers dropped when headers are compared). |
 | `mb` | The admin-API client and daemon lifecycle (spawn `mocksys daemon` when none answers, free-port allocation, imposter CRUD, replayable pull). The name predates the native runtime. |
 | `runtime` | The daemon: the admin API, one HTTP server per imposter, the proxy client for recording, and wire faults. `runtime.imposter` validates a posted imposter and resolves each request (stub choice, responses, behaviors, injection, proxyOnce recording); `runtime.match` evaluates predicates. `runtime.grpc` serves a `protocol: grpc` imposter with grpc-js, turning each call into a request for `runtime.imposter` and its outcome into a reply or a gRPC status. |
+| `tls` | The local CA in `$MOCKSYS_HOME/tls/` and the certificates it issues (node-forge over keys from node's crypto), a contract's `tls` declaration, and `fetch-own`, which the CLI uses to reach its own HTTPS mocks. |
 | `proto` | A grpc contract's `.proto`, read on the CLI side with protobufjs: imports, the descriptor `compile!` embeds in the imposter, and the rpc checks `validate` runs. |
 | `store` | On-disk layout under `~/.mocksys`: contracts, imposters, drafts, recordings, services, stacks. YAML read/write. |
 | `service` | Service templates (github, gitlab, aws-s3, stripe, generic-http): redact/volatile headers, default target, the consumer's base-URL env var. Composed with the base sets in `analyze`. |
@@ -82,6 +83,7 @@ else `~/.mocksys`. (Set `MOCKSYS_HOME=./.mocks` to scope mocks to a single proje
 ~/.mocksys/
   services/<service>.yaml          # service profile (redact/volatile/target/env)
   stacks/<name>.yaml               # a named set of scenarios
+  tls/                             # the local CA for tls mocks: ca.pem, ca.key (0600), a .gitignore of *
   <service>/<name>/
     contract.yaml                  # the source of truth
     contract.draft.yaml            # a recording awaiting `promote` (optional)
@@ -123,7 +125,7 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 
 | Part | Supported |
 |---|---|
-| Imposter | `protocol` (`http` or `grpc`), `port`, `name`, `recordRequests`, `stubs`, `modules` (absolute paths), `calls` (verb names); for `grpc`, a `descriptor` (the proto as protobufjs JSON) |
+| Imposter | `protocol` (`http` or `grpc`), `port`, `name`, `recordRequests`, `stubs`, `modules` (absolute paths), `calls` (verb names), `tls` (`{cert, key}` PEM text); for `grpc`, a `descriptor` (the proto as protobufjs JSON) |
 | Predicates | `equals`, `deepEquals`, `matches`, `exists` over method, path, query, headers; `jsonpath` (plain paths) over the body. Case-insensitive, as in Mountebank. |
 | Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `inject` (source that evaluates to a function), `proxy` (`proxyOnce` with `predicateGenerators`; `to` is an origin with no path, query or fragment), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
 | Behaviors | `wait`, `copy` (regex or jsonpath) |
@@ -138,6 +140,22 @@ the rules. `compile!` embeds the descriptor, so the daemon reads no scenario fil
 `imposter.json` stays self-contained. Streaming and undeclared methods answer
 `UNIMPLEMENTED`, and a grpc imposter rejects `proxy` responses. The bun binary serves
 gRPC too.
+
+**TLS.** An imposter with `tls` is served as HTTPS, or as gRPC over TLS, on both
+loopback addresses. The CLI makes the certificate, not the daemon, and only when it
+posts. `compile!` records the contract's `tls` in `imposter.json` as declared (`true`,
+or paths inside the scenario directory), the way it records `modules`.
+`ensure-running!` then swaps in PEM text: for `true`, a new certificate for
+`localhost`, `127.0.0.1` and `::1` signed by the CA in `$MOCKSYS_HOME/tls/`; for
+paths, the files. Three reasons put issuing there. `mocksys tls ca` and the trust lines
+`run` prints name the CLI's store, and the daemon on the same admin port may have been
+started with another `MOCKSYS_HOME`. `imposter.json` is copied by `pack`, `publish` and
+`push`, so it must not hold a key. And the daemon reads no key files. The daemon
+checks the pair with `tls.createSecureContext` (a bad pair is a 400 naming `tls`), and
+the admin API shows `tls: true` without the key, so a replayable imposter with `tls`
+posts back only with new credentials. The CLI's own calls to a TLS mock (`conform`,
+`clock`) skip the certificate check: the CLI found the port through its own daemon, and
+a contract's own certificate may come from any CA.
 
 **Injection.** Injections run in the daemon's process, called as
 `f(request, state, logger)` with `require` in scope. `state` is one object per
@@ -165,6 +183,9 @@ only ever posts injections it generated itself, plus the modules a contract list
 - The admin API refuses a request that carries an `Origin` header or names a host
   other than `127.0.0.1` or `localhost`. A web page therefore cannot post an imposter,
   directly or through DNS rebinding.
+- The local CA's key stays in `$MOCKSYS_HOME/tls/` (mode 0700, the key 0600, and a
+  `.gitignore` keeps it out of git). It is never written to `imposter.json`, a bundle
+  or a post.
 - `imposter.json` is a build output, never an input. A pulled, unpacked or hand-edited
   one is overwritten from the contract before anything is posted.
 - Every contract value spliced into generated JS goes through `JSON.stringify` (strings,

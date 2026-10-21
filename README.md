@@ -39,6 +39,9 @@ share — not a one-off blob:
   all expressible — not just method+path lookups.
 - **gRPC as well as HTTP.** A contract with `protocol: grpc` and a `.proto` serves its
   unary RPCs, statefully, through the same effects, matching and `assert`.
+- **HTTPS and gRPC over TLS.** `tls: true` serves a mock with a certificate for
+  localhost from a local CA, so a client that insists on TLS keeps verifying:
+  `export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"`.
 - **Mocks are test oracles.** `assert` checks what the running mock actually received
   and exits non-zero on a miss, so it drops straight into a test script.
 - **Secrets never hit disk.** When you *do* record, raw traffic lives only inside the

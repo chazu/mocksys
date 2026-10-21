@@ -110,6 +110,14 @@ JSON body is the reply, a 404 reaches the client as `NOT_FOUND`, and a body
 of the wrong type is `INTERNAL` naming the field, and `daemon.log` says the same. `run`/`env` print `localhost:PORT`; connect with
 insecure credentials. See `docs/contracts.md#grpc-unary` and `examples/grpc-todos/`.
 
+**TLS.** When the code under test needs `https://` or a TLS gRPC channel, add `tls: true`
+to the contract. `run` issues the mock a certificate for localhost from mocksys's local
+CA and prints `https://localhost:PORT` (gRPC: `localhost:PORT (gRPC over TLS)`). Make
+the client trust the CA rather than turning verification off:
+`export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"` for node, which `mocksys env` also
+exports, or `curl --cacert "$(mocksys tls ca)"`. Never copy `$MOCKSYS_HOME/tls/ca.key`
+anywhere. See `docs/contracts.md#tls` and `examples/https.yaml`.
+
 The full effect-language reference is `docs/effects.md`; `docs/walkthrough.md` is a
 narrated tour that builds the Okta twin; runnable contracts are in `examples/`.
 

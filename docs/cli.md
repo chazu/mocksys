@@ -8,7 +8,8 @@ Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`); user kits live in its 
 start the mocksys daemon if it is not running; its admin API is `127.0.0.1:2626`, and
 `MOCKSYS_ADMIN_PORT` picks another port. A daemon left running by another mocksys
 version is stopped and replaced, with a line on stderr that names the mocks it was
-serving; run them again. The daemon writes its output to `$MOCKSYS_HOME/daemon.log`,
+serving; run them again. The local CA for `tls` mocks is in `$MOCKSYS_HOME/tls/` (see
+[TLS](#tls)). The daemon writes its output to `$MOCKSYS_HOME/daemon.log`,
 and a failed start shows the end of that log. `MOCKSYS_NO_INJECTION=1` refuses
 stateful scenarios and scenarios that list `modules`.
 
@@ -42,8 +43,9 @@ stateful scenarios and scenarios that list `modules`.
 
 | Command | Notes |
 |---|---|
-| `run <name> [--port N] [--env VAR] [--watch]` | Host the mock; prints the port + export lines. `--watch` recompiles+reloads on edits to `contract.yaml` and, for a grpc contract, its proto and the imports inside the scenario directory. An explicit `--port` is pinned onto the contract. A grpc mock's address is `localhost:PORT`, with no scheme, in `run`, `env` and `up`. |
-| `env <name> [--json \| --tilt] [--port N] [--env VAR]` | Wire a consumer to the mock. Default: eval-safe `export` lines (`eval "$(mocksys env NAME)"`). `--json`: `{scenario, port, url, <vars>}`. `--tilt`: a Tiltfile `local_resource` (pins a port; doesn't start). |
+| `run <name> [--port N] [--env VAR] [--watch]` | Host the mock; prints the port + export lines. `--watch` recompiles+reloads on edits to `contract.yaml` and, for a grpc contract, its proto and the imports inside the scenario directory. An explicit `--port` is pinned onto the contract. A grpc mock's address is `localhost:PORT`, with no scheme, in `run`, `env` and `up`. A `tls` mock's address is `https://localhost:PORT`, and `run` prints the CA to trust with the commands for node and curl (or grpcurl). |
+| `env <name> [--json \| --tilt] [--port N] [--env VAR]` | Wire a consumer to the mock. Default: eval-safe `export` lines (`eval "$(mocksys env NAME)"`). `--json`: `{scenario, port, url, <vars>}`. `--tilt`: a Tiltfile `local_resource` (pins a port; doesn't start). For a `tls: true` mock, the exports include `NODE_EXTRA_CA_CERTS` and the JSON includes `caCert`. When `NODE_EXTRA_CA_CERTS` already names another file, `env` leaves it and says on stderr to add the CA to that file. `up` does the same for a stack. |
+| `tls ca` | Print the path of the local CA certificate, `$MOCKSYS_HOME/tls/ca.pem`, creating the CA on first use. Only the path goes to stdout, so `export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"` works; stderr shows how other clients trust it. See [TLS](#tls). |
 | `inspect <name>` | Agent-readable summary: calls, matchers, redactions, volatile fields. Shows friendly `/users/{id}` paths. |
 | `doctor <name> [--fix]` | Lint matcher hygiene / frozen volatile values. `--fix` scrubs the contract's response headers and recompiles. Overfit is only flagged on recorded scenarios. |
 | `requests <name> [--clear]` | What the running mock received (`--clear` resets). |
@@ -51,6 +53,35 @@ stateful scenarios and scenarios that list `modules`.
 | `ls` | All scenarios + which are live. |
 | `stop <name> \| --all` | Tear down a running scenario (or all). |
 | `daemon stop` | Stop the mocksys daemon. Every mock it serves stops with it. The next command that serves a mock starts a new daemon. |
+
+## TLS
+
+A contract with `tls: true` is served with a certificate for `localhost`, `127.0.0.1`
+and `::1`, issued from a local CA when `run` posts it (see
+[contracts.md](contracts.md#tls)). Each client must trust the CA:
+
+| Client | How |
+|---|---|
+| node (`https`, `fetch`, grpc-js `createSsl()`) | `export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"` before node starts |
+| curl | `curl --cacert "$(mocksys tls ca)" https://localhost:PORT/...` |
+| grpc-js, explicitly | `grpc.credentials.createSsl(fs.readFileSync(CA))` |
+| gRPC C core (Python, Ruby, C++) | `export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH="$(mocksys tls ca)"` |
+| grpcurl | `grpcurl -cacert "$(mocksys tls ca)" -proto FILE localhost:PORT list` |
+| Browsers, every program of the user | Add the CA to the system trust store. macOS: `security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db "$(mocksys tls ca)"`. Debian or Ubuntu: `sudo cp "$(mocksys tls ca)" /usr/local/share/ca-certificates/mocksys.crt && sudo update-ca-certificates`. Firefox keeps its own store. |
+
+The CA:
+
+- Lives in `$MOCKSYS_HOME/tls/`: `ca.pem` (the certificate to trust) and `ca.key`.
+  The directory is mode 0700 and the key 0600, and mocksys tightens them again on
+  each use. A `.gitignore` in the directory keeps both out of `publish` and out of a
+  project repository that holds `MOCKSYS_HOME`. Never copy `ca.key` off the machine.
+- Lasts ten years. A mock's certificate lasts 397 days at most, since some clients
+  refuse a longer one, and a new one is issued on every `run`, so a mock's
+  certificate never needs renewal.
+- Is replaced when it expires within 30 days or cannot be read. stderr then says so,
+  and clients must trust the new `ca.pem`. To replace it on purpose, delete
+  `$MOCKSYS_HOME/tls/`; the next `run` or `tls ca` makes a new one.
+- Belongs to one store. A project that sets `MOCKSYS_HOME=./.mocks` has its own CA.
 
 ## Stacks — bring up a named set together
 

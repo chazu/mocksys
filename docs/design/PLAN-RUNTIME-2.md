@@ -80,6 +80,26 @@ then works unchanged.
   shelling out to `openssl`.
 - `record --target https://...` keeps working, since that is the client side of TLS.
 
+As built:
+- **The CLI issues, at post time.** `compile!` records `tls` in `imposter.json` as
+  declared (`true`, or the relative paths), like `modules`. `ensure-running!` swaps in
+  PEM text: a new certificate from the CA for `true`, the files for a pair. Not the
+  daemon: `tls ca` and `run`'s trust lines name the CLI's store, and a daemon on the
+  admin port may run with another `MOCKSYS_HOME`. Not `compile!`: `imposter.json` is
+  copied by pack, publish and push, so it must hold no key. The daemon reads no key
+  files, checks the pair with `createSecureContext`, and shows `tls: true` without it.
+- **The CA.** `$MOCKSYS_HOME/tls/` at 0700, `ca.key` at 0600, both re-tightened on use,
+  and a `.gitignore` of `*`, because `publish` runs `git add -A` over the store and a
+  project may commit `./.mocks`. Created in a temp directory and renamed into place.
+  Ten years; replaced, with a stderr line, when it expires within 30 days or cannot be
+  read. A mock's certificate lasts at most 397 days and is new on every run, so it
+  needs no renewal. node-forge signs RSA keys from node's crypto.
+- **Trust.** `tls ca` prints only the path on stdout (`NODE_EXTRA_CA_CERTS=$(mocksys
+  tls ca)`), and the curl, grpc-js, gRPC C core and grpcurl forms on stderr. `run`
+  prints the CA and the commands; `env` and `up` export `NODE_EXTRA_CA_CERTS` unless
+  it already names another file; `env --json` adds `caCert`. `conform` and `clock`
+  reach a TLS twin, skipping the certificate check on the CLI's own calls.
+
 ## E. The effect interpreter
 
 Effects compile to JavaScript source strings (`inject.cljs`), which the daemon
@@ -117,6 +137,7 @@ Built on E.
 
 `npm test`, `npm run build` with 0 warnings, and `scripts/smoke.sh` on node. A change
 that adds a dependency or touches serving also runs smoke against the bun binary:
-`scripts/build-binary.sh && MOCKSYS_BIN=dist/mocksys scripts/smoke.sh`. Use a distinct
+`scripts/build-binary.sh && MOCKSYS_BIN=dist/mocksys scripts/smoke.sh` (smoke resolves a
+relative `MOCKSYS_BIN` before it changes directory). Use a distinct
 `SMOKE_PORT` per worktree. Each item adds tests and an example, updates the docs it
 changes, and gets an independent review before it merges.
