@@ -17,6 +17,8 @@ summary:  "..."                  # optional human/agent description
 port:     9099                   # optional pinned port (honored by run/env/up)
 fault:    {}                     # optional transport fault overlay (see Faults)
 issuer:   "http://..."           # optional origin for baseUrl/JWT iss when a request has no Host header
+protocol: http                   # http (default) or grpc (see gRPC)
+proto:    ./todo.proto           # grpc only: the .proto file, relative to the scenario directory
 seed:     {}                     # named arrays for effects to read (see effects.md)
 state:    {}                     # collections, clock, randomSeed (see effects.md)
 genes:                           # optional: reusable fragments that expand into operations (see Genes)
@@ -174,6 +176,149 @@ target.
 [`examples/directory.yaml`](../examples/directory.yaml) builds a users, groups and
 memberships twin from genes alone.
 
+## gRPC (unary)
+
+A contract with `protocol: grpc` serves the unary RPCs of a `.proto` file. Each
+operation names an `rpc` in place of a method and path. Everything else works as it
+does for HTTP: request matching, static responses and examples, templating, faults,
+effects and state.
+
+```yaml
+protocol: grpc
+proto: ./todo.proto              # relative to the scenario directory
+operations:
+  - id: get
+    request: { rpc: todo.v1.Todos/GetTodo }       # pkg.Service/Method
+    effect:
+      bind: { id: { body: id } }
+      get:  { collection: todos, key: "{id}", miss: { status: 404, json: { message: "no todo {id}" } } }
+```
+
+[`examples/grpc-todos`](../examples/grpc-todos) is a complete stateful example with a
+grpc-js client.
+
+### A call is a request
+
+The daemon turns each gRPC call into the request an HTTP stub matches on:
+
+| Request field | From the call |
+|---|---|
+| `method` | `POST` |
+| `path` | `/pkg.Service/Method`, so `rpc: pkg.Service/Method` lowers to that method and path |
+| `headers` | the call's metadata. A binary (`-bin`) value is base64. |
+| `body` | the decoded request message as JSON |
+| `query` | empty |
+
+So `request.headers` matches metadata and `request.body` matches message fields by
+JSONPath (`{ "$.id": "t1" }`). In an effect, `bind: { x: { body: field } }` reads a
+message field and `bodyJson: true` reads the whole message. `requests` and `assert` show a
+call as `POST /pkg.Service/Method`.
+
+### Messages as JSON
+
+The proto is read with these options, on both the request and the reply:
+
+- Field names stay as written in the `.proto` (`display_name` stays `display_name`).
+- `int64` and other 64-bit integers are strings, so no precision is lost.
+- `bytes` are base64 strings.
+- Enums are their value names (`"SECRET"`), and a reply may use the name or the number.
+- An unset field reads as its proto3 default (`""`, `0`, `false`, the first enum value),
+  and an unset message field reads as `null`. Predicates see the default, so
+  `present: true` on a string field holds only when the string is non-empty, and on a
+  number, bool or enum field it always holds. To branch on an unset number, match its
+  default value.
+- A field in a `oneof` also sets a virtual field, named after the `oneof`, to the name of
+  the member that is set.
+
+### Replies and status codes
+
+A response with a 2xx status is the reply:
+
+- A JSON object body is encoded as the reply message. Fields the message does not
+  declare are ignored.
+- A JSON array body fills the reply message's one repeated field. This is how a `list`
+  effect answers `ListTodosResponse { repeated Todo todos = 1; }`. A reply type with no
+  repeated field, or several, cannot take an array.
+- Any other body (text, or an array with no field to fill) is `INTERNAL`.
+
+Any other status is a gRPC error. A JSON body of `{ grpcCode, message }` picks the code
+directly; `grpcCode` is a code name (`NOT_FOUND`) or number (`5`). Otherwise the HTTP
+status maps through this table, the inverse of `google.rpc.Code`'s HTTP mapping:
+
+| HTTP | gRPC |
+|---|---|
+| 400 | `INVALID_ARGUMENT` |
+| 401 | `UNAUTHENTICATED` |
+| 403 | `PERMISSION_DENIED` |
+| 404 | `NOT_FOUND` |
+| 409 | `ALREADY_EXISTS` |
+| 429 | `RESOURCE_EXHAUSTED` |
+| 499 | `CANCELLED` |
+| 500 | `INTERNAL` |
+| 501 | `UNIMPLEMENTED` |
+| 503 | `UNAVAILABLE` |
+| 504 | `DEADLINE_EXCEEDED` |
+| any other | `UNKNOWN` |
+
+The error's message is the body's `message` when it is a string, else the body text, else
+`HTTP <status>`. A `grpcCode` that is not a valid code other than `OK` is ignored, and
+the table applies.
+
+Response headers become the reply's initial metadata, lower-cased. `Content-Type`,
+`Content-Length`, `Connection` and other hop-by-hop headers, and `grpc-*` names, are
+dropped. Rate-limit headers from a `limit` effect therefore reach the client as
+`x-rate-limit-*` metadata.
+
+### Static responses and examples
+
+Static operations work unchanged: the selected example's body is the reply, or the
+error, by the rules above. An error variant is an example with a non-2xx status, and
+`use --only` swaps to it.
+
+```yaml
+  - id: delete
+    request: { rpc: todo.v1.Todos/DeleteTodo }
+    responses:
+      - status: 200
+        examples: { ok: { select: true, body: {} } }
+      - status: 403
+        examples: { denied: { select: false, body: { grpcCode: PERMISSION_DENIED, message: "read-only" } } }
+```
+
+A `bodySchema` with no selected example is sampled as for HTTP. A transport `fault`
+applies too. `latency` and `timeout` delay the reply, `status` maps through the table,
+and `drop-connection` and `malformed-json` end the call with `UNAVAILABLE`.
+
+### What is served
+
+The daemon registers every unary method in the proto. A unary call that matches no
+stub gets an empty reply, every field at its default, as an unmatched HTTP request gets
+an empty 200. A streaming method, or a method the proto does not declare, answers
+`UNIMPLEMENTED`.
+
+Out of scope: streaming RPCs, server reflection, recording gRPC traffic (`record`,
+`freeze`), TLS, `proxy` responses, and `conform`, which replays HTTP. A grpc mock
+listens on `127.0.0.1` and `::1` without TLS, so a client connects with insecure
+credentials.
+
+### The proto file
+
+`proto` is a path relative to the scenario directory, usually a file next to
+`contract.yaml`. An `import` resolves against the directory of that file, as
+`protoc -I <that directory>` resolves it, whichever file holds the import. Google's
+well-known types (`google/protobuf/empty.proto`, `timestamp.proto` and the rest) are
+built in.
+
+`compile` (and so `run`) reads the proto and embeds it in `imposter.json` as a
+descriptor, so the daemon never reads the scenario's files. A proto that does not parse
+stops the compile with the file and line. `pack` bundles the scenario directory, so a
+proto inside it travels with the contract. `pack` refuses a proto that reads a file
+outside the scenario directory and names the file to copy in.
+
+`run`, `env` and `up` give a grpc mock's address as `localhost:PORT`, the target form
+gRPC clients take. `clock` reaches a grpc twin's virtual clock: every grpc mock also
+serves the `/_mocksys/clock` control method, with JSON messages.
+
 ## Transport faults
 
 A `fault` overlay injects failure on top of every static operation's normal response.
@@ -204,6 +349,11 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
   isn't a number; an operation with nothing to serve (no selected example, no
   `bodySchema`, no effect); an operation that fails to compile (for example a JSONPath
   selector that isn't a plain path, or a non-numeric status, `ttl` or `window`).
+- **gRPC errors**: an unknown `protocol`; a grpc contract with no `proto`; a grpc
+  operation that names `method` or `path`, or whose `rpc` is missing or not of the form
+  `pkg.Service/Method`; an `rpc` on an http contract; a proto that does not load (a
+  missing file or import, or a syntax error, with its line); an `rpc` the proto does not
+  declare; a streaming `rpc`.
 - **Warnings** (advisory): a selected example whose body diverges from its response
   `bodySchema` (lightweight, ajv-free: top-level type, required object props, one-level
   recurse).
