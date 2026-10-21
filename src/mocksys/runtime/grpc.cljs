@@ -19,7 +19,9 @@
 
   A proxyOnce proxy (what `mocksys record` posts) forwards each call upstream with
   grpc-js and saves the outcome as a stub of that shape, the status as HTTP by
-  `grpc->http` and the code as grpcCode. A bidirectional stream is not recorded."
+  `grpc->http` and the code as grpcCode. The upstream call carries the client's
+  deadline, and is cancelled when the client cancels, which saves nothing. A
+  bidirectional stream is not recorded."
   (:require [clojure.string :as str]
             [promesa.core :as p]
             ["@grpc/grpc-js" :as grpc]
@@ -167,17 +169,18 @@
   (p/rejected (js/Error. "proxy responses are not served over grpc")))
 
 (defn- asker
-  "A fn from one request to a promise of the answer `imp` gives it (see
-   `outcome->reply`), once the response's wait is over. A reply's unknown keys are
-   logged once for each set of them, since every call to a twin answers from the
-   same records. `proxy!` answers a proxy response (see imposter/respond)."
-  [imp ^js md ^js reply-type proxy!]
+  "A fn from a call and one of its requests to a promise of the answer `imp` gives
+   it (see `outcome->reply`), once the response's wait is over. A reply's unknown
+   keys are logged once for each set of them, since every call to a twin answers
+   from the same records. `(proxy-for call)` answers a proxy response (see
+   imposter/respond)."
+  [imp ^js md ^js reply-type proxy-for]
   (let [path    (.-path md)
         stream? (boolean (.-responseStream md))
         say     #(log! (str "grpc mock on port " (imposter/port imp) ", " path ": " %))
         warned  (atom #{})]
-    (fn [request]
-      (p/let [out (imposter/respond imp request {:proxy! proxy!})
+    (fn [call request]
+      (p/let [out (imposter/respond imp request {:proxy! (proxy-for call)})
               _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
         (let [{:keys [unknown log] :as answer} (outcome->reply out reply-type stream?)
               dropped (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
@@ -196,7 +199,7 @@
 (defn- reply!
   "Answer a call that takes one reply (unary, client streaming) with `callback`."
   [ask ^js call request callback]
-  (-> (p/let [{:keys [metadata values error]} (ask request)]
+  (-> (p/let [{:keys [metadata values error]} (ask call request)]
         (when metadata (.sendMetadata call metadata))
         (if error (callback (clj->js error)) (callback nil (first values))))
       (p/catch #(callback (call-error %)))))
@@ -217,7 +220,7 @@
   "Answer the one request with every message of the reply, or the error before any."
   [ask path]
   (fn [^js call]
-    (-> (p/let [{:keys [metadata values error]} (ask (request-of call path (.-request call)))]
+    (-> (p/let [{:keys [metadata values error]} (ask call (request-of call path (.-request call)))]
           (when metadata (.sendMetadata call metadata))
           (if error
             (.emit call "error" (clj->js error))
@@ -237,7 +240,7 @@
           turn  (fn [msg]
                   (fn [_]
                     (when-not @over?
-                      (-> (p/let [{:keys [metadata values error]} (ask (request-of call path msg))]
+                      (-> (p/let [{:keys [metadata values error]} (ask call (request-of call path msg))]
                             (when-not @over?
                               (when (and metadata (not @md?)) (reset! md? true) (.sendMetadata call metadata))
                               (if error (stop! (clj->js error)) (run! #(.write call %) values))))
@@ -282,15 +285,27 @@
               (.watchConnectivityState ch st (+ (js/Date.now) 10000)
                                        #(if % (reject (refused)) (check)))))))))))
 
+(def ^:private upstream-ms
+  "How long a recorded call may take when its client set no deadline, so that a
+   stream that never ends is still recorded."
+  60000)
+
 (defn- call-upstream
-  "Make the call `request` stands for on `client`; resolves its outcome as an `is`
-   response. A reply, or a server stream's messages as an array, is a 200 body; an
-   error is the status `grpc->http` gives its code, with a {grpcCode, message} body.
-   The upstream's initial metadata becomes the headers."
-  [^js client ^js md request]
+  "Make the call `request` stands for on `client`, on behalf of the client's call
+   `down`; resolves its outcome as an `is` response. A reply, or a server stream's
+   messages as an array, is a 200 body; an error is the status `grpc->http` gives
+   its code, with a {grpcCode, message} body. The upstream's initial metadata
+   becomes the headers. When `down` is cancelled, or its deadline passes, the
+   upstream call is cancelled and the promise rejects, so nothing is recorded."
+  [^js client ^js md ^js down request]
   (js/Promise.
-   (fn [resolve]
+   (fn [resolve reject]
      (let [path    (.-path md)
+           due     (js/Number (.getDeadline down))
+           ;; a moment past the client's own deadline, so that passing it ends the
+           ;; call as a cancel, which is not recorded, not as the upstream's
+           ;; DEADLINE_EXCEEDED, which would be
+           opts    #js {:deadline (if (js/isFinite due) (+ due 1000) (+ (js/Date.now) upstream-ms))}
            ser     (.-requestSerialize md)
            de      (.-responseDeserialize md)
            meta    (first (headers->metadata (dissoc (get request "headers") "user-agent")))
@@ -303,29 +318,34 @@
                                  "body" {"grpcCode" code "message" (.-details e)}})))
            done    (fn [err reply] (if err (fail err) (ok reply)))
            ^js call (cond
-                      (.-requestStream md)  (let [^js c (.makeClientStreamRequest client path ser de meta done)]
+                      (.-requestStream md)  (let [^js c (.makeClientStreamRequest client path ser de meta opts done)]
                                               (run! #(.write c %) msg)
                                               (.end c)
                                               c)
-                      (.-responseStream md) (let [^js c (.makeServerStreamRequest client path ser de msg meta)
+                      (.-responseStream md) (let [^js c (.makeServerStreamRequest client path ser de msg meta opts)
                                                   msgs  #js []]
                                               (.on c "data" #(.push msgs %))
                                               (.on c "end" #(ok msgs))
                                               (.on c "error" fail)
                                               c)
-                      :else                 (.makeUnaryRequest client path ser de msg meta done))]
-       (.on call "metadata" #(reset! headers (metadata->headers %)))))))
+                      :else                 (.makeUnaryRequest client path ser de msg meta opts done))
+           gone    (fn []
+                     (reject (ex-info "the client cancelled the call" {:grpc-code "CANCELLED"}))
+                     (.cancel call))]
+       (.on call "metadata" #(reset! headers (metadata->headers %)))
+       (if (.-cancelled down) (gone) (.on down "cancelled" gone))))))
 
 (defn- forwarder
-  "The `proxy!` for calls to `md`: send each upstream, to the proxy's `to`, through
-   `client-for` (to -> grpc-js client)."
+  "A fn from a client's call to `md` to the `proxy!` that sends its requests
+   upstream, to the proxy's `to`, through `client-for` (to -> grpc-js client)."
   [^js md client-for]
-  (fn [cfg request]
-    (if (and (.-requestStream md) (.-responseStream md))
-      (p/rejected (ex-info (str "mocksys does not record bidirectional streams; " (.-path md) " is one")
-                           {:grpc-code "UNIMPLEMENTED"}))
-      (p/let [client (connected (client-for (get cfg "to")) (get cfg "to"))]
-        (call-upstream client md request)))))
+  (fn [down]
+    (fn [cfg request]
+      (if (and (.-requestStream md) (.-responseStream md))
+        (p/rejected (ex-info (str "mocksys does not record bidirectional streams; " (.-path md) " is one")
+                             {:grpc-code "UNIMPLEMENTED"}))
+        (p/let [client (connected (client-for (get cfg "to")) (get cfg "to"))]
+          (call-upstream client md down request))))))
 
 (defn- handler
   "The grpc-js handler for `md`, by its kind, answering from `imp`."

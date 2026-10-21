@@ -404,7 +404,9 @@ server stream's messages are a 200 array. An error is the HTTP status that
 `google.rpc.Code` maps its code to, with a `{ grpcCode, message }` body, so it replays
 with the same code. A client stream is recorded with its reply. A bidirectional stream
 is not recorded: the proxy answers it `UNIMPLEMENTED`. An upstream that does not
-connect fails the call `UNAVAILABLE`, and nothing is saved. `--target` is `host:port`
+connect fails the call `UNAVAILABLE`, and nothing is saved. The upstream call carries
+the client's deadline, or 60 seconds when the client sets none; a call the client
+cancels, or whose deadline passes, is cancelled upstream and nothing is saved. `--target` is `host:port`
 without TLS; an `https://` target is refused.
 
 Out of scope: TLS, `proxy` responses in a contract, and `conform`, which replays HTTP. A grpc mock

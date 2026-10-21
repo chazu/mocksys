@@ -7,6 +7,8 @@
             [clojure.string :as str]
             [promesa.core :as p]
             ["node:path" :as path]
+            ["@grpc/grpc-js" :as grpc]
+            ["@grpc/proto-loader" :as loader]
             [mocksys.contract :as contract]
             [mocksys.proto :as proto]
             [mocksys.grpc-fixture :as fx]))
@@ -133,6 +135,60 @@
                  [(:code got) (:details got)]))
           (is (< took 2000) "without waiting out a timeout")
           (is (= [] (get-in saved [:json "stubs"])) "and nothing is saved"))))))
+
+(defn- raw-upstream
+  "A grpc-js server for kv.Store on `port` whose Get never answers and whose Watch
+   sends one message and never ends. Resolves {:server :calls}, where `calls` is an
+   atom of {:rpc :deadline :cancelled (a promise of the cancel)} for each call."
+  [dir port]
+  (let [def    (.loadSync loader (path/join dir "kv.proto") #js {:keepCase true :includeDirs #js [dir]})
+        svc    (.. (.loadPackageDefinition grpc def) -kv -Store -service)
+        calls  (atom [])
+        note!  (fn [rpc ^js call]
+                 (swap! calls conj {:rpc rpc :deadline (js/Number (.getDeadline call))
+                                    :cancelled (js/Promise. (fn [resolve] (.on call "cancelled" #(resolve true))))}))
+        server (grpc/Server.)]
+    (.addService server svc #js {:Get   (fn [call _] (note! "Get" call))
+                                 :Watch (fn [^js call] (note! "Watch" call) (.write call #js {:key "w1"}))})
+    (js/Promise.
+     (fn [resolve reject]
+       (.bindAsync server (str "127.0.0.1:" port) (.createInsecure grpc/ServerCredentials)
+                   (fn [err _] (if err (reject err) (resolve {:server server :calls calls}))))))))
+
+(defn- within [ms pr] (js/Promise.race #js [pr (p/delay ms :timeout)]))
+
+(defn- nth-call
+  "Resolve the `n`th call `calls` notes (from 0), polling, or :timeout after 2s."
+  [calls n]
+  (within 2000 (p/loop [] (if (> (count @calls) n) (nth @calls n) (p/do (p/delay 10) (p/recur))))))
+
+(deftest a-call-the-client-gives-up-on-is-cancelled-upstream
+  (async done
+    (fx/with-daemon done
+      (fn [admin]
+        (p/let [dir   (fx/kv-dir)
+                desc  (:descriptor (proto/read-proto (path/join dir "kv.proto")))
+                up    (fx/free-port)
+                port  (fx/free-port)
+                {:keys [server calls]} (raw-upstream dir up)
+                _     (fx/admin-call (str admin "/imposters") "POST" (recorder desc up port))
+                ^js c (fx/connect (path/join dir "kv.proto") "kv.Store" port)
+                ^js w (.Watch c #js {:key "x"})
+                _     (.on w "error" (fn [_]))
+                watch (nth-call calls 0)
+                _     (.cancel w)
+                wgone (within 2000 (:cancelled watch))
+                late  (fx/unary c "Get" {:key "a"} {} {:deadline-ms 300})
+                get1  (nth-call calls 1)
+                ggone (within 500 (:cancelled get1))
+                saved (fx/admin-call (str admin "/imposters/" port "?replayable=true&removeProxies=true") "GET" nil)]
+          (fx/close c)
+          (.forceShutdown ^js server)
+          (is (= true wgone) "a stream the client cancels is cancelled upstream")
+          (is (= (codes "DEADLINE_EXCEEDED") (:code late)))
+          (is (< (:deadline get1) (+ (js/Date.now) 2000)) "the client's deadline goes upstream")
+          (is (= true ggone) "and a call past it is cancelled upstream at once, not at the upstream's own deadline")
+          (is (= [] (get-in saved [:json "stubs"])) "and neither is saved"))))))
 
 (deftest a-recorded-grpc-imposter-lifts-to-a-grpc-contract
   (let [imp {"protocol" "grpc" "descriptor" {}
