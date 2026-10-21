@@ -1,6 +1,6 @@
 (ns mocksys.runtime
   "The mocksys daemon. An admin API on 127.0.0.1 creates, lists, reads and deletes
-  imposters; each imposter is an HTTP server on the loopback addresses that answers
+  imposters; each imposter is an HTTP(S) server on the loopback addresses that answers
   through `mocksys.runtime.imposter`. The admin routes are exactly the ones
   `mocksys.mb` calls:
 
@@ -144,10 +144,12 @@
       (p/catch (fn [e] (write-json! res 500 {"errors" [{"code" "response error" "message" (ex-message e)}]})))))
 
 (defn- tracked-server
-  "An HTTP server that remembers its open sockets, so stopping it can cut them
-   (a response may be parked in a long `wait`)."
-  [handler]
-  (let [^js server (http/createServer handler)
+  "An HTTP server, or HTTPS with `tls` ({cert key} PEM), that remembers its open
+   sockets, so stopping it can cut them (a response may be parked in a long `wait`)."
+  [handler & [tls]]
+  (let [^js server (if tls
+                     (https/createServer #js {:cert (get tls "cert") :key (get tls "key")} handler)
+                     (http/createServer handler))
         sockets    (atom #{})]
     (.on server "connection"
          (fn [^js s]
@@ -178,9 +180,10 @@
    `localhost` to either address reaches the mock."
   [imp]
   (let [port    (imposter/port imp)
-        handler (fn [rq rs] (serve! imp rq rs))]
-    (-> (p/let [v4 (listen! (tracked-server handler) port "127.0.0.1")]
-          (-> (listen! (tracked-server handler) port "::1")
+        handler (fn [rq rs] (serve! imp rq rs))
+        server  #(tracked-server handler (imposter/tls imp))]
+    (-> (p/let [v4 (listen! (server) port "127.0.0.1")]
+          (-> (listen! (server) port "::1")
               (p/then (fn [v6] [v4 v6]))
               (p/catch (fn [^js e]
                          (if (#{"EADDRNOTAVAIL" "EAFNOSUPPORT"} (.-code e))

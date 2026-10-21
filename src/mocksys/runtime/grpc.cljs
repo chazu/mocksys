@@ -4,7 +4,7 @@
   the request the stubs already match on (POST /pkg.Service/Method, metadata as
   headers, the decoded message as a JSON body), so matching, injection and state
   are the HTTP imposter's. Streaming methods, and methods the proto does not
-  declare, answer UNIMPLEMENTED.
+  declare, answer UNIMPLEMENTED. An imposter with `tls` serves gRPC over TLS.
 
   The outcome maps back as follows. A 2xx JSON object body is the reply message,
   checked against the reply type by mocksys.runtime.proto-json; a JSON array fills
@@ -188,9 +188,14 @@
         (p/catch (fn [e] (callback #js {:code (codes "INTERNAL") :details (ex-message e)}))))))
 
 (defn clock-call
-  "POST `body` to the clock of the grpc twin on `port`; resolves the parsed reply."
-  [port body]
-  (let [^js client (grpc/Client. (str "127.0.0.1:" port) (.createInsecure grpc/credentials))]
+  "POST `body` to the clock of the grpc twin on `port`, over TLS when `tls?`;
+   resolves the parsed reply. TLS skips the certificate check: the port came from
+   the CLI's own daemon, and a contract's own certificate may come from any CA."
+  [port body & [tls?]]
+  (let [creds      (if tls?
+                     (.createSsl grpc/credentials nil nil nil #js {:rejectUnauthorized false})
+                     (.createInsecure grpc/credentials))
+        ^js client (grpc/Client. (str "127.0.0.1:" port) creds)]
     (js/Promise.
      (fn [resolve reject]
        (.makeUnaryRequest client clock-path text-out text-in (js/JSON.stringify (clj->js body))
@@ -224,10 +229,16 @@
                         :when (not (or (.-requestStream md) (.-responseStream md)))]
                     [m (handler imp md (.-resolvedResponseType rpc))]))]))
 
-(defn- bind! [^js server addr]
+(defn- server-credentials [tls]
+  (if tls
+    (.createSsl grpc/ServerCredentials nil #js [#js {:cert_chain  (js/Buffer.from (get tls "cert"))
+                                                     :private_key (js/Buffer.from (get tls "key"))}])
+    (.createInsecure grpc/ServerCredentials)))
+
+(defn- bind! [^js server addr tls]
   (js/Promise.
    (fn [resolve reject]
-     (.bindAsync server addr (.createInsecure grpc/ServerCredentials)
+     (.bindAsync server addr (server-credentials tls)
                  (fn [err port] (if err (reject err) (resolve port)))))))
 
 (defn- no-ipv6?
@@ -249,12 +260,13 @@
   (let [[pkg-def root] (package-definition (get-in @imp [:spec "descriptor"]))
         ^js server     (grpc/Server.)
         port           (imposter/port imp)
+        tls            (imposter/tls imp)
         stop           (fn [] (.forceShutdown server) (p/resolved nil))]
     (doseq [[svc impl] (services imp pkg-def root)]
       (.addService server svc (clj->js impl)))
     (.register server clock-path (clock-handler imp) text-out text-in "unary")
-    (-> (p/let [_ (bind! server (str "127.0.0.1:" port))
-                _ (p/catch (bind! server (str "[::1]:" port))
+    (-> (p/let [_ (bind! server (str "127.0.0.1:" port) tls)
+                _ (p/catch (bind! server (str "[::1]:" port) tls)
                            (fn [e] (when-not (no-ipv6? e) (throw e))))]
           [{:stop stop}])
         (p/catch (fn [e]
