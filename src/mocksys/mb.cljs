@@ -7,8 +7,12 @@
   namespace keeps its historical name; its API mirrors the Mountebank admin calls
   the daemon implements."
   (:require [promesa.core :as p]
+            [clojure.string :as str]
             ["node:child_process" :as cp]
-            ["node:net" :as net]))
+            ["node:fs" :as fs]
+            ["node:net" :as net]
+            ["node:path" :as path]
+            [mocksys.store :as store]))
 
 (def default-admin-port 2626)
 
@@ -59,36 +63,77 @@
   []
   (p/let [s (daemon-status)] (= :up s)))
 
-(defn- daemon-command
-  "How to re-run this mocksys as the daemon, as [cmd args]. The bun binary is its own
-   runtime (execPath is mocksys); under node, execPath is node and argv[1] the script."
+(defn daemon-command
+  "How to re-run mocksys as the daemon, as [cmd args], from the running process's
+   {:exec-path :script :bun?}. A bun-compiled binary is its own runtime and keeps a
+   virtual script path under /$bunfs/; node, or bun running a script, re-runs the
+   script."
+  [{:keys [exec-path script bun?]}]
+  (if (and bun? (str/starts-with? (str script) "/$bunfs/"))
+    [exec-path ["daemon"]]
+    [exec-path [script "daemon"]]))
+
+(defn- this-process []
+  {:exec-path (.-execPath js/process)
+   :script    (aget (.-argv js/process) 1)
+   :bun?      (some? (.. js/process -versions -bun))})
+
+(defn log-path
+  "Where the daemon's output goes, truncated on each start."
   []
-  (let [exec (.-execPath js/process)]
-    (if (.. js/process -versions -bun)
-      [exec ["daemon"]]
-      [exec [(aget (.-argv js/process) 1) "daemon"]])))
+  (path/join store/root "daemon.log"))
 
-(defn- spawn-daemon! []
-  (let [[cmd args] (daemon-command)
-        child (.spawn cp cmd (clj->js args) #js {:detached true :stdio "ignore"})]
-    (.unref child)))
+(defn spawn-daemon!
+  "Start `[cmd args]` detached with its stdout and stderr in `log`. Returns an atom
+   that receives the reason if the process cannot start or exits."
+  [[cmd args] log]
+  (fs/mkdirSync (path/dirname log) #js {:recursive true})
+  (let [fd    (fs/openSync log "w")
+        ended (atom nil)
+        child (cp/spawn cmd (clj->js args) #js {:detached true :stdio #js ["ignore" fd fd]})]
+    (fs/closeSync fd)
+    (.on child "error" (fn [^js e] (reset! ended (str "could not start (" cmd "): " (.-message e)))))
+    (.on child "exit" (fn [code signal]
+                        (reset! ended (str "exited " (if signal (str "on " signal) (str "with status " code))
+                                           " before it came up"))))
+    (.unref child)
+    ended))
 
-(defn- wait-up [tries]
+(defn- log-tail [log]
+  (let [text (try (fs/readFileSync log "utf8") (catch :default _ ""))
+        tail (take-last 10 (remove str/blank? (str/split-lines text)))]
+    (when (seq tail)
+      (str "\n" (str/join "\n" (map #(str "  " %) tail)) "\n(full log: " log ")"))))
+
+(defn- startup-error [reason log]
+  (js/Error. (str "the mocksys daemon " reason (or (log-tail log) (str " (its log, " log ", is empty)")))))
+
+(defn- wait-up [ended log deadline]
   (p/let [ok (up?)]
     (cond
-      ok            true
-      (zero? tries) (throw (js/Error. (str "the mocksys daemon did not come up on 127.0.0.1:" (admin-port))))
-      :else         (p/do (p/delay 200) (wait-up (dec tries))))))
+      ok                       true
+      (some-> ended deref)     (throw (startup-error @ended log))
+      (> (js/Date.now) deadline) (throw (startup-error (str "did not come up on 127.0.0.1:" (admin-port)) log))
+      :else                    (p/do (p/delay 100) (wait-up ended log deadline)))))
+
+(defn- start-daemon! [{:keys [spawn! log timeout-ms]}]
+  (wait-up (spawn! log) log (+ (js/Date.now) timeout-ms)))
 
 (defn ensure-up!
-  "Make sure the daemon is listening; start one if not."
-  []
-  (p/let [s (daemon-status)]
-    (case s
-      :up      true
-      :foreign (throw (js/Error. (str "port " (admin-port) " is taken by something that is not the mocksys "
-                                      "daemon; free it or set MOCKSYS_ADMIN_PORT")))
-      :down    (do (spawn-daemon!) (wait-up 50)))))
+  "Make sure the daemon is listening; start one if not. `opts` replaces how it is
+   started, for tests: :spawn! (fn [log] ended-atom-or-nil), :log and :timeout-ms."
+  ([] (ensure-up! {}))
+  ([opts]
+   (let [opts (merge {:log        (log-path)
+                      :spawn!     #(spawn-daemon! (daemon-command (this-process)) %)
+                      :timeout-ms 10000}
+                     opts)]
+     (p/let [s (daemon-status)]
+       (case s
+         :up      true
+         :foreign (throw (js/Error. (str "port " (admin-port) " is taken by something that is not the mocksys "
+                                          "daemon; free it or set MOCKSYS_ADMIN_PORT")))
+         :down    (start-daemon! opts))))))
 
 (defn free-port
   "Ask the OS for a free ephemeral port (bind :0, read the assignment, release).
