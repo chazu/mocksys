@@ -294,12 +294,20 @@
                              text (.text res)]
                        [(.-status res) (js->clj (js/JSON.parse text))])
              stop    (status-with (str admin "/") "DELETE" {})
+             head    (status-with (str admin "/imposters") "HEAD" {})
+             options (status-with (str admin "/imposters") "OPTIONS" {})
+             head-id (status-with (str admin "/") "HEAD" {})
+             origin  (p/let [res  (js/fetch (str admin "/imposters") (clj->js {:headers {"Origin" "https://evil.example"}}))
+                             text (.text res)]
+                       [(.-status res) (get-in (js->clj (js/JSON.parse text)) ["errors" 0 "code"])])
              listed  (call (str admin "/imposters"))]
        (is (= 200 ident) "GET / identifies the daemon to anyone")
        (is (= [401 401 401 401] [none wrong short bare]) "a missing, wrong or malformed token is refused")
        (is (= 401 (first post)))
        (is (= "unauthorized" (get-in (second post) ["errors" 0 "code"])))
        (is (= 401 stop) "the daemon cannot be stopped without it")
+       (is (= [401 401 401] [head options head-id]) "only GET / is open, not HEAD or OPTIONS")
+       (is (= [403 "forbidden"] origin) "a browser is refused before its token is checked")
        (is (= 200 (:status listed)) "the token opens the API")
        (is (= [] (get-in listed [:json "imposters"])) "the refused post created nothing")
        (is (re-matches #"[0-9a-f]{64}" (:token d)) "the token is 32 random bytes")
