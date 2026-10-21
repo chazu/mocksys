@@ -71,7 +71,12 @@
 
 ;; --- outcomes -> replies -------------------------------------------------------
 
-(def ^:private hop-headers #{"connection" "content-length" "content-type" "transfer-encoding" "keep-alive" "te" "host"})
+(def ^:private hop-headers #{"connection" "content-length" "content-type" "transfer-encoding" "keep-alive" "te" "host" "date"})
+
+(defn- transport-header?
+  "Whether HTTP/2 or gRPC sets header `k` (lower case) itself, so it is not metadata."
+  [k]
+  (or (hop-headers k) (str/starts-with? k "grpc-") (str/starts-with? k ":")))
 
 (defn- headers->metadata
   "Response headers as metadata: [md refused], where `refused` are log lines for
@@ -82,7 +87,7 @@
         refused (atom [])]
     (doseq [[k v] headers
             :let [k (str/lower-case k)]
-            :when (not (or (hop-headers k) (str/starts-with? k "grpc-") (str/starts-with? k ":")))
+            :when (not (transport-header? k))
             v (if (vector? v) v [v])]
       (try (.add md k (if (str/ends-with? k "-bin") (js/Buffer.from (str v) "base64") (str v)))
            (catch :default e
@@ -339,7 +344,7 @@
            gone    (fn []
                      (reject (ex-info "the client cancelled the call" {:grpc-code "CANCELLED"}))
                      (.cancel call))]
-       (.on call "metadata" #(reset! headers (metadata->headers %)))
+       (.on call "metadata" #(reset! headers (into {} (remove (comp transport-header? key)) (metadata->headers %))))
        (if (.-cancelled down) (gone) (.on down "cancelled" gone))))))
 
 (defn- forwarder

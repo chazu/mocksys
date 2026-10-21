@@ -86,7 +86,9 @@
               (is (= [200 {"key" "a" "value" "apple" "version" "9007199254740993"}]
                      ((juxt #(get % "statusCode") #(select-keys (get % "body") ["key" "value" "version"])) (is-of "kv.Store/Get"))))
               (is (= [{"key" "w1"} {"key" "w2"}] (mapv #(select-keys % ["key"]) (get (is-of "kv.Store/Watch") "body")))
-                  "a server stream's messages are the body's array"))))))))
+                  "a server stream's messages are the body's array")
+              (is (= {"x-upstream" "yes"} (get (is-of "kv.Store/Get") "headers"))
+                  "the upstream's metadata, without gRPC's own headers"))))))))
 
 (deftest a-recorded-grpc-error-replays-its-code
   (async done
