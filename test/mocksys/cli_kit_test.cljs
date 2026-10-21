@@ -77,11 +77,11 @@ contract:
 
 ;; --- kits that ship modules -----------------------------------------------------
 
-(defn- hooks-kit [module]
+(defn- hooks-kit [& modules]
   (str "
 flags: { word: hi }
 contract:
-  modules: ['" module "']
+  modules: [" (str/join ", " (map #(str "'" % "'") modules)) "]
   operations:
     - id: shout
       request: { method: GET, path: /shout }
@@ -96,6 +96,37 @@ contract:
 
 (defn- nothing-written? [home]
   (not (fs/existsSync (scenario-file home "contract.yaml"))))
+
+(defn- tree
+  "Everything under `file`, links not followed: relative path -> the file's text,
+   :dir, or the link's target. {} when nothing is there."
+  [file]
+  (let [st (try (fs/lstatSync file) (catch :default _ nil))]
+    (cond
+      (nil? st)             {}
+      (.isSymbolicLink st)  {"" (str "-> " (fs/readlinkSync file))}
+      (.isDirectory st)     (into {"" :dir}
+                                  (for [e (map str (fs/readdirSync file))
+                                        [p v] (tree (path/join file e))]
+                                    [(if (= "" p) e (path/join e p)) v]))
+      :else                 {"" (slurp file)})))
+
+(defn- refused
+  "Run the hooks kit with `opts` against `home`, as kit-in does, adding :untouched?,
+   whether the scenario directory is exactly as it was before."
+  [home opts]
+  (let [before (tree (scenario-file home))
+        result (kit-in home ["hooks"] opts)]
+    (assoc result :untouched? (= before (tree (scenario-file home))))))
+
+(def ^:private lower-verbs "module.exports = { verbs: { lower({ args }) { return args.w.toLowerCase(); } } };")
+
+(defn- two-module-store
+  "A hooks kit shipping ./a.js and ./lib/b.js."
+  []
+  (store! {"hooks/kit.yaml" (hooks-kit "./a.js" "./lib/b.js")
+           "hooks/a.js"     verbs
+           "hooks/lib/b.js" lower-verbs}))
 
 (deftest a-directory-kit-copies-its-modules-into-the-scenario
   (let [{:keys [home died out]} (run-kit {"hooks/kit.yaml" (hooks-kit "./lib/verbs.js")
@@ -172,3 +203,12 @@ contract:
         line (some #(when (str/includes? % "· hooks") %) (str/split-lines out))]
     (is (str/includes? (str line) "ships modules: ./lib/verbs.js"))
     (is (not (str/includes? (some #(when (str/includes? % "· okta") %) (str/split-lines out)) "ships modules")))))
+
+(deftest kit-refuses-a-module-whose-directory-is-a-file
+  (let [home (two-module-store)]
+    (fs/mkdirSync (scenario-file home) #js {:recursive true})
+    (fs/writeFileSync (scenario-file home "lib") "a plain file")
+    (let [{:keys [died untouched?]} (refused home {:force true})]
+      (is (str/includes? (str died) "lib/b.js"))
+      (is (str/includes? (str died) "not a directory"))
+      (is untouched? "neither the contract nor a.js was written"))))

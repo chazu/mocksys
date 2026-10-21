@@ -43,24 +43,29 @@
 
 (defn- landing
   "Where a write to `file` lands: the real path of its nearest existing ancestor,
-   joined with the rest. lstat counts a dangling link as existing, so realpath
-   throws on it rather than let the write create the file it points to."
+   joined with the rest. Throws when that ancestor is a link to nothing, which lstat
+   counts as existing, rather than let the write create the file it points to; and
+   when the write would need a directory where a file is."
   [file]
   (loop [p file more ()]
     (if (try (fs/lstatSync p) (catch :default _ nil))
-      (apply path/join (fs/realpathSync p) more)
+      (let [real (try (fs/realpathSync p)
+                      (catch :default _ (throw (js/Error. (str p " is a link to nothing")))))]
+        (when (and (seq more) (not (.isDirectory (fs/statSync real))))
+          (throw (js/Error. (str p " is not a directory"))))
+        (apply path/join real more))
       (recur (path/dirname p) (conj more (path/basename p))))))
 
 (defn copy-plan
   "How copying `paths` (scenario-paths over `from`) into the directory `to` would
    go, without writing: [[path state] ...], state :new, :same, or :changed when the
    file already at `to` differs. Throws when a copy would land outside `to`, through
-   a link inside it, or onto something that is not a file."
+   a link inside it, onto something that is not a file, or below one."
   [from to paths]
   (let [root (landing (path/resolve to))]
     (mapv (fn [p]
             (let [real (try (landing (path/resolve to p))
-                            (catch :default _ (fail (str p " in " to " is a link to nothing"))))]
+                            (catch :default e (fail (str "cannot copy " p " into " to ": " (.-message e)))))]
               (when-not (inside? root real)
                 (fail (str "copying " p " into " to " would write " real ", outside it")))
               [p (cond
