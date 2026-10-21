@@ -15,7 +15,8 @@ Phases 1+2 and phase 3 run in parallel. Phases 4 and 5 run in parallel after 3 l
 
 **Status (2026-10-21).** All five phases have landed, each after an independent review
 and a round of fixes. Still open, and planned in PLAN-RUNTIME-2.md:
-- **The interpreter rewrite.** Effects are still JavaScript generated as strings.
+- **The interpreter rewrite.** Done (PLAN-RUNTIME-2.md, E): the daemon evaluates effect
+  maps, and the codegen and the `inject` response are gone.
 - **gRPC beyond unary calls.** No streaming, reflection, recording or TLS.
 - **Kits that ship modules.** A disk kit cannot carry `modules` yet.
 - **No admin-API auth for local users,** the same as Mountebank.
@@ -111,10 +112,8 @@ Mountebank's imposter format that mocksys emits, so `contract/lower` and
 - Then delete the `mountebank` dependency, `MOCKSYS_MB`, the launcher code, the Homebrew
   `npm install mountebank` step, and the docs that describe them.
 
-**Deferred.** Replacing the JS-string codegen in `inject.cljs` with an interpreter over
-effect maps. The codegen is covered by the unit suite and serves the same responses. With
-injection in-process, custom verbs (phase 4) do not need the interpreter. Revisit if
-codegen bugs keep recurring.
+**Deferred, since done.** Replacing the JS-string codegen in `inject.cljs` with an
+interpreter over effect maps. PLAN-RUNTIME-2.md, section E, did it.
 
 ## Phase 4. Custom verbs
 

@@ -105,7 +105,7 @@ mocksys use stripe/createcharge --op createcharge --example card_declined --only
 ### Response templating (`{{request.*}}`)
 
 A static response body or header may splice values from the **incoming request** at serve
-time — no injection, no state. Tokens:
+time — no effect, no state. Tokens:
 
 ```
 {{request.query.<name>}}    {{request.headers.<name>}}    {{request.body.<jsonpath>}}

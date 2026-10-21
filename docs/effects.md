@@ -2,9 +2,8 @@
 
 A static operation always returns the same thing. A **stateful** operation *remembers*:
 mint a code here, consume it there; create a user, list it back; bind a bearer token to a
-user. You express this declaratively with an operation's `effect` — and mocksys compiles
-it to a generated, dependency-free JavaScript injection that runs over a persistent
-per-imposter `state` object. **You never write JavaScript**, unless a rule needs logic
+user. You express this declaratively with an operation's `effect`, a map of verbs that the
+daemon evaluates over a persistent per-imposter `state` object. **You never write JavaScript**, unless a rule needs logic
 the verbs cannot express, such as checking an HMAC signature. For that, write a
 [custom verb](#custom-verbs-call).
 
@@ -33,7 +32,7 @@ use several. The relation, lookup, signing, and render verbs are covered in
 
 ## Execution model
 
-Within one request the generated function runs in **read-then-write** order, regardless of
+Within one request the daemon runs an effect in **read-then-write** order, regardless of
 the order you write the keys:
 
 1. `bind` — pull request values into variables.
@@ -497,13 +496,13 @@ Claim value forms: a **string** (interpolated, dotted paths allowed) → string;
 `{var: <name>}` → the bound variable verbatim (keeps its JS type); a literal
 number/bool/array → itself.
 
-Signing runs `require('crypto')` inside the injection (a Node built-in, always present).
+Signing uses Node's built-in `crypto` in the daemon.
 `iat`/`exp` read the [virtual clock](#the-virtual-clock); a twin that signs is treated as
 clock-using automatically (so `iat`/`exp` are seeded and deterministic even without a
 `--token-ttl`). The signing key and its published JWKS are generated once at kit-build time
 and embedded as literals, so the same contract always verifies against the same JWKS.
 
-A new **`baseUrl`** bind source gives an injection the twin's own origin (from the request
+A **`baseUrl`** bind source gives an effect the twin's own origin (from the request
 `Host`, else a configured issuer), for `iss`/`aud` and any self-referential URL:
 
 ```yaml
@@ -531,13 +530,12 @@ effect:
 output. `render` is terminal and returns `text/html` (the one collection verb that isn't
 JSON).
 
-### Compiler surface for a new terminal verb
+### Adding a verb
 
-`link`/`unlink`/`listJoin`/`render` are **terminal** collection verbs. Adding one touches
-four sites (the read-phase verbs `find`/`sign` do not, since they end in a normal
-`respond`): the `collection-verbs` list and the terminal-dispatch `case` in `inject.cljs`,
-the validator's terminal list in `contract.cljs`, and this doc.
-See [`design/PLAN-OKTA-DEEPEN.md`](design/PLAN-OKTA-DEEPEN.md) §1.4.
+Every verb is one entry in the `verbs` table in `src/mocksys/effect.cljs`: its name,
+`:check` (its field checks, which both `validate` and the daemon's post run), `:run`, and
+for a terminal verb `:terminal`. The table's order is the order a request runs the
+verbs. A new verb is that entry and a section in this doc.
 
 ## Custom verbs (`call`)
 
@@ -689,25 +687,27 @@ error your API defines, such as the 401 above. Let a throw mean a bug in the ver
   exports no `verbs` object, or exports a verb that is not a function. It also fails if
   two modules export one verb name, or if a `call` names a verb that no module exports.
   A load error gives the file and line where the module failed.
-- **Trust.** A verb runs inside the daemon with your user's access, like the generated
-  injections. `MOCKSYS_NO_INJECTION=1` makes `run` refuse a scenario that lists modules,
-  before it compiles or posts anything, so no module code runs. `unpack` names each
+- **Trust.** A verb runs inside the daemon with your user's access. Modules are the only
+  code a scenario can run: effects are data. `MOCKSYS_NO_INJECTION=1` makes `run`
+  refuse a scenario that lists modules, before it compiles or posts anything, so no
+  module code runs. Stateful scenarios without modules still run. `unpack` names each
   unpacked scenario that lists modules. Read a module from someone else before you run
   its scenario.
 
-## The generated injection (under the hood)
+## How the daemon runs an effect (under the hood)
 
-You don't need this to use effects, but for the curious: `inject/gen` emits one
-self-contained JS function per stateful operation. A hand-written, version-controlled
-**prelude** carries all the heavy logic (the SCIM filter parser, the `Coll`
-create/get/del/list helper, JSON/form body parsing, deep interpolation, one-level merge);
-the per-operation code is thin glue that binds, reads/writes, and returns. The seed and
-collection declarations are embedded as literals, so the function is dependency-free.
-Collections are seeded once into `state` (idempotent), so every operation on the imposter
-sees the same data. The daemon runs the function in its own process with `require` in
-scope. A `call` compiles to a lookup in `verbs`, a second free variable that the
-daemon binds to the verbs of the imposter's modules. With `MOCKSYS_NO_INJECTION` set,
-`run` refuses to start a stateful scenario.
+You don't need this to use effects, but for the curious: `lower` copies each operation's
+effect into its stub unchanged, as `{effect: {...}}`, and puts what every effect shares
+into the imposter's `state` settings once: seeds, collections with their seed rows, the
+clock's start, the id stream's seed and the fallback issuer. The daemon checks each
+effect when the imposter is posted, so a bad one is a 400 naming the stub and field.
+
+On a request, `effect/run` seeds the collections into `state` if they are not there yet
+(so every operation on the imposter sees the same data), then runs the verbs in a fixed
+order whatever order the effect lists them in: `bind`, `limit`, `consume`, `lookup`,
+`resolve`, `find`, `call`, `mint`, `sign`, then the one terminal verb (a collection verb,
+or `store` and `respond`). A read that misses ends the request with its `miss`
+response. A `call` reaches the verbs the daemon loaded from the imposter's modules.
 
 ## Building twins this way
 

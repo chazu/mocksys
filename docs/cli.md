@@ -10,7 +10,7 @@ start the mocksys daemon if it is not running; its admin API is `127.0.0.1:2626`
 version is stopped and replaced, with a line on stderr that names the mocks it was
 serving; run them again. The daemon writes its output to `$MOCKSYS_HOME/daemon.log`,
 and a failed start shows the end of that log. `MOCKSYS_NO_INJECTION=1` refuses
-stateful scenarios and scenarios that list `modules`.
+scenarios that list `modules`, the only code a scenario can run.
 
 ## Twins — full clones in one command
 
