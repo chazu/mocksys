@@ -235,21 +235,27 @@ You never wrote any of those 21 operations. The `okta` kit is *composed from* re
 
 ```sh
 mocksys genes
-#   · crud-collection  — REST resource: create/list/get/update/delete, filter + pagination
-#   · oidc-handshake   — authorize (picker + single-use code), token exchange, bearer userinfo
-#   · membership       — group membership: assign/unassign + list either side
-#   · jwt-signing      — RS256-signed access/id JWTs, published JWKS + OIDC discovery
-#   · error-envelope   — provider-shaped error bodies
-#   · rate-limit       — per-client budget over a virtual-clock window -> 429
-#   · virtual-clock    — deterministic, advanceable time
+# # genes (list them under `genes:` in contract.yaml; * marks a required param)
+#   · crud-collection  REST resource: create/list/get/update/delete, SCIM filter + cursor pagination
+#       coll*            collection name; also names the ops (list-<coll>, ...)
+#       base*            resource path, e.g. /api/v1/users
+#       ...
+#   · membership  Many-to-many membership: assign/unassign (idempotent, FK-guarded) + list either side, ...
+#   · oidc-handshake  OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo
+#       ...
+# # built in, not genes
+#   · rate-limit      crud-collection's rate-limit param, or the `limit` effect verb
+#   ...
 ```
 
 The Okta twin is just: `crud-collection` (users) + `crud-collection` (groups) +
-`membership` + `oidc-handshake` + `jwt-signing` + `error-envelope`, with `rate-limit` and
-`virtual-clock` switched on.
-Building a twin of another service is the same move — compose the genes it needs. (The
-same `oidc-handshake` gene powers the standalone `kit oauth2`.) That's how you propagate a
-working pattern from one twin to the next.
+`membership` + `oidc-handshake`, plus JWT signing, the Okta error envelope, a rate limit
+and the virtual clock.
+Building a twin of another service is the same move: compose the genes it needs. You can
+do that in any `contract.yaml` by listing them under `genes:`, as
+[`examples/directory.yaml`](../examples/directory.yaml) does. (The same `oidc-handshake`
+gene powers the standalone `kit oauth2`.) That's how you propagate a working pattern from
+one twin to the next.
 
 ---
 

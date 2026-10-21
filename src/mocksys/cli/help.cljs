@@ -21,13 +21,15 @@
      "A *kit* generates a whole behavioral clone — stateful, seeded, runnable:"
      "  mocksys kit okta                              # Okta twin: users+groups CRUD, SCIM filter, OIDC"
      "  mocksys kit oauth2 --provider github          # OAuth2 provider: picker, single-use codes, userinfo"
-     "  mocksys genes                                 # the reusable behavioral genes a kit composes"
+     "  mocksys genes                                 # reusable genes + their params (list them under `genes:`)"
      "A twin is one stateful scenario sharing one port/state; `run` it like any other."
      ""
      "## Or author a mock yourself (no live access needed)"
      "  mocksys import openapi ./openapi.yaml --service stripe   # one scenario per operation"
      "  mocksys new acme/get-widget                   # scaffold, then edit contract.yaml"
      "  mocksys add acme/get-widget --request 'GET /widgets/1' --status 200 --body w.json"
+     "Compose genes in contract.yaml; they expand into operations after your own:"
+     "  genes: [{crud-collection: {coll: users, base: /api/v1/users, seed-name: users}}]"
      "Stateful resources (a REST collection) are declarative — no JavaScript:"
      "  state.collections: {users: {idField: id, seed: users}}   # in contract.yaml"
      "  effect: {bind: {...}, create|get|update|remove|list: {collection: users, ...}}"
@@ -95,7 +97,7 @@
   (println "  TWINS (full behavioral clones in one command — see `mocksys genes`)")
   (println "  mocksys kit okta [--users F.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--scenario NAME] [--port N]")
   (println "  mocksys kit oauth2 [--provider github|codeberg] [--users F.json] [--token-ttl S] [--port N]   OAuth2 provider twin")
-  (println "  mocksys genes                                   list the behavioral genes kits compose")
+  (println "  mocksys genes                                   list the genes (and their params) a contract or kit composes")
   (println "  mocksys conform <name> --corpus FILE [--against URL] [--ignore k1,k2]   replay+diff (exit 1 on drift)")
   (println "  mocksys clock <name> [advance <1h|30m|45s> | set <ts>]   read/move a twin's deterministic virtual clock")
   (println)

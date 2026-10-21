@@ -28,7 +28,7 @@ the source of truth.** If a command here ever disagrees with `prime`, trust `pri
 
 ```sh
 mocksys prime     # full agent orientation — read it before doing anything else
-mocksys genes     # the kits + behavioral genes available
+mocksys genes     # the genes (with params) a contract can list under `genes:`
 mocksys help      # terse flag list
 ```
 
@@ -50,13 +50,24 @@ eval "$(mocksys env okta/okta)"         # exports BASE_URL=http://localhost:9200
 ```
 
 `mocksys kit oauth2 --provider github` is the other built-in twin. `mocksys genes` lists
-the reusable genes a kit composes.
+the reusable genes a kit composes, with their params.
 
 ## Authoring your own (no kit)
 
 A `contract.yaml` lists operations. Static ops return fixed/example bodies; **stateful**
 ops use a declarative `effect` (no JavaScript) over shared state — collections (CRUD),
 buckets (handshakes), a virtual clock, rate limits.
+
+A contract can also list **genes** (reusable fragments) instead of writing their
+operations out. They expand after your own operations, so yours win on the same request:
+
+```yaml
+genes:
+  - crud-collection: { coll: users, base: /api/v1/users, seed-name: users, id-prefix: u }
+  - membership: { users-coll: users, groups-coll: groups }
+```
+
+`use` and `parameterize` refuse gene operations; change the gene's params instead.
 
 ```sh
 mocksys new acme/widgets                                   # scaffold a contract

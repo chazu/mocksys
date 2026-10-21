@@ -8,6 +8,7 @@ Runnable contracts and a conform corpus that back the
 |----------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [`users.yaml`](users.yaml)                   | A hand-authored **resource collection**: CRUD + SCIM-ish filter + cursor pagination — the building block behind `kit okta`.                                              |
 | [`login-throttle.yaml`](login-throttle.yaml) | The three **time-aware primitives** by hand: a `limit` (rate limit → 429), `store.ttl` (an expiring session token), and `state.clock` (the deterministic virtual clock). |
+| [`directory.yaml`](directory.yaml)           | A twin built **only from genes**: `crud-collection` for users and groups plus `membership`, with no hand-written operations.                                              |
 | [`okta-corpus.json`](okta-corpus.json)       | A request corpus for `mocksys conform` — golden expectations for the Okta twin.                                                                                          |
 
 ## Quick start
@@ -27,6 +28,12 @@ mocksys conform okta/okta --corpus examples/okta-corpus.json
 mkdir -p .mocks/demo/users && cp examples/users.yaml .mocks/demo/users/contract.yaml
 mocksys run demo/users --port 9100
 curl -G localhost:9100/api/v1/users --data-urlencode 'filter=status eq "ACTIVE"'
+
+# the gene-only directory twin
+mkdir -p .mocks/demo/directory && cp examples/directory.yaml .mocks/demo/directory/contract.yaml
+mocksys run demo/directory --port 9130
+curl -X PUT localhost:9130/api/v1/groups/g1/users/u2        # 204, assign
+curl localhost:9130/api/v1/groups/g1/users                  # [bob], hydrated
 
 # the rate-limit + expiring-session demo
 mkdir -p .mocks/demo/login-throttle && cp examples/login-throttle.yaml .mocks/demo/login-throttle/contract.yaml

@@ -19,8 +19,10 @@ fault:    {}                     # optional transport fault overlay (see Faults)
 issuer:   "http://..."           # optional origin for baseUrl/JWT iss when a request has no Host header
 seed:     {}                     # named arrays for effects to read (see effects.md)
 state:    {}                     # collections, clock, randomSeed (see effects.md)
+genes:                           # optional: reusable fragments that expand into operations (see Genes)
+  - crud-collection: { coll: users, base: /api/v1/users, seed-name: users }
 operations:
-  - { ... }                      # one or more operations
+  - { ... }                      # hand-written operations, served before gene operations
 ```
 
 `origin` is provenance and it matters: `doctor` only flags over-specific matchers on
@@ -123,6 +125,51 @@ responses:
 > ([effects.md](effects.md)). Note the brace count: `{{request.x}}` is static templating;
 > `{x}` is effect-time interpolation.
 
+## Genes
+
+A gene is a parameterized fragment of a contract: a proven pattern such as a REST
+resource or an OAuth handshake. List genes under `genes:`, each as a one-key map from the
+gene's name to its params. Param names are the gene's option names, in kebab-case. Values
+pass through as written, so a nested option such as `rate-limit` is a YAML map.
+
+```yaml
+seed:
+  users:  [ { id: u1, status: ACTIVE, profile: { login: alice@example.com } } ]
+  groups: [ { id: g1, profile: { name: Admins } } ]
+genes:
+  - crud-collection: { coll: users, base: /api/v1/users, seed-name: users, id-prefix: u,
+                       rate-limit: { max: 100, window: 60 } }
+  - crud-collection: { coll: groups, base: /api/v1/groups, seed-name: groups }
+  - membership: { users-coll: users, groups-coll: groups }
+operations: []                   # optional; hand-written operations go here
+```
+
+When the contract compiles, each gene expands into operations, collections and seed:
+
+- Gene operations come **after** the hand-written `operations`. The first matching
+  operation wins, so a hand-written operation with the same method and path overrides
+  the gene's.
+- Gene collections and seed arrays merge into `state.collections` and `seed`. A
+  collection or seed array the contract declares itself wins over the gene's.
+- `contract.yaml` keeps the `genes:` form. `imposter.json` holds the expansion. `examples`,
+  `inspect` and `validate` all show the expanded operations, and `examples` marks each
+  gene operation with its gene.
+
+`mocksys genes` lists every gene with its params, and marks the required ones with `*`.
+Today's genes are `crud-collection`, `oidc-handshake` and `membership`, described in
+[twins.md](twins.md#genes). Rate limiting, the Okta error envelope, the virtual clock and
+JWT signing are not standalone genes. `mocksys genes` says where each one lives.
+
+The editing commands (`use`, `add`, `parameterize`) act on hand-written operations only.
+`use` or `parameterize` on a gene operation fails with a message naming the gene. To
+change a gene operation, change the gene's params, or write an operation with the same
+request so that it is served first. `add` never reuses a gene operation's id. A `fault`
+applies to every static operation, gene operations included, as it has no per-operation
+target.
+
+[`examples/directory.yaml`](../examples/directory.yaml) builds a users, groups and
+memberships twin from genes alone.
+
 ## Transport faults
 
 A `fault` overlay injects failure on top of every static operation's normal response.
@@ -145,8 +192,9 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
 
 `mocksys validate <name>` (exit 1 on errors):
 
-- **Errors** (block compile): no operations; a request missing `method` or an absolute
-  `path`; an `effect` with no `respond` and no collection verb; a response `status` that
+- **Errors** (block compile): an unknown gene, an unknown or missing required gene
+  param, or a `genes:` entry that is not a one-key map; no operations; a request missing
+  `method` or an absolute `path`; an `effect` with no `respond` and no collection verb; a response `status` that
   isn't a number; an operation with nothing to serve (no selected example, no
   `bodySchema`, no effect); an operation that fails to compile (for example a JSONPath
   selector that isn't a plain path, or a non-numeric status, `ttl` or `window`).
@@ -161,6 +209,7 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
 | API docs / source in your head | `mocksys new <service/name>`, then edit; or `mocksys add ...` to append operations |
 | an OpenAPI/Swagger spec | `mocksys import openapi <spec> --service <name>` |
 | a whole service to clone | `mocksys kit okta` / `kit oauth2` ([twins.md](twins.md)) |
+| a service built from known patterns | list `genes:` in a contract (see [Genes](#genes)) |
 | live credentials | `mocksys record` → exercise the proxy → `mocksys freeze` (optionally `--draft` then `promote`) |
 
 The `imposter.json` is always derivable — never hand-edit it; edit `contract.yaml` and let

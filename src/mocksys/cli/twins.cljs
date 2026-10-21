@@ -182,17 +182,18 @@
   "List the genes a contract can list under `genes:`, each with its params, the
    capabilities that are built in rather than genes, and the kits available:  genes"
   [_]
-  (println "# genes — list them under `genes:` in contract.yaml  (* = required param)")
+  (println "# genes (list them under `genes:` in contract.yaml; * marks a required param)")
   (doseq [[gname {:keys [doc params required]}] (sort kits/genes)]
-    (println (str "  · " gname "  —  " doc))
+    (println (str "  · " gname "  " doc))
     (let [label #(str (name %) (when (required %) "*"))
           width (apply max (map (comp count label first) params))]
       (doseq [[k pdoc] params]
         (println (str "      " (.padEnd (label k) width) "  " pdoc)))))
   (println)
   (println "# built in, not genes")
-  (doseq [[cname where] kits/capabilities]
-    (println (str "  · " cname "  —  " where)))
+  (let [width (apply max (map (comp count first) kits/capabilities))]
+    (doseq [[cname where] kits/capabilities]
+      (println (str "  · " (.padEnd cname width) "  " where))))
   (println)
   (println "# kits — full twins generated in one command")
   (doseq [[k {:keys [doc]}] (sort kits/kits)]

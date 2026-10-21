@@ -37,36 +37,42 @@ eval "$(mocksys env okta/okta)"           # exports BASE_URL=http://localhost:92
 
 ## Genes
 
-A **gene** is a small, parameterized contract fragment — a proven behavioral pattern — that
-a kit composes. A twin is *composed from genes* rather than written from scratch; that is
-gene transfusion in practice.
+A **gene** is a small, parameterized contract fragment. It is a proven behavioral pattern
+such as a REST resource or an OAuth handshake. A twin is *composed from genes* rather than
+written from scratch, which is gene transfusion in practice. Any contract can list genes
+under `genes:` (see [contracts.md](contracts.md#genes)), and a kit composes them the same
+way.
 
-```sh
-mocksys genes        # list the genes (and kits) available
+```yaml
+genes:
+  - crud-collection: { coll: users, base: /api/v1/users, seed-name: users, id-prefix: u }
+  - membership: { users-coll: users, groups-coll: groups }
 ```
 
-| Gene | Behavior |
-|---|---|
-| `crud-collection` | A REST resource: create / list / get / update / delete, SCIM-ish filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). |
-| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Sources users from a **seed array** (oauth2) or a **live collection** with a dynamic picker + `status`-gated issuance (okta). Optional token TTL. |
-| `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). |
-| `jwt-signing` | RS256-signed access + id JWTs via the [`sign`](effects.md#sign--issue-a-signed-jwt-non-terminal) verb, with a published JWKS and OIDC discovery. |
-| `error-envelope` | Provider-shaped error bodies for misses (e.g. Okta `errorCode`/`errorSummary`). |
-| `rate-limit` | A per-client request budget over a [virtual-clock](effects.md#the-virtual-clock) window → `429` + `X-Rate-Limit-*` headers. |
-| `virtual-clock` | Deterministic, advanceable time (TTL expiry, rate-limit windows, `now` binds); driven by `mocksys clock`. |
+```sh
+mocksys genes        # every gene with its params, and what is built in rather than a gene
+```
 
-Genes live in the `kits` module, but not every gene is a function. `crud-collection`,
-`oidc-handshake` and `membership` are functions returning a fragment `{:operations
-:collections :seed}`, and a kit merges fragments with `compose`. The others are options or
-helpers on those: `rate-limit` is `crud-collection`'s `:rate-limit` option, `jwt-signing`
-is the `:jwt` entry of `oidc-handshake`'s `:user-source`, `error-envelope` is the
-`okta-error` body helper, and `virtual-clock` is the contract's `state.clock` (or turns on
-implicitly, see [effects.md](effects.md#the-virtual-clock)). The `genes` list that `mocksys
-genes` prints is display-only. To extend mocksys with a new twin, write a builder that
-composes the genes it needs and register it in the `kits` map with the `:flags` it honors.
-`kit` rejects a flag that a kit doesn't list. A brand-new flag also needs parsing in
-`cmd-kit` (`src/mocksys/cli/twins.cljs`), which passes the parsed flags to every builder. `oauth2` and
-`okta` are the worked examples.
+| Gene | Behavior | Required params |
+|---|---|---|
+| `crud-collection` | A REST resource: create / list / get / update / delete, SCIM filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). `rate-limit: {max, window}` adds a per-client budget. | `coll`, `base` |
+| `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Users come from a **seed array** (`seed-name`, `users`) or, with `user-source: {collection, login-field, active-only, claims}`, from a **live collection** with a dynamic picker and `status`-gated issuance. Optional `token-ttl`. | `authz`, `token`, `userinfo` |
+| `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). | none |
+
+Some behavior is not a standalone gene. `mocksys genes` lists where each piece lives:
+
+| Capability | Where it lives |
+|---|---|
+| `rate-limit` | `crud-collection`'s `rate-limit` param, or a hand-written [`limit`](effects.md#limit--rate-limiting). A budget over a virtual-clock window, then `429` + `X-Rate-Limit-*`. |
+| `error-envelope` | The default `not-found` and `invalid-filter` responses of `crud-collection` and `membership` (Okta `errorCode`/`errorSummary`). Override them with those params. |
+| `virtual-clock` | The contract's `state.clock`, or implied by `store.ttl`, `limit`, `sign` or a `now` bind ([effects.md](effects.md#the-virtual-clock)). `mocksys clock` moves it. |
+| `jwt-signing` | The [`sign`](effects.md#sign--issue-a-signed-jwt-non-terminal) verb. `kit okta` wires it with an RSA key generated at kit time, so it is an option only code can pass to `oidc-handshake`, not a YAML param. |
+
+Genes are functions in `src/mocksys/kits.cljs` that return a fragment `{:operations
+:collections :seed}`, registered in `kits/genes` with their `:params`. `compose` merges
+fragments, and earlier entries win. A new gene needs a function and a registry entry. The
+`every-declared-param-changes-the-gene` test fails when a declared param has no effect,
+which keeps `mocksys genes` truthful.
 
 ### Anatomy of the `okta` twin
 

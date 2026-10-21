@@ -14,7 +14,7 @@ Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides
 |---|---|
 | `kit okta [--users FILE.json] [--rate-limit N] [--rate-window S] [--token-ttl S] [--issuer URL] [--signing-key FILE.pem] [--scenario NAME] [--port N]` | Generate an Okta twin (users/groups CRUD + OIDC). `--rate-limit` adds 429s (window `--rate-window`, default 60s); `--token-ttl` expires OIDC tokens on the virtual clock. `--signing-key` signs JWTs with your PEM instead of a key generated per `kit` run; `--issuer` is the issuer used when a request has no `Host`. |
 | `kit oauth2 [--provider github\|codeberg] [--users FILE.json] [--token-ttl S] [--scenario NAME] [--port N]` | Generate an OAuth2 provider twin. `--token-ttl` expires tokens on the virtual clock. A flag the kit can't honor, such as `--rate-limit`, is an error. |
-| `genes` | List the behavioral genes a kit composes, and the kits available. |
+| `genes` | List each gene a contract can name under `genes:`, with its params (`*` = required), plus the capabilities that are built in rather than genes. See [contracts.md](contracts.md#genes). |
 | `conform <name> --corpus FILE [--against URL] [--ignore k1,k2] [--headers] [--port N]` | Replay a corpus at the twin (and, with `--against`, the live service); diff; exit 1 on drift. Omit `--corpus` to replay recorded traffic. See [twins.md](twins.md). |
 | `clock <name> [advance <dur> \| set <ts>]` | Read or move the twin's deterministic virtual clock. `advance 1h`/`30m`/`45s`/`2d`/`<secs>`; `set <epoch\|ISO>`. The twin must be running. See [effects.md](effects.md#the-virtual-clock). |
 
@@ -25,11 +25,11 @@ Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). `MOCKSYS_MB` overrides
 | `new <service/name> [--service S]` | Scaffold a blank `contract.yaml` to hand-author. |
 | `add <name> --request 'METHOD /path' [--status N] [--body FILE \| --text STR] [--header 'K=V,..'] [--when-query 'k=v,present,..'] [--when-header 'k=v,..']` | Append an operation. `--header` sets response headers (e.g. a redirect `Location`); `--when-query`/`--when-header` add request-conditional branching (a bare key = presence, `k=v` = equals). |
 | `import openapi <spec> [--service NAME] [--target URL]` | One scenario per operation, with schemas + named examples and a synthesized service profile. |
-| `examples <name> [--op ID]` | List operations → responses → examples (`[x]` = selected). |
-| `use <name> --op ID --example NAME [--off] [--only]` | (De)select an example. `--only` clears the operation's others first (happy↔error swap). |
+| `examples <name> [--op ID]` | List operations → responses → examples (`[x]` = selected). Gene operations are marked `[gene NAME]`. |
+| `use <name> --op ID --example NAME [--off] [--only]` | (De)select an example. `--only` clears the operation's others first (happy↔error swap). Refuses a gene operation and names the gene. |
 | `fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--malformed-json] [--clear]` | Overlay a transport fault (stored on the contract). |
-| `parameterize <name> --path '/a/{var}/b'` | Loosen matching exact paths to a `{param}` template. |
-| `validate <name>` | Structural + example-vs-schema check. Exit 1 on errors. |
+| `parameterize <name> --path '/a/{var}/b'` | Loosen matching exact paths to a `{param}` template. Refuses when the template would change a gene operation. |
+| `validate <name>` | Structural + example-vs-schema check over the expanded operations; an unknown gene or gene param is an error. Exit 1 on errors. |
 | `compile <name>` | Rebuild `imposter.json` from `contract.yaml` (normally automatic). |
 
 ## Run & verify
