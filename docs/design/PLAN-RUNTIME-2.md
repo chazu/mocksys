@@ -18,8 +18,15 @@ those belong in the interpreter, not in code that E deletes.
 
 **Admin token.** Today any local user can post an imposter, and an imposter can carry
 module code, so any local user can run code as the daemon's owner.
-- At start, before it listens, the daemon writes a random 32-byte token to
-  `$MOCKSYS_HOME/daemon.token`, mode 0600.
+- At start, once it holds its port, the daemon writes a random 32-byte token to
+  `$MOCKSYS_HOME/daemon-<port>.token`, mode 0600, through a rename so a client never
+  reads half a token. One file per port lets two daemons share a store on different
+  admin ports. Writing after the listen means a daemon that loses the port race leaves
+  the running daemon's token alone. No client reads the token before the port answers,
+  so nothing is lost by waiting.
+- A daemon therefore serves one store. A second store in use at the same time needs
+  its own `MOCKSYS_ADMIN_PORT`. In-process test daemons take the token from
+  `runtime/start!`'s result instead of a file.
 - Every admin call except `GET /` needs `Authorization: Bearer <token>`, compared in
   constant time. A missing or wrong token gets 401.
 - `mocksys.mb` reads the token file for every call. A 401 means the daemon on that port
@@ -28,7 +35,8 @@ module code, so any local user can run code as the daemon's owner.
   fails with the same message.
 
 **Recorded-request cap.** An imposter with `recordRequests` keeps the newest N requests,
-default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment.
+default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment (a
+whole number; anything else stops the daemon at start, and the CLI shows the log).
 `numberOfRequests` still counts every request. The full imposter view reports how many
 were dropped. `assert` says when a dropped request could change its answer.
 

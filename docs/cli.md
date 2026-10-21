@@ -6,10 +6,15 @@ orientation. A scenario id is `service/name`. Commands that start a mock recompi
 
 Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`); user kits live in its `kits/`. Commands that serve a mock
 start the mocksys daemon if it is not running; its admin API is `127.0.0.1:2626`, and
-`MOCKSYS_ADMIN_PORT` picks another port. A daemon left running by another mocksys
+`MOCKSYS_ADMIN_PORT` picks another port. The daemon serves the store it was started
+from: it writes an admin token to `$MOCKSYS_HOME/daemon-<port>.token`, and a command run
+with another store, or by another user, fails with an error saying so. Give each store
+you use at the same time its own `MOCKSYS_ADMIN_PORT`. A daemon left running by another mocksys
 version is stopped and replaced, with a line on stderr that names the mocks it was
 serving; run them again. The daemon writes its output to `$MOCKSYS_HOME/daemon.log`,
-and a failed start shows the end of that log. `MOCKSYS_NO_INJECTION=1` refuses
+and a failed start shows the end of that log. Each running mock keeps its newest 10000
+requests; set `MOCKSYS_MAX_RECORDED_REQUESTS` when the daemon starts to change that.
+`MOCKSYS_NO_INJECTION=1` refuses
 stateful scenarios and scenarios that list `modules`.
 
 ## Twins — full clones in one command
@@ -46,8 +51,8 @@ stateful scenarios and scenarios that list `modules`.
 | `env <name> [--json \| --tilt] [--port N] [--env VAR]` | Wire a consumer to the mock. Default: eval-safe `export` lines (`eval "$(mocksys env NAME)"`). `--json`: `{scenario, port, url, <vars>}`. `--tilt`: a Tiltfile `local_resource` (pins a port; doesn't start). |
 | `inspect <name>` | Agent-readable summary: calls, matchers, redactions, volatile fields. Shows friendly `/users/{id}` paths. |
 | `doctor <name> [--fix]` | Lint matcher hygiene / frozen volatile values. `--fix` scrubs the contract's response headers and recompiles. Overfit is only flagged on recorded scenarios. |
-| `requests <name> [--clear]` | What the running mock received (`--clear` resets). |
-| `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss. A gRPC call is `POST /pkg.Service/Method`, as `requests` shows it. |
+| `requests <name> [--clear]` | What the running mock received (`--clear` resets). The mock keeps the newest requests, and the header says how many older ones were dropped. |
+| `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss, saying so when older requests were dropped from the log and the call may have been one of them. A gRPC call is `POST /pkg.Service/Method`, as `requests` shows it. |
 | `ls` | All scenarios + which are live. |
 | `stop <name> \| --all` | Tear down a running scenario (or all). |
 | `daemon stop` | Stop the mocksys daemon. Every mock it serves stops with it. The next command that serves a mock starts a new daemon. |

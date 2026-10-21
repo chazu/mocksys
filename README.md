@@ -50,7 +50,8 @@ share — not a one-off blob:
   the daemon, so mocksys only posts what it compiled from a contract. It rebuilds a
   pulled or unpacked `imposter.json` before use, and contract values reach the
   generated code only as escaped literals. The daemon listens on loopback addresses
-  only, and its admin API refuses browser requests.
+  only, and its admin API refuses browser requests and any call without the token it
+  writes for its own user.
 
 ## Install
 
@@ -71,6 +72,8 @@ npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 Requires **Node 18+** (for global `fetch`).
 `mocksys` starts its daemon for you on first use and leaves it running. The daemon's
 admin API listens on `127.0.0.1:2626`. Set `MOCKSYS_ADMIN_PORT` to use another port.
+The daemon serves the store it started from (it keeps its admin token there), so give
+each store you use at the same time its own `MOCKSYS_ADMIN_PORT`.
 `mocksys daemon stop` stops the daemon and every mock it serves. After an upgrade, the
 first command that serves a mock replaces a daemon from the old version and prints
 which mocks stopped. The daemon logs to `$MOCKSYS_HOME/daemon.log` (else
@@ -240,7 +243,8 @@ what the running twin has already received. Drive the twin toward zero observabl
 ## Shared store + sharing
 
 All scenarios live in one git-backed library at `~/.mocksys` (override with
-`MOCKSYS_HOME`; set it to `./.mocks` to scope mocks to a single project).
+`MOCKSYS_HOME`; set it to `./.mocks` to scope mocks to a single project, with its own
+`MOCKSYS_ADMIN_PORT` if another store's daemon is running).
 
 ```sh
 mocksys home                                 # store path + git status
@@ -272,7 +276,7 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `env <name>` | `eval "$(...)"` — wire a shell to the mock |
 | `inspect <name>` | agent-readable fixture summary |
 | `doctor <name> [--fix]` | lint matchers/volatility; `--fix` cleans in place |
-| `requests <name> [--clear]` | what the running mock received |
+| `requests <name> [--clear]` | what the running mock received (the newest 10000; `MOCKSYS_MAX_RECORDED_REQUESTS` changes that) |
 | `assert <name> --saw 'METHOD /path'` | verify a call happened (exit 1 on miss) |
 | `kit <okta\|oauth2> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
 | `kits` | list the kits, built in and in `$MOCKSYS_HOME/kits`, with their flags |
