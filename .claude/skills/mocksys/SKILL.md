@@ -6,10 +6,11 @@ description: >-
   credentials or network. Use when you need to fake an external dependency: a simple
   fixture, a stateful resource API (CRUD + SCIM-style filtering + pagination), an
   auth handshake (authorize→token→userinfo), rate limiting (429s + X-Rate-Limit-*),
-  or token/session expiry; to assert what your code called; or to validate a mock
-  against the real service. Triggers: "mock the X API", "stub this service", "fake an
-  OAuth/Okta provider", "spin up a mock server", "test against a fake <service>",
-  "record and replay an API", "digital twin of <service>".
+  token/session expiry, or a server-sent event stream or WebSocket; to assert what your
+  code called; or to validate a mock against the real service. Triggers: "mock the X
+  API", "stub this service", "fake an OAuth/Okta provider", "spin up a mock server",
+  "test against a fake <service>", "fake an SSE/WebSocket endpoint", "record and replay
+  an API", "digital twin of <service>".
 ---
 
 # mocksys
@@ -118,6 +119,18 @@ mock serves server reflection, so `grpcurl -plaintext localhost:PORT list` works
 without the proto. `mocksys record <name> --target host:port --proto ./x.proto` records a
 gRPC upstream (unary, server and client streams); `freeze` lifts it to a grpc contract. `run`/`env` print `localhost:PORT`; connect with
 insecure credentials. See `docs/contracts.md#grpc` and `examples/grpc-todos/`.
+
+**Server-sent events and WebSockets.** An effect can end in `sse` (scripted `events`,
+then whatever is published to its `channel`) or `websocket` (scripted `messages`, then
+its `channel`). Each message a client sends on the socket is a request with method
+`MESSAGE`, the upgrade's path, query and headers, and the text as its body, so a
+`request: { method: MESSAGE, path: ..., body: { "$.type": ping } }` operation answers
+it with the usual verbs. A JSON array reply is one outbound message per element; a
+4xx/5xx reply closes the socket with 4000 + status. Any operation pushes to open
+streams with `publish: { channel, data | dataVar, event, id }`, which runs only when the
+request succeeds. `assert --saw 'MESSAGE /path'` checks what a socket sent. Delays are
+wall-clock ms, not the virtual clock. See `docs/effects.md#streams-sse-websocket-and-publish`
+and `examples/chat.yaml`.
 
 **TLS.** When the code under test needs `https://` or a TLS gRPC channel, add `tls: true`
 to the contract. `run` issues the mock a certificate for localhost from mocksys's local

@@ -32,12 +32,12 @@ to a Node script (`out/mocksys.js`). Each module is focused:
 | `cli.*` | One namespace per command group, holding all user-facing output: `cli.record` (init/record/freeze/promote), `cli.serve` (run/env/inspect/doctor/requests/assert/ls/stop/stacks), `cli.twins` (kit/kits/genes/conform/clock), `cli.author` (import/new/add/validate/examples/use/fault/parameterize/compile), `cli.share` (store + pack/unpack), `cli.help` (prime/usage), `cli.util` (arg parsing). |
 | `lifecycle` | A scenario's lifecycle: `compile!` (contract → imposter.json), `ensure-contract!` (lift a legacy imposter), `ensure-running!` (recompile, then post to the daemon), watch mode, port pins. |
 | `contract` | The canonical contract format. `lower` compiles a contract → imposter; `lift` reverse-engineers a contract from a recorded imposter; plus validation, example selection, response templating, path/predicate compilation. |
-| `effect` | The **stateful** layer. The effect language as one table of verbs, each with its field checks and how it runs; `errors` validates an effect and `collection-errors` checks it names only declared collections (the CLI on `lower`/`validate`, the daemon on post), and `run` evaluates one over the imposter's shared `state` object: handshake buckets, resource collections, the virtual clock. That object, its buckets and collection maps, and a request's variables have no prototype, so a name from data is only a key. `scim` parses the SCIM filters of `list`, `find` and `render`, and walks the dotted paths that templates, `find` and `listJoin` read. The agent never writes JavaScript. |
+| `effect` | The **stateful** layer. The effect language as one table of verbs, each with its field checks and how it runs; `errors` validates an effect and `collection-errors` checks it names only declared collections (the CLI on `lower`/`validate`, the daemon on post), and `run` evaluates one over the imposter's shared `state` object: handshake buckets, resource collections, the virtual clock. The `sse` and `websocket` terminals answer with a stream for the server to serve, and `publish` hands events to the subscribers in the imposter's channel map. That object, its buckets and collection maps, the channel map and a request's variables have no prototype, so a name from data is only a key. `scim` parses the SCIM filters of `list`, `find` and `render`, and walks the dotted paths that templates, `find` and `listJoin` read. The agent never writes JavaScript. |
 | `modules` | **Custom verbs.** Resolves a contract's `modules:` against the scenario directory (refusing paths outside it) for `contract/lower`, which never runs them. The daemon loads each CommonJS file afresh with `vm.compileFunction` on every post, never from the require cache, and checks the verbs the imposter calls. |
 | `kits` | **Kits** and composable **genes**. A gene is a parameterized contract fragment (an OIDC handshake, a CRUD resource, an error envelope); a kit composes genes into a full twin. Ships `oauth2` and `okta`. A contract can list genes under `genes:`, and a kit can be a YAML template, built in or in `$MOCKSYS_HOME/kits`. A user kit that ships modules is a directory; `kit` copies them into the scenario. |
 | `conform` | Differential fidelity: replay a request corpus at the twin and (optionally) the live service, then diff status and canonical bodies (`--ignore` keys masked; volatile headers dropped when headers are compared). |
 | `mb` | The admin-API client and daemon lifecycle (spawn `mocksys daemon` when none answers, free-port allocation, imposter CRUD, replayable pull). The name predates the native runtime. |
-| `runtime` | The daemon: the admin API, one HTTP server per imposter, the proxy client for recording, and wire faults. `runtime.imposter` validates a posted imposter and resolves each request (stub choice, responses, behaviors, effects, proxyOnce recording); `runtime.match` evaluates predicates. `runtime.grpc` serves a `protocol: grpc` imposter with grpc-js, turning each call into a request for `runtime.imposter` and its outcome into a reply or a gRPC status; `runtime.grpc-reflection` serves server reflection for it. |
+| `runtime` | The daemon: the admin API, one HTTP server per imposter, the proxy client for recording, and wire faults. `runtime.imposter` validates a posted imposter and resolves each request (stub choice, responses, behaviors, effects, proxyOnce recording); `runtime.match` evaluates predicates. `runtime.stream` serves a stream answer: server-sent events over the response, or a WebSocket (with `ws`) whose inbound messages each go through `runtime.imposter` as a `MESSAGE` request. `runtime.grpc` serves a `protocol: grpc` imposter with grpc-js, turning each call into a request for `runtime.imposter` and its outcome into a reply or a gRPC status; `runtime.grpc-reflection` serves server reflection for it. |
 | `tls` | The local CA in `$MOCKSYS_HOME/tls/` and the certificates it issues (node-forge over keys from node's crypto), a contract's `tls` declaration, and `fetch-own`, which the CLI uses to reach its own HTTPS mocks. |
 | `proto` | A grpc contract's `.proto`, read on the CLI side with protobufjs: imports, the descriptor `compile!` embeds in the imposter, and the rpc checks `validate` runs. |
 | `store` | On-disk layout under `~/.mocksys`: contracts, imposters, drafts, recordings, services, stacks. YAML read/write. |
@@ -157,7 +157,7 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 |---|---|
 | Imposter | `protocol` (`http` or `grpc`), `port`, `name`, `recordRequests`, `stubs`, `modules` (absolute paths), `state` (the settings effects run over), `tls` (`{cert, key}` PEM text); for `grpc`, a `descriptor` (the proto as protobufjs JSON) |
 | Predicates | `equals`, `deepEquals`, `matches`, `exists` over method, path, query, headers; `jsonpath` (plain paths) over the body. Case-insensitive, as in Mountebank. |
-| Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `effect` (an operation's effect map, checked on post like `validate` checks it), `clock` (`true`: the virtual clock's control), `proxy` (`proxyOnce` with `predicateGenerators`; `to` is an origin with no path, query or fragment), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
+| Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `effect` (an operation's effect map, checked on post like `validate` checks it; its answer may be an `sse` or `websocket` stream, in an `http` imposter only), `clock` (`true`: the virtual clock's control), `proxy` (`proxyOnce` with `predicateGenerators`; `to` is an origin with no path, query or fragment), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
 | Behaviors | `wait`, `copy` (regex or jsonpath) |
 | Admin routes | `GET /` (name, version, pid; needs no token), `DELETE /` (stop), `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
 
@@ -201,6 +201,21 @@ HTTP status from 100 to 599`). An imposter response has no form that carries cod
 `inject` is refused as an unsupported field. Set `MOCKSYS_NO_INJECTION=1` to make `run`
 refuse, before compiling anything, a scenario that lists modules, the only code a
 scenario can bring.
+
+**Streams.** An effect that ends in `sse` or `websocket` answers with a stream: the
+interpolated script and a channel name. `runtime.stream` serves it. For SSE, it writes
+`text/event-stream` over the response, then the script, then the channel's events, with
+a keep-alive comment on a timer. For a WebSocket, each imposter's HTTP server takes the
+`upgrade` event, sends the upgrade request through the imposter as a `GET`, and accepts
+it with `ws` only when the answer is a `websocket` stream; any other answer is written
+back as plain HTTP on the socket. Each inbound message then goes through the imposter as
+`MESSAGE <path>` with the upgrade's query and headers, one at a time per socket, so it
+is matched, run and recorded like any request. The reply becomes outbound messages, or a
+close with code 4000 + status. `publish` runs after an effect's terminal and calls each
+subscriber of the channel synchronously. A channel map belongs to the imposter, so
+reposting a scenario starts with none. A client that leaves unsubscribes and clears its
+timers, and an empty channel is deleted. Deleting the imposter destroys its sockets,
+which runs the same cleanup. `ws` runs under node, bun and the bun binary.
 
 **Custom verbs.** The daemon is the only process that runs module code. On each post, it
 loads the imposter's `modules` from disk with `modules/load-verbs` and checks that every

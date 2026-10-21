@@ -220,9 +220,9 @@ as everything else.
   rejected write publishes nothing; it sees the variables the terminal set (`as`).
   An SSE subscriber gets the whole event; a WebSocket subscriber gets the data.
 - **Channels.** Per imposter, a null-prototype map from name to subscribers that the
-  imposter holds next to its `state`; reposting starts empty. A stream subscribes
-  before its headers or its 101 go out, so a client that has its headers misses
-  nothing published after. A closed SSE response or socket unsubscribes and clears
+  imposter holds next to its `state`; reposting starts empty. A stream subscribes in
+  the same event-loop turn that sends its headers or its 101, so a client that has
+  them misses nothing published after. A closed SSE response or socket unsubscribes and clears
   its timers, and an empty channel is removed. Deleting the imposter cuts its sockets,
   which runs the same cleanup.
 - **Recorded.** The SSE GET (with its `Last-Event-ID`), the upgrade GET, every inbound

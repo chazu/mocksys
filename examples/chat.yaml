@@ -15,7 +15,8 @@
 #   curl -X POST localhost:9180/rooms/lobby/messages -d '{"from":"ann","text":"hi"}'
 #   node -e 'const w=new WebSocket("ws://localhost:9180/rooms/lobby/socket");
 #            w.onmessage=e=>console.log(e.data);
-#            w.onopen=()=>w.send(JSON.stringify({type:"say",from:"bo",text:"hey"}))'
+#            w.onopen=()=>w.send(JSON.stringify({type:"say",from:"bo",text:"hey"}));
+#            setTimeout(()=>w.close(),500)'          # the broadcast, then the ack
 #   MOCKSYS_HOME=./.mocks mocksys assert demo/chat --saw 'MESSAGE /rooms/lobby/socket'
 service: demo
 scenario: demo/chat
