@@ -48,6 +48,8 @@
   "What answers on the admin port: :up (the mocksys daemon), :foreign (something
    else), or :down (nothing)."
   []
+  ;; a bad MOCKSYS_ADMIN_PORT must surface, not be read as "down" by the catch below
+  (admin-port)
   (-> (fetch-json "GET" "/")
       (p/then (fn [{:keys [body]}] (if (= "mocksys" (get body "name")) :up :foreign)))
       (p/catch (fn [e] (if (instance? js/SyntaxError e) :foreign :down)))))
