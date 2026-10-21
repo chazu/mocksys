@@ -617,14 +617,23 @@
     :else       x))
 
 (def flag-types
-  "type -> [default-ok? parse]: the types a kit flag can declare. `parse` turns a
-   command-line string into the value, reading a path with `slurp`; it returns
-   ::bad when the string does not parse."
-  {:string  [string? (fn [v _] v)]
-   :number  [number? (fn [v _] (let [n (js/Number v)] (if (or (str/blank? v) (js/isNaN n)) ::bad n)))]
-   :boolean [boolean? (fn [v _] (case v "true" true "false" false ::bad))]
-   :file    [string? (fn [v slurp] (try (slurp v) (catch :default _ ::bad)))]
-   :json    [any? (fn [v slurp] (try (js->clj (js/JSON.parse (slurp v))) (catch :default _ ::bad)))]})
+  "type -> {:fits? :parse :bad}: the types a kit flag can declare. `:fits?` checks
+   a declared default. `:parse` turns a command-line string into the value,
+   reading a path with `slurp`, and returns ::bad when it does not parse; `:bad`
+   then words the error from the flag and the string."
+  {:string  {:fits? string?  :parse (fn [v _] v)}
+   :number  {:fits? number?
+             :parse (fn [v _] (let [n (js/Number v)] (if (or (str/blank? v) (js/isNaN n)) ::bad n)))
+             :bad   #(str %1 " needs a number, got " %2)}
+   :boolean {:fits? boolean?
+             :parse (fn [v _] (case v "true" true "false" false ::bad))
+             :bad   #(str %1 " needs true or false, got " %2)}
+   :file    {:fits? string?
+             :parse (fn [v slurp] (try (slurp v) (catch :default _ ::bad)))
+             :bad   #(str "could not read " %1 " as a file: " %2)}
+   :json    {:fits? any?
+             :parse (fn [v slurp] (try (js->clj (js/JSON.parse (slurp v))) (catch :default _ ::bad)))
+             :bad   #(str "could not read " %1 " as a JSON file: " %2)}})
 
 (defn- inferred-type [default]
   (cond (number? default) :number (boolean? default) :boolean (sequential? default) :json :else :string))
@@ -641,7 +650,7 @@
       (let [extra   (remove #{"default" "type"} (keys spec))
             default (get spec "default")
             t       (if (contains? spec "type") (keyword (str (get spec "type"))) (inferred-type default))
-            [ok?]   (get flag-types t)]
+            ok?     (get-in flag-types [t :fits?])]
         (cond
           (seq extra) (bad (str "unknown key '" (first extra) "' (a declaration has only default and type)"))
           (not ok?)   (bad (str "unknown type '" (name t) "' (types: "
@@ -738,18 +747,14 @@
         (for [[k v] opts
               :let [t (get-in kit [:flags k :type])]
               :when t]
-          (let [flag  (str "--" (name k))
-                fail  #(throw (js/Error. %))
-                value (cond
-                        (and (true? v) (= t :boolean)) true
-                        (true? v)                      (fail (str flag " needs a value"))
-                        :else ((second (get flag-types t)) v slurp))]
+          (let [flag                (str "--" (name k))
+                {:keys [parse bad]} (get flag-types t)
+                value               (cond
+                                      (and (true? v) (= t :boolean)) true
+                                      (true? v) (throw (js/Error. (str flag " needs a value")))
+                                      :else     (parse v slurp))]
             (if (= ::bad value)
-              (fail (case t
-                      :boolean (str flag " needs true or false, got " v)
-                      :number  (str flag " needs a number, got " v)
-                      :file    (str "could not read " flag " as a file: " v)
-                      :json    (str "could not read " flag " as a JSON file: " v)))
+              (throw (js/Error. (bad flag v)))
               [k value])))))
 
 (defn unsupported-flags
