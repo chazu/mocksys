@@ -13,7 +13,9 @@ you use at the same time its own `MOCKSYS_ADMIN_PORT`. A daemon left running by 
 version is stopped and replaced, with a line on stderr that names the mocks it was
 serving; run them again. The daemon writes its output to `$MOCKSYS_HOME/daemon.log`,
 and a failed start shows the end of that log. Each running mock keeps its newest 10000
-requests; set `MOCKSYS_MAX_RECORDED_REQUESTS` when the daemon starts to change that.
+requests. To change that, set `MOCKSYS_MAX_RECORDED_REQUESTS` to a whole number above 0
+on the command that starts the daemon (run `mocksys daemon stop` first); the daemon reads
+it only when it starts, and does not start on 0 or a value that is not a whole number.
 `MOCKSYS_NO_INJECTION=1` refuses
 stateful scenarios and scenarios that list `modules`.
 

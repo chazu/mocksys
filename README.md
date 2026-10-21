@@ -276,7 +276,7 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `env <name>` | `eval "$(...)"` — wire a shell to the mock |
 | `inspect <name>` | agent-readable fixture summary |
 | `doctor <name> [--fix]` | lint matchers/volatility; `--fix` cleans in place |
-| `requests <name> [--clear]` | what the running mock received (the newest 10000; `MOCKSYS_MAX_RECORDED_REQUESTS` changes that) |
+| `requests <name> [--clear]` | what the running mock received (the newest 10000; `MOCKSYS_MAX_RECORDED_REQUESTS`, a whole number above 0, changes that, read when the daemon starts) |
 | `assert <name> --saw 'METHOD /path'` | verify a call happened (exit 1 on miss) |
 | `kit <okta\|oauth2> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
 | `kits` | list the kits, built in and in `$MOCKSYS_HOME/kits`, with their flags |

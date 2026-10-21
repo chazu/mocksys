@@ -101,7 +101,10 @@ a contract lifted from its static responses; any `inject` in it is dropped.
 
 `run` ensures the daemon is up and posts the imposter with `recordRequests=true`
 (so `requests`/`assert`/`conform` have data). Each imposter keeps its newest 10000
-requests, or `MOCKSYS_MAX_RECORDED_REQUESTS` from the daemon's environment.
+requests, or `MOCKSYS_MAX_RECORDED_REQUESTS` from the daemon's environment, read once
+when the daemon starts. It must be a whole number above 0: a mock that records but keeps
+nothing would fail every `assert`, so 0 stops the daemon at start like any other bad
+value.
 `numberOfRequests` counts every request, and `GET /imposters/:port` reports the
 dropped ones as `droppedRequests`. An `assert` that misses says when the call may have
 been dropped. Port resolution order: explicit `--port` >

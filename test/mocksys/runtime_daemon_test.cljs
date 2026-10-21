@@ -386,7 +386,7 @@
       (is (= 10000 (with nil)) "10000 by default")
       (is (= 10000 (with "")))
       (is (= 5 (with "5")))
-      (is (= 0 (with "0")) "0 keeps none")
-      (doseq [bad ["-1" "1.5" "lots"]]
-        (is (= (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number, got " (pr-str bad)) (with bad))))
+      (doseq [bad ["0" "-1" "1.5" "lots"]]
+        (is (= (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number above 0, got " (pr-str bad)) (with bad))
+            "0 is refused too: a mock that records keeps at least one request"))
       (finally (if (nil? prev) (js-delete env "MOCKSYS_MAX_RECORDED_REQUESTS") (set! (.-MOCKSYS_MAX_RECORDED_REQUESTS env) prev))))))

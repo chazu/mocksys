@@ -303,13 +303,14 @@
 
 (defn max-recorded-requests
   "How many requests each imposter keeps: $MOCKSYS_MAX_RECORDED_REQUESTS, else
-   10000."
+   10000. 0 is refused rather than read as \"keep none\": a mock that records and
+   keeps nothing would fail every assert; turn recordRequests off instead."
   []
   (let [v (.-MOCKSYS_MAX_RECORDED_REQUESTS js/process.env)]
     (if (and v (not= v ""))
-      (if (re-matches #"\d+" v)
+      (if (and (re-matches #"\d+" v) (pos? (js/parseInt v 10)))
         (js/parseInt v 10)
-        (throw (js/Error. (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number, got " (pr-str v)))))
+        (throw (js/Error. (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number above 0, got " (pr-str v)))))
       imposter/default-max-requests)))
 
 (defn- write-token!

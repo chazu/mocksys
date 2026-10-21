@@ -134,8 +134,10 @@ mocksys clock <twin> advance 1h                                    # move the de
 - **Quote any contract path containing `{param}`**: `path: "/users/{id}"` (unquoted YAML
   flow-parsing mis-reads `{...}` as a map).
 - `assert` / `validate` / `conform` exit non-zero on failure — they drop into CI.
-  A mock keeps only its newest 10000 requests (`MOCKSYS_MAX_RECORDED_REQUESTS`); run
-  `mocksys requests <name> --clear` before the calls you assert on.
+  A mock keeps only its newest 10000 requests; run `mocksys requests <name> --clear`
+  before the calls you assert on. `MOCKSYS_MAX_RECORDED_REQUESTS` (a whole number above
+  0) changes the limit. The daemon reads it when it starts, so run `mocksys daemon stop`
+  first, then set it on the next command.
 - `run`/`env` print the port; `eval "$(mocksys env <name>)"` wires a shell to it.
 
 ## Deeper references (read on demand)

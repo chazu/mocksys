@@ -35,8 +35,11 @@ module code, so any local user can run code as the daemon's owner.
   fails with the same message.
 
 **Recorded-request cap.** An imposter with `recordRequests` keeps the newest N requests,
-default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment (a
-whole number; anything else stops the daemon at start, and the CLI shows the log).
+default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment and
+read once at start (a whole number above 0; anything else stops the daemon at start, and
+the CLI shows the log). 0 is refused rather than read as "keep none": a mock that records
+and keeps nothing fails every `assert`, and an imposter that should keep nothing already
+says so with `recordRequests: false`.
 `numberOfRequests` still counts every request. The full imposter view reports how many
 were dropped. `assert` says when a dropped request could change its answer.
 
