@@ -160,6 +160,8 @@ rpc() { node "$G/client.js" "localhost:$GP" "$@" || true; }
 check "GetTodo reads a seeded todo" "Write the proto" "$(rpc GetTodo '{"id":"t1"}' | json_field '.title')"
 tid="$(rpc CreateTodo '{"title":"ship grpc"}' | json_field '.id')"
 check "GetTodo reads what CreateTodo stored" "ship grpc" "$(rpc GetTodo "{\"id\":\"$tid\"}" | json_field '.title')"
+check "UpdateTodo changes the field it sets" "Rewrite the proto" "$(rpc UpdateTodo '{"id":"t1","title":"Rewrite the proto"}' | json_field '.title')"
+check "and keeps the ones it does not" true "$(rpc GetTodo '{"id":"t1"}' | json_field '.done')"
 check "a miss is NOT_FOUND" '{"code":"NOT_FOUND","details":"no todo nope"}' "$(rpc GetTodo '{"id":"nope"}')"
 check "ListTodos fills the repeated field" 2 "$(rpc ListTodos '{}' | json_field '.todos.length')"
 check "ListTodos filters" "$tid" "$(rpc ListTodos '{"filter":"done eq false"}' | json_field '.todos[0].id')"

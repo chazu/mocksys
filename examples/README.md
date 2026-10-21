@@ -10,7 +10,7 @@ Runnable contracts and a conform corpus that back the
 | [`login-throttle.yaml`](login-throttle.yaml) | The three **time-aware primitives** by hand: a `limit` (rate limit → 429), `store.ttl` (an expiring session token), and `state.clock` (the deterministic virtual clock). |
 | [`directory.yaml`](directory.yaml)           | A twin built **only from genes**: `crud-collection` for users and groups plus `membership`, with no hand-written operations.                                              |
 | [`kits/directory.yaml`](kits/directory.yaml) | A **user kit**: the directory twin as a template with flags (`--users-base`, `--rate-limit`, ...). Copy it to `$MOCKSYS_HOME/kits/` and run `mocksys kit directory`. |
-| [`grpc-todos/`](grpc-todos)                  | A stateful **gRPC** twin of `todo.proto`: create, get (`NOT_FOUND` on a miss), filtered list, and an explicit `grpcCode`. `client.js` calls it with grpc-js.                     |
+| [`grpc-todos/`](grpc-todos)                  | A stateful **gRPC** twin of `todo.proto`: create, get (`NOT_FOUND` on a miss), an update that keeps the fields it does not set, filtered list, and an explicit `grpcCode`. `client.js` calls it with grpc-js.                     |
 | [`okta-corpus.json`](okta-corpus.json)       | A request corpus for `mocksys conform` — golden expectations for the Okta twin.                                                                                          |
 
 ## Quick start
