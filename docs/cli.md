@@ -6,8 +6,11 @@ orientation. A scenario id is `service/name`. Commands that start a mock recompi
 
 Global: the store is `$MOCKSYS_HOME` (else `~/.mocksys`). Commands that serve a mock
 start the mocksys daemon if it is not running; its admin API is `127.0.0.1:2626`, and
-`MOCKSYS_ADMIN_PORT` picks another port. `MOCKSYS_NO_INJECTION=1` refuses stateful
-scenarios.
+`MOCKSYS_ADMIN_PORT` picks another port. A daemon left running by another mocksys
+version is stopped and replaced, with a line on stderr that names the mocks it was
+serving; run them again. The daemon writes its output to `$MOCKSYS_HOME/daemon.log`,
+and a failed start shows the end of that log. `MOCKSYS_NO_INJECTION=1` refuses
+stateful scenarios.
 
 ## Twins — full clones in one command
 
@@ -45,6 +48,7 @@ scenarios.
 | `assert <name> --saw 'METHOD /path'` | Verify a call happened (path may use `*`). Exit 1 on miss. |
 | `ls` | All scenarios + which are live. |
 | `stop <name> \| --all` | Tear down a running scenario (or all). |
+| `daemon stop` | Stop the mocksys daemon. Every mock it serves stops with it. The next command that serves a mock starts a new daemon. |
 
 ## Stacks — bring up a named set together
 

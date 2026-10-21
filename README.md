@@ -69,6 +69,10 @@ npm install -g mocksys      # ships prebuilt JS — no JVM needed to install
 Requires **Node 18+** (for global `fetch`).
 `mocksys` starts its daemon for you on first use and leaves it running. The daemon's
 admin API listens on `127.0.0.1:2626`. Set `MOCKSYS_ADMIN_PORT` to use another port.
+`mocksys daemon stop` stops the daemon and every mock it serves. After an upgrade, the
+first command that serves a mock replaces a daemon from the old version and prints
+which mocks stopped. The daemon logs to `$MOCKSYS_HOME/daemon.log` (else
+`~/.mocksys/daemon.log`).
 
 ## Develop / build
 
@@ -271,6 +275,7 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `parameterize <name> --path '/a/{var}/b'` | loosen exact paths to templates |
 | `pack <name> [--out FILE] \| --stdout` / `unpack <file>` | portable bundles |
 | `ls` / `stop <name> \| --all` | catalog of scenarios / tear down |
+| `daemon stop` | stop the daemon and every mock it serves |
 | `stack <name> <scenario>...` / `up <stack>` / `down <stack>` | define a named set of scenarios / bring it all up or down |
 | `rm <scenario\|service>` (alias `delete`) | delete from the store (stops it if live; commits the removal) |
 | `status` / `log [--n N]` | uncommitted changes / recent store history |

@@ -10,13 +10,25 @@
             [mocksys.service :as service]
             [mocksys.lifecycle :as lifecycle]
             [mocksys.runtime :as runtime]
+            [mocksys.version :refer [version]]
             [mocksys.cli.util :refer [die env-vars-for running-imposter]]))
 
 (defn cmd-daemon
-  "Run the runtime in the foreground (hidden; `mb/ensure-up!` spawns it detached)."
-  [_]
-  (p/let [{:keys [port]} (runtime/start! {:host "127.0.0.1" :port (mb/admin-port)})]
-    (println (str "mocksys daemon on http://127.0.0.1:" port))))
+  "`daemon` runs the runtime in the foreground (`mb/ensure-up!` spawns it detached);
+   `daemon stop` stops it, and every mock it serves."
+  [{:keys [pos]}]
+  (case (first pos)
+    nil    (p/let [{:keys [port]} (runtime/start! {:host    "127.0.0.1"
+                                                   :port    (mb/admin-port)
+                                                   :on-stop #(js/process.exit 0)})]
+             (println (str "mocksys " version " daemon on http://127.0.0.1:" port " (pid " (.-pid js/process) ")")))
+    "stop" (p/let [mocks (mb/stop-daemon!)]
+             (println (cond
+                        (nil? mocks)   (str "no mocksys daemon is running on 127.0.0.1:" (mb/admin-port))
+                        (empty? mocks) "■ stopped the mocksys daemon"
+                        :else          (str "■ stopped the mocksys daemon and its " (count mocks) " mock(s): "
+                                            (str/join ", " (keep :name mocks))))))
+    (die (str "unknown daemon command " (pr-str (first pos)) "; did you mean `mocksys daemon stop`?"))))
 
 (defn cmd-run [{:keys [pos opts]}]
   (let [scenario (first pos)]

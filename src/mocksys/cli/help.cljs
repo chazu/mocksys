@@ -74,6 +74,7 @@
      "  mocksys requests <name>    # what the running mock actually received"
      "  mocksys ls                 # all scenarios + which are live"
      "  mocksys stop <name>        # or --all"
+     "  mocksys daemon stop        # stop the daemon (and every running mock)"
      ""
      "## Store + sharing"
      "All scenarios live in one shared library at ~/.mocksys (a git repo; override"
@@ -122,6 +123,7 @@
   (println "  mocksys assert <name> --saw 'METHOD /path'")
   (println "  mocksys ls")
   (println "  mocksys stop <name> | --all")
+  (println "  mocksys daemon stop                             stop the daemon and every mock it serves")
   (println "  mocksys rm <scenario|service>                   delete from the store (stops it if live)")
   (println)
   (println "  SEED FROM LIVE TRAFFIC (optional — needs real access)")
