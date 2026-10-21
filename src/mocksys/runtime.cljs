@@ -278,10 +278,14 @@
   [registry imposter-opts token stop!]
   (fn [^js node-req ^js res]
     (let [hs  (.-headers node-req)
-          url (js/URL. (.-url node-req) "http://localhost")]
+          url (try (js/URL. (.-url node-req) "http://localhost") (catch :default _ nil))]
       (cond
         (or (aget hs "origin") (not (local-host? (aget hs "host"))))
         (write-json! res 403 (error-body "forbidden" "the admin API only serves local, non-browser clients"))
+
+        (nil? url)
+        (do (.resume node-req)
+            (write-json! res 400 (error-body "bad data" (str "not a valid URL: " (.-url node-req)))))
 
         (and (not (and (= "GET" (.-method node-req)) (= "/" (.-pathname url))))
              (not (authorized? token (aget hs "authorization"))))

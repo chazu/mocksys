@@ -305,6 +305,30 @@
        (is (re-matches #"[0-9a-f]{64}" (:token d)) "the token is 32 random bytes")
        ((:stop! d))))))
 
+(defn- status-line
+  "Send `method` `target` over a bare socket, so the target reaches the server
+   unparsed, and resolve the response's status line, or :no-response."
+  [port method target]
+  (p/race
+   [(js/Promise.
+     (fn [resolve]
+       (let [^js sock (.connect net #js {:host "127.0.0.1" :port port})
+             chunks   #js []]
+         (.on sock "data" #(.push chunks %))
+         (.on sock "error" (fn [_]))
+         (.on sock "close" #(resolve (or (first (str/split-lines (.toString (js/Buffer.concat chunks) "utf8")))
+                                         :no-response)))
+         (.write sock (str method " " target " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")))))
+    (p/delay 2000 :no-response)]))
+
+(deftest admin-answers-a-malformed-url
+  (async done
+    (settle done
+     (p/let [d     (runtime/start! {:host "127.0.0.1" :port 0})
+             lines (p/all (for [t ["//" "///" "//[" "//a:b"]] (status-line (:port d) "GET" t)))]
+       (is (= (repeat 4 "HTTP/1.1 400 Bad Request") lines) "a URL that does not parse is a 400, not a hung request")
+       ((:stop! d))))))
+
 (defn- tmp-dir [] (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-token-")))
 
 (defn- mode-of [file] (bit-and (.-mode (fs/statSync file)) 8r777))
