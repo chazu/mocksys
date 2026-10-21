@@ -1,14 +1,14 @@
 (ns mocksys.harness
-  "Test-only helpers. Compile an operation's `effect` to its Mountebank injection
-   (via `inject/gen`), eval that JS source into a live function, and run it against
-   a fake request over a persistent `state` object. Tests assert on the *runtime
-   behavior* of the generated JS — not on the CLJS emit strings — so they catch the
-   bugs that actually reach a served response.
+  "Test-only helpers. Compile an operation's `effect` to its injection (via
+   `inject/gen`), turn that JS source into a live function, and run it against a fake
+   request over a persistent `state` object. Tests assert on the *runtime behavior*
+   of the generated JS, not on the CLJS emit strings, so they catch the bugs that
+   actually reach a served response.
 
-   `eval` runs in this module's scope, exactly as Mountebank's responseResolver
-   does at serve time (see the mocksys-mb-inject-require note), so `require` and the
-   Node built-ins the prelude/`sign` rely on are reachable."
+   Compiling and calling go through the native runtime's own injection runner, so a
+   test exercises the same code path (and the same `require`) as a served request."
   (:require [mocksys.inject :as inject]
+            [mocksys.runtime.imposter :as imposter]
             [clojure.string :as str]))
 
 (defn compile-fn
@@ -16,7 +16,7 @@
    `opts` may carry :seed, :collections, :clock-start, :issuer and :random-seed
    (all optional)."
   [op opts]
-  (js/eval (str "(" (inject/gen op opts) ")")))
+  (imposter/compile-injection (inject/gen op opts)))
 
 (defn fresh-state
   "A blank per-imposter state object. Pass the SAME one across several `run` calls
@@ -24,17 +24,17 @@
   []
   #js {})
 
-(defn- req->js
-  "Build the Mountebank `request` object the injection reads. `req` is a map with
-   optional :method :path :query :headers :body. A map :body stands in for a parsed
-   JSON body; a string :body stands in for a raw (e.g. form-encoded) body."
+(defn- request-of
+  "The request map the runtime hands an injection. `req` has optional :method :path
+   :query :headers :body. A map :body is sent as JSON text and a string :body as is
+   (e.g. form-encoded), since a served request's body is always a string."
   [req]
-  (clj->js
-   {"method"  (get req :method "GET")
-    "path"    (get req :path "/")
-    "query"   (get req :query {})
-    "headers" (get req :headers {})
-    "body"    (get req :body)}))
+  (let [body (get req :body)]
+    {"method"  (get req :method "GET")
+     "path"    (get req :path "/")
+     "query"   (get req :query {})
+     "headers" (get req :headers {})
+     "body"    (cond (map? body) (js/JSON.stringify (clj->js body)) (nil? body) "" :else body)}))
 
 (defn run
   "Compile `op` to its injection and invoke it once against `req` over `state`.
@@ -43,11 +43,10 @@
   ([op req] (run op req {} (fresh-state)))
   ([op req opts] (run op req opts (fresh-state)))
   ([op req opts state]
-   (let [f       (compile-fn op opts)
-         r       (.call f nil (req->js req) state nil)
-         headers (js->clj (.-headers r))
-         body    (.-body r)
+   (let [r       (imposter/run-injection (compile-fn op opts) (request-of req) state)
+         headers (get r "headers")
+         body    (get r "body")
          ct      (get headers "Content-Type" "")
          json    (when (and (string? body) (seq body) (str/includes? ct "json"))
                    (try (js->clj (js/JSON.parse body)) (catch :default _ nil)))]
-     {:status (.-statusCode r) :headers headers :body body :json json})))
+     {:status (get r "statusCode") :headers headers :body body :json json})))
