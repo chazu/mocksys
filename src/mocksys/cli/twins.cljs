@@ -152,7 +152,9 @@
               [--issuer URL] [--signing-key FILE.pem] [--scenario NAME] [--port N]
      kit oauth2 [--provider github|codeberg] [--users FILE.json] [--token-ttl S]
                 [--scenario NAME] [--port N]
-     kit <name> [--<flag> VALUE ...] [--scenario NAME] [--port N]"
+     kit <name> [--<flag> VALUE ...] [--scenario NAME] [--port N] [--force]
+   A directory kit's modules are copied into the scenario. A module there that
+   differs from the kit's copy stops the kit before it writes, unless --force."
   [{:keys [pos opts]}]
   (let [kind     (first pos)
         registry (load-kits)

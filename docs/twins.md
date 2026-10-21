@@ -49,8 +49,9 @@ the following:
   before gene operations. `add` picks an id that no gene operation uses, and `use` works on
   the new operation.
 
-`kit` rejects any option the kit does not declare, apart from `--scenario` and `--port`.
-`mocksys kits` lists every kit with its flags and their defaults.
+`kit` rejects any option the kit does not declare, apart from `--scenario`, `--port` and
+`--force`. `mocksys kits` lists every kit with its flags and their defaults, and marks
+each kit that [ships modules](#kits-that-ship-modules).
 
 ### Writing a kit
 
@@ -100,12 +101,54 @@ contract:                  # any contract; usually a list of genes
   `summary` in the template, the kit's `doc` is used. `contract.yaml` keeps the template's
   `genes:` form.
 
-Put your kits in `$MOCKSYS_HOME/kits/`, as `*.yaml` or `*.yml` files. A kit without
-`name` is named after its file. A user kit with a built-in's name replaces the built-in,
-and `kit` and `kits` print a warning saying so. When two user files declare one name, the
-file that sorts last wins, and the warning names both files. A kit file that cannot be
-read or parsed is skipped with a warning.
-[`examples/kits/directory.yaml`](../examples/kits/directory.yaml) is a complete user kit.
+Put your kits in `$MOCKSYS_HOME/kits/`, as `*.yaml` or `*.yml` files, or as a directory
+`<name>/kit.yaml` with the files the kit ships beside it. A kit without `name` is named
+after its file, or after its directory. A user kit with a built-in's name replaces the
+built-in, and `kit` and `kits` print a warning saying so. When two user kits declare one
+name, the one that sorts last wins, and the warning names both files. A kit file that
+cannot be read or parsed is skipped with a warning, and so is a directory without a
+`kit.yaml`. [`examples/kits/directory.yaml`](../examples/kits/directory.yaml) is a
+complete user kit.
+
+### Kits that ship modules
+
+A kit whose contract calls [custom verbs](effects.md#custom-verbs-call) ships its modules. Such
+a kit must be a directory, because the modules need a place beside the kit:
+
+```
+$MOCKSYS_HOME/kits/webhooks/
+  kit.yaml      # contract: { modules: [./verbs.js], operations: [...] }
+  verbs.js
+```
+
+- The paths under the template's `modules:` are relative to the kit directory. Each must
+  be a file inside it, after following symlinks.
+- `kit` copies each module into the scenario directory at the same relative path. A
+  module at `lib/verbs.js` in the kit lands at `<scenario>/lib/verbs.js`. The scenario
+  stays one directory, so `pack`, `publish` and `push` carry its modules.
+- `kit` checks everything before it writes anything: the contract, each module path, and
+  each place a module will be copied to. It refuses to write through a symlink that leads
+  out of the scenario directory.
+- `kit` never runs a module. It prints the same notice `unpack` prints: the scenario runs
+  JavaScript in the daemon when you `run` it.
+- A single-file kit that lists `modules:` is skipped, with a warning that names the
+  directory to move it to.
+
+**Running `kit` again.** `kit` rewrites `contract.yaml` on every run, so new flag values
+take effect. A module is different, because no flag changes it. A module that matches the
+kit's copy is left alone. A module that differs was most likely edited by hand, so `kit`
+stops and writes nothing. Pass `--force` to replace it with the kit's copy, or use
+`--scenario NAME` to generate a separate scenario. The edits you keep in the scenario are
+the ones `mocksys run` loads.
+
+[`examples/kits/webhooks/`](../examples/kits/webhooks/) is a directory kit that ships the
+signature-checking verb from the webhooks example:
+
+```sh
+mkdir -p "$MOCKSYS_HOME/kits" && cp -R examples/kits/webhooks "$MOCKSYS_HOME/kits/"
+mocksys kit webhooks --secret whsec_mine --port 9150
+mocksys run webhooks/webhooks
+```
 
 The built-in `oauth2` kit is a YAML file (`src/mocksys/kits/oauth2.yaml`), inlined into the
 CLI at build time. Its provider-shaped paths (`/github/login/oauth/...`), default accounts

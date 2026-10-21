@@ -54,6 +54,9 @@ eval "$(mocksys env okta/okta)"         # exports BASE_URL=http://localhost:9200
 every kit with its flags; `mocksys genes` lists the reusable genes a kit composes, with
 their params. A kit is a YAML file (a contract template plus flags with defaults); drop
 your own in `$MOCKSYS_HOME/kits/` and `mocksys kit <name>` uses it (see `docs/twins.md`).
+A kit that ships custom-verb modules is a directory, `kits/<name>/kit.yaml` with the
+modules beside it; `kit` copies them into the scenario, and refuses to overwrite one you
+edited unless you pass `--force` (`examples/kits/webhooks/`).
 
 ## Authoring your own (no kit)
 
