@@ -49,6 +49,10 @@
                          (on "kv.Store/Watch" [(by-key "none")] (ok []))
                          (on "kv.Store/Watch" [(by-key "gone")]
                              {"is" {"statusCode" 404 "body" {"message" "no key gone"}}})
+                         (on "kv.Store/Watch" [(by-key "partway")]
+                             {"is" {"statusCode" 503 "body" {"grpcCode" "UNAVAILABLE" "message" "lost" "messages" [{"key" "p1"}]}}})
+                         (on "kv.Store/Watch" [(by-key "partbad")]
+                             {"is" {"statusCode" 503 "body" {"message" "lost" "messages" [{"key" "p1" "version" "x"}]}}})
                          (on "kv.Store/Watch" [(by-key "bad")]
                              (ok [{"key" "fine"} {"key" "b" "version" "not a number"}]))
                          (on "kv.Store/Watch" [(by-key "text")] (ok "not json"))])
@@ -57,6 +61,8 @@
                 none (fx/server-stream c "Watch" {:key "none"})
                 miss (fx/server-stream c "Watch" {:key "unmatched"})
                 gone (fx/server-stream c "Watch" {:key "gone"})
+                part (fx/server-stream c "Watch" {:key "partway"})
+                pbad (fx/server-stream c "Watch" {:key "partbad"})
                 bad  (fx/server-stream c "Watch" {:key "bad"})
                 text (fx/server-stream c "Watch" {:key "text"})
                 seen (requests admin port)]
@@ -74,6 +80,9 @@
             (is (= [[] nil] [(:messages miss) (:code miss)])))
           (testing "an error status ends the stream with that error, after no messages"
             (is (= [[] (codes "NOT_FOUND") "no key gone"] [(:messages gone) (:code gone) (:details gone)])))
+          (testing "an error body's messages are sent before the error"
+            (is (= [["p1"] (codes "UNAVAILABLE") "lost"] [(mapv #(get % "key") (:messages part)) (:code part) (:details part)]))
+            (is (= [[] (codes "INTERNAL")] [(:messages pbad) (:code pbad)]) "and checked as a reply's are"))
           (testing "a message that does not fit the reply type fails the stream before any is sent"
             (is (= [] (:messages bad)))
             (is (= (codes "INTERNAL") (:code bad)))
