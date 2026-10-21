@@ -302,30 +302,34 @@
       (seq copies) (update "behaviors" (fnil into []) copies))))
 
 (defn- check-calls!
-  "Throw unless every `call` in `op` names a verb in `exported` (a set)."
-  [op exported]
+  "Throw unless every `call` in `op` is well formed. Whether its verb exists is left
+   to the daemon, the only process that runs module code."
+  [op modules?]
   (doseq [c (inject/calls-of (get op "effect"))
-          :let [verb (get c "verb")]]
-    (cond
-      (not (and (map? c) (string? verb)))
-      (throw (js/Error. (str "call needs a `verb` name, got " (pr-str c))))
-      (empty? exported)
-      (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`")))
-      (not (contains? exported verb))
-      (throw (js/Error. (str "call: verb '" verb "' is not exported by the modules (they export "
-                             (str/join ", " (sort exported)) ")"))))))
+          :let [verb (when (map? c) (get c "verb"))
+                bad! #(throw (js/Error. (str "call: verb '" verb "': " %)))]]
+    (when-not (and (string? verb) (seq verb))
+      (throw (js/Error. "call needs a `verb` name")))
+    (when-let [extra (seq (remove #{"verb" "args" "as"} (keys c)))]
+      (bad! (str "unknown key(s) " (str/join ", " (sort extra)) " (use verb, args, as)")))
+    (when-not ((some-fn nil? map?) (get c "args")) (bad! "`args` must be an object"))
+    (when-not ((some-fn nil? string?) (get c "as")) (bad! "`as` must be a variable name"))
+    (when-not modules?
+      (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`"))))))
 
 (defn lower
   "Compile a contract into an imposter for the mocksys daemon. `port` is carried through if a
    prior artifact had one (ensure-running! reassigns at run time regardless). `dir` is the
    scenario directory that `modules` paths resolve against; the imposter records them
-   absolute."
+   absolute, with `calls`, the verbs its operations name. Lowering never runs a
+   module: the daemon loads them and checks `calls` when the imposter is posted."
   ([contract] (lower contract nil nil))
   ([contract port] (lower contract port nil))
   ([contract port dir]
    (let [contract (expand contract)
          mods     (modules/resolve-paths dir (get contract "modules"))
-         exported (set (js-keys (modules/load-verbs (map vector (get contract "modules") mods))))
+         calls    (into [] (comp (mapcat #(inject/calls-of (get % "effect"))) (keep #(get % "verb")) (distinct))
+                        (get contract "operations"))
          fault (get contract "fault")
          seed  (get contract "seed")
          ;; collection declarations ({name {idField, seed}}) — resolve each `seed`
@@ -338,7 +342,7 @@
          issuer      (get contract "issuer")
          stubs (mapv (fn [op]
                        (try
-                         (check-calls! op exported)
+                         (check-calls! op (seq mods))
                          {"predicates" (predicates-for (get op "request"))
                           "responses"
                           (if (inject/stateful? op)
@@ -356,7 +360,8 @@
                  clock? (conj (inject/clock-control-stub clock-start)))]
      (cond-> {"protocol" "http" "stubs" stubs "name" (get contract "scenario")}
        port        (assoc "port" port)
-       (seq mods)  (assoc "modules" mods)))))
+       (seq mods)  (assoc "modules" mods)
+       (seq calls) (assoc "calls" calls)))))
 
 ;; --- lift: recorded imposter -> contract ----------------------------------
 

@@ -31,7 +31,7 @@
         (println (str "  run it with:  mocksys run " n))
         (when-let [ms (seq (get (try (store/read-contract n) (catch :default _ nil)) "modules"))]
           (println (str "  ! " n " runs JavaScript from its modules (" (str/join ", " ms)
-                        "); read them before you run it")))))))
+                        ") in the mocksys daemon when you `run` it; read them first")))))))
 
 (defn cmd-home [_]
   (let [{:keys [root repo? branch remote dirty?]} (git/info)]

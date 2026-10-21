@@ -1,8 +1,9 @@
 (ns mocksys.modules
   "Custom verbs: the CommonJS files a contract lists under `modules:`. A module sets
   `module.exports = { verbs: { name(ctx) { ... } } }` and an effect runs a verb with
-  `call`. `lower` resolves the paths and checks the verbs; the daemon loads the files
-  again on each post and hands the verbs to the generated injections."
+  `call`. The CLI only resolves the paths and never runs a module. The daemon loads
+  the files on each post, checks the verbs the imposter calls, and hands them to the
+  generated injections."
   (:require [clojure.string :as str]
             ["node:fs" :as fs]
             ["node:path" :as path]
@@ -60,8 +61,9 @@
 
 (defn load-verbs
   "Every verb the modules export, as one JS object of name -> function. `modules` is
-   [[label file] ...]; an error names the module by its label."
-  [modules]
+   [[label file] ...]; an error names the module by its label. Throws unless each verb
+   named in `calls` is exported."
+  [modules calls]
   (let [verbs (js/Object.create nil)]
     (reduce (fn [owners [label file]]
               (let [vs (verbs-of label file)]
@@ -74,4 +76,11 @@
                         (js-keys vs))))
             {}
             modules)
+    (doseq [verb calls
+            :when (not (fn? (aget verbs verb)))]
+      (throw (js/Error. (str "call: verb '" verb "' "
+                             (if (seq modules)
+                               (str "is not exported by the modules (they export "
+                                    (str/join ", " (sort (js-keys verbs))) ")")
+                               "needs a module that exports it; list one under `modules:`")))))
     verbs))

@@ -3,8 +3,9 @@
   of Mountebank's imposter format that mocksys emits, plus its live state.
 
   The inventory, and nothing else:
-    imposter   protocol http, port, name, recordRequests, stubs, and modules (absolute
-               paths of CommonJS files whose `verbs` the injections can call)
+    imposter   protocol http, port, name, recordRequests, stubs, modules (absolute
+               paths of CommonJS files whose `verbs` the injections can call) and
+               calls (the verb names the injections call, checked on create)
     stub       predicates (see mocksys.runtime.match), responses
     response   exactly one of
                  is      {statusCode headers body _mode}
@@ -137,10 +138,12 @@
 
 (defn- validate! [spec]
   (when-not (map? spec) (bad "" "an imposter must be a JSON object"))
-  (only-keys! "" spec #{"protocol" "port" "name" "recordRequests" "stubs" "modules"})
+  (only-keys! "" spec #{"protocol" "port" "name" "recordRequests" "stubs" "modules" "calls"})
   (when-not ((some-fn nil? #(and (vector? %) (every? (fn [m] (and (string? m) (path/isAbsolute m))) %)))
              (get spec "modules"))
     (bad "" "modules must be absolute paths"))
+  (when-not ((some-fn nil? #(and (vector? %) (every? string? %))) (get spec "calls"))
+    (bad "" "calls must be an array of verb names"))
   (when-not (= "http" (get spec "protocol"))
     (bad "" (str "unsupported protocol " (pr-str (get spec "protocol")) " (only http)")))
   (let [port (get spec "port")]
@@ -167,9 +170,10 @@
 
 (defn- verbs-of
   "The custom verbs of the spec's modules, read from disk on every post so an edited
-   module takes effect when the scenario is run again."
+   module takes effect when the scenario is run again. A verb in `calls` that no
+   module exports fails the post."
   [spec]
-  (try (modules/load-verbs (map vector (get spec "modules") (get spec "modules")))
+  (try (modules/load-verbs (map vector (get spec "modules") (get spec "modules")) (get spec "calls"))
        (catch :default e (bad "" (ex-message e)))))
 
 (defn create

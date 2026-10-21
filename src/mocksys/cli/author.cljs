@@ -81,6 +81,8 @@
       (doseq [e errors]   (println (str "  ✗ " e)))
       (when (and (empty? errors) (empty? warnings))
         (println (str "  ✓ valid — " (count (get (contract/expand c) "operations")) " operation(s)")))
+      (when (seq (get c "modules"))
+        (println "  · verbs are checked when the scenario runs: only the daemon runs module code"))
       (when (seq errors)
         (binding [*print-fn* *print-err-fn*] (println (str (count errors) " error(s)")))
         (js/process.exit 1)))))
