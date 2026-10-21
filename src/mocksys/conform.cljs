@@ -48,7 +48,7 @@
   (let [json? (and (some? body) (not (string? body)))
         hdrs  (cond-> (or headers {})
                 json? (assoc "Content-Type" "application/json"))
-        opts  #js {:method (or method "GET") :headers (clj->js hdrs)}]
+        opts  #js {:method (or method "GET") :headers (clj->js hdrs) :redirect "manual"}]
     (when (some? body)
       (set! (.-body opts) (if (string? body) body (js/JSON.stringify (clj->js body)))))
     (p/let [res  (js/fetch (str base path) opts)
