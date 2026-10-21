@@ -4,7 +4,8 @@
   through `mocksys.runtime.imposter`. The admin routes are exactly the ones
   `mocksys.mb` calls:
 
-    GET    /                                  identify the daemon
+    GET    /                                  identify the daemon: {name version pid}
+    DELETE /                                  stop every imposter and the admin API
     GET    /imposters                         list [{protocol port name numberOfRequests}]
     POST   /imposters                         create (201), or 400 with {errors}
     GET    /imposters/:port                   full, or ?replayable=true&removeProxies=true
@@ -14,7 +15,8 @@
             [clojure.string :as str]
             ["node:http" :as http]
             ["node:https" :as https]
-            [mocksys.runtime.imposter :as imposter]))
+            [mocksys.runtime.imposter :as imposter]
+            [mocksys.version :refer [version]]))
 
 (def identity-name "mocksys")
 
@@ -218,15 +220,19 @@
     [200 {}]))
 
 (defn- route
-  "[status body] for one admin call."
-  [registry method path query body]
+  "[status body] for one admin call, or [status body after] where `after` runs once
+   the response is sent."
+  [registry stop! method path query body]
   (let [segs (vec (remove str/blank? (str/split path #"/")))
         port (when (= "imposters" (first segs)) (some-> (get segs 1) js/parseInt))
         imp  (when port (:imp (get @registry port)))
         flag #(= "true" (get query %))]
     (cond
       (and (= method "GET") (empty? segs))
-      [200 {"name" identity-name "pid" (.-pid js/process)}]
+      [200 {"name" identity-name "version" version "pid" (.-pid js/process)}]
+
+      (and (= method "DELETE") (empty? segs))
+      [200 {"stopped" (count @registry)} stop!]
 
       (and (= segs ["imposters"]) (= method "GET"))
       [200 {"imposters" (mapv #(imposter/to-json (:imp %) {:list? true}) (vals @registry))}]
@@ -254,14 +260,15 @@
    callers may use it: a request carrying an Origin, or addressed to any host other
    than the loopback name, is refused. That stops a web page from posting an
    imposter directly or through DNS rebinding."
-  [registry]
+  [registry stop!]
   (fn [^js node-req ^js res]
     (let [hs (.-headers node-req)]
       (if (or (aget hs "origin") (not (local-host? (aget hs "host"))))
         (write-json! res 403 (error-body "forbidden" "the admin API only serves local, non-browser clients"))
-        (-> (p/let [body      (read-body node-req)
-                    url       (js/URL. (.-url node-req) "http://localhost")
-                    [st resp] (route registry (.-method node-req) (.-pathname url) (query-of url) body)]
+        (-> (p/let [body            (read-body node-req)
+                    url             (js/URL. (.-url node-req) "http://localhost")
+                    [st resp after] (route registry stop! (.-method node-req) (.-pathname url) (query-of url) body)]
+              (when after (.once res "finish" after))
               (write-json! res st resp))
             (p/catch (fn [e]
                        (let [code (or (:code (ex-data e)) "internal error")]
@@ -269,13 +276,16 @@
 
 (defn start!
   "Run the daemon's admin API on `host`:`port` (port 0 picks one). Resolves
-   {:port :stop!}; `stop!` closes the admin API and every imposter."
-  [{:keys [host port]}]
+   {:port :stop!}; `stop!` closes the admin API and every imposter. `DELETE /` runs
+   the same stop, then `on-stop`."
+  [{:keys [host port on-stop]}]
   (let [registry (atom {})
-        admin    (tracked-server (admin-handler registry))]
-    (p/let [_ (listen! admin port host)]
-      {:port  (.-port (.address ^js (:server admin)))
-       :stop! (fn []
-                (p/let [_ (p/all (map close! (mapcat :servers (vals @registry))))]
-                  (reset! registry {})
-                  (close! admin)))})))
+        admin    (atom nil)
+        stop!    (fn []
+                   (p/let [_ (p/all (map close! (mapcat :servers (vals @registry))))]
+                     (reset! registry {})
+                     (close! @admin)))]
+    (reset! admin (tracked-server (admin-handler registry #(p/then (stop!) (or on-stop identity)))))
+    (p/let [_ (listen! @admin port host)]
+      {:port  (.-port (.address ^js (:server @admin)))
+       :stop! stop!})))

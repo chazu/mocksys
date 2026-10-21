@@ -94,8 +94,9 @@
                 gone   (-> (js/fetch (str "http://127.0.0.1:" port "/hi")) (p/then (constantly :served)) (p/catch (constantly :refused)))
                 again  (call (str admin "/imposters/" port) {:method "DELETE"})
                 miss   (call (str admin "/imposters/" port))]
-          (testing "GET / identifies the daemon"
+          (testing "GET / identifies the daemon and its version"
             (is (= "mocksys" (get-in ident [:json "name"])))
+            (is (= (.-version (js/require "../package.json")) (get-in ident [:json "version"])))
             (is (number? (get-in ident [:json "pid"]))))
           (testing "an imposter outside the inventory is refused with the field named"
             (is (= 400 (:status bad)))
@@ -233,6 +234,25 @@
                                     (get-in stubs [0 "predicates"])))
                              (is (= {"url" "/v1/things?page=2"} (get-in stubs [0 "responses" 0 "is" "body"])))
                              (is (= "text" (get-in stubs [0 "responses" 0 "is" "_mode"]))))))))))))))
+
+(deftest delete-root-stops-the-daemon
+  (async done
+    (let [stopped (p/deferred)]
+      (p/let [d        (runtime/start! {:host "127.0.0.1" :port 0 :on-stop #(p/resolve! stopped :stopped)})
+              admin    (str "http://127.0.0.1:" (:port d))
+              port     (free-port)
+              _        (call (str admin "/imposters") {:method "POST" :body (imposter port [])})
+              res      (call (str admin "/") {:method "DELETE"})
+              signal   (p/race [stopped (p/delay 2000 :timed-out)])
+              refused  (fn [url] (-> (js/fetch url) (p/then (constantly :served)) (p/catch (constantly :refused))))
+              admin-is (refused (str admin "/"))
+              mock-is  (refused (str "http://127.0.0.1:" port "/"))]
+        (is (= 200 (:status res)))
+        (is (= {"stopped" 1} (:json res)) "the reply counts the imposters it stopped")
+        (is (= :stopped signal) "on-stop runs once everything is closed")
+        (is (= :refused admin-is) "the admin API no longer listens")
+        (is (= :refused mock-is) "nor does the imposter")
+        (done)))))
 
 (deftest admin-refuses-browsers-and-foreign-hosts
   (async done
