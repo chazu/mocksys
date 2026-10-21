@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package todo.v1;
+
+import "google/protobuf/empty.proto";
+
+service Todos {
+  rpc CreateTodo (CreateTodoRequest) returns (Todo);
+  rpc GetTodo (GetTodoRequest) returns (Todo);
+  rpc ListTodos (ListTodosRequest) returns (ListTodosResponse);
+  rpc DeleteTodo (GetTodoRequest) returns (google.protobuf.Empty);
+  rpc WatchTodos (ListTodosRequest) returns (stream Todo);
+}
+
+message Todo {
+  string id = 1;
+  string title = 2;
+  bool done = 3;
+}
+
+message CreateTodoRequest {
+  string title = 1;
+}
+
+message GetTodoRequest {
+  string id = 1;
+}
+
+message ListTodosRequest {
+  // A SCIM filter over Todo fields, e.g. `done eq true`. Empty lists every todo.
+  string filter = 1;
+}
+
+message ListTodosResponse {
+  repeated Todo todos = 1;
+}

@@ -147,6 +147,33 @@ node -e '
 check "a planted injection is not served" "" "$(curl -s localhost:$PORT/pwned)"
 check "imposter.json was rebuilt from the contract" 0 "$(grep -c pwned "$imp" || true)"
 
+echo "# grpc"
+GP=$((PORT + 2))
+G="$ROOT/examples/grpc-todos"
+mkdir -p "$MOCKSYS_HOME/demo/todos"
+cp "$G/contract.yaml" "$G/todo.proto" "$MOCKSYS_HOME/demo/todos/"
+"$MS" validate demo/todos >/dev/null && code=0 || code=$?
+check "the example validates against its proto" 0 "$code"
+out="$("$MS" run demo/todos --port $GP)"
+check "run names a host:port target" 1 "$(echo "$out" | grep -c "running 'demo/todos' at localhost:$GP (gRPC)")"
+rpc() { node "$G/client.js" "localhost:$GP" "$@" || true; }
+check "GetTodo reads a seeded todo" "Write the proto" "$(rpc GetTodo '{"id":"t1"}' | json_field '.title')"
+tid="$(rpc CreateTodo '{"title":"ship grpc"}' | json_field '.id')"
+check "GetTodo reads what CreateTodo stored" "ship grpc" "$(rpc GetTodo "{\"id\":\"$tid\"}" | json_field '.title')"
+check "a miss is NOT_FOUND" '{"code":"NOT_FOUND","details":"no todo nope"}' "$(rpc GetTodo '{"id":"nope"}')"
+check "ListTodos fills the repeated field" 2 "$(rpc ListTodos '{}' | json_field '.todos.length')"
+check "ListTodos filters" "$tid" "$(rpc ListTodos '{"filter":"done eq false"}' | json_field '.todos[0].id')"
+check "a {grpcCode, message} body picks the code" PERMISSION_DENIED "$(rpc DeleteTodo '{"id":"t1"}' | json_field '.code')"
+"$MS" assert demo/todos --saw 'POST /todo.v1.Todos/CreateTodo' >/dev/null && code=0 || code=$?
+check "assert sees an rpc as its POST path" 0 "$code"
+check "env exports the target without a scheme" "export TODOS=localhost:$GP" "$("$MS" env demo/todos --env TODOS | head -1)"
+sed 's#todo.v1.Todos/GetTodo#todo.v1.Todos/WatchTodos#' "$G/contract.yaml" > "$MOCKSYS_HOME/demo/todos/contract.yaml"
+out="$("$MS" validate demo/todos 2>&1)" && code=0 || code=$?
+check "validate refuses a streaming rpc" 1 "$code"
+check "and says why" 1 "$(echo "$out" | grep -c 'get: rpc todo.v1.Todos/WatchTodos is server-streaming; only unary rpcs are served')"
+cp "$G/contract.yaml" "$MOCKSYS_HOME/demo/todos/contract.yaml"
+"$MS" stop demo/todos >/dev/null
+
 echo "# daemon stop"
 "$MS" daemon stop >/dev/null
 check "daemon stop frees the admin port" 000 "$(status_of "$ADMIN/")"
