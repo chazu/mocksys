@@ -17,9 +17,8 @@ WORK="$(mktemp -d)"
 export MOCKSYS_HOME="$WORK/store"
 cd "$WORK"
 cleanup() {
-  "$MS" stop --all >/dev/null 2>&1 || true
-  pid=$(curl -s "$ADMIN/" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).pid)}catch{}})')
-  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  "$MS" daemon stop >/dev/null 2>&1 || true
+  [ -n "${OLD_PID:-}" ] && kill "$OLD_PID" 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -32,8 +31,30 @@ check() { # <label> <expected> <actual>
 status_of() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 json_field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=eval("(o)=>o"+process.argv[1])(JSON.parse(s));console.log(typeof v==="object"?JSON.stringify(v):v)})' "$1"; }
 
-echo "# static mock"
+VERSION="$(node -p 'require(process.argv[1]).version' "$ROOT/package.json")"
+
+echo "# a daemon from another version is replaced"
+# Stands in for a daemon left by an older mocksys: it names itself, serves one mock,
+# and exits on DELETE /.
+node -e '
+  const http = require("http");
+  const srv = http.createServer((q, r) => {
+    const reply = (b) => { r.setHeader("Content-Type", "application/json"); r.end(JSON.stringify(b)); };
+    if (q.method === "GET" && q.url === "/") return reply({ name: "mocksys", version: "0.0.0-old", pid: process.pid });
+    if (q.method === "GET" && q.url === "/imposters") return reply({ imposters: [{ port: 1, name: "old/mock" }] });
+    if (q.method === "DELETE" && q.url === "/") { r.on("finish", () => process.exit(0)); return reply({ stopped: 1 }); }
+    r.statusCode = 404; reply({});
+  }).listen(+process.argv[1], "127.0.0.1");' "$MOCKSYS_ADMIN_PORT" &
+OLD_PID=$!
+until curl -s "$ADMIN/" >/dev/null 2>&1; do sleep 0.1; done
 "$MS" add demo/hello --request 'GET /hello' --status 200 --text hi >/dev/null
+"$MS" run demo/hello --port $PORT >/dev/null 2>"$WORK/run.err"
+check "one stderr line names the old version and the lost mock" 1 \
+  "$(grep -c "it runs mocksys 0.0.0-old, this is $VERSION); its 1 running mock(s) stop: old/mock" "$WORK/run.err")"
+check "the daemon now runs this version" "$VERSION" "$(curl -s "$ADMIN/" | json_field '.version')"
+"$MS" stop demo/hello >/dev/null
+
+echo "# static mock"
 "$MS" run demo/hello --port $PORT >/dev/null
 check "serves the authored body" "hi" "$(curl -s localhost:$PORT/hello)"
 "$MS" assert demo/hello --saw 'GET /hello' >/dev/null
@@ -42,10 +63,15 @@ check "assert sees the call" 0 $?
 
 echo "# daemon"
 check "GET / identifies the mocksys daemon" mocksys "$(curl -s "$ADMIN/" | json_field '.name')"
+check "the daemon logs to the store" 1 "$(grep -c "mocksys $VERSION daemon on http://127.0.0.1:$MOCKSYS_ADMIN_PORT" "$MOCKSYS_HOME/daemon.log")"
 listeners() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fn | sed -n 's/^n//p' | LC_ALL=C sort | tr '\n' ' '; }
 check "admin API listens on 127.0.0.1 only" "127.0.0.1:$MOCKSYS_ADMIN_PORT " "$(listeners "$MOCKSYS_ADMIN_PORT")"
 "$MS" run demo/hello --port $PORT >/dev/null
-check "a mock listens on the loopback addresses only" "127.0.0.1:$PORT [::1]:$PORT " "$(listeners $PORT)"
+if node -e 'require("net").createServer().on("error",()=>process.exit(1)).listen(0,"::1",function(){this.close()})'; then
+  check "a mock listens on the loopback addresses only" "127.0.0.1:$PORT [::1]:$PORT " "$(listeners $PORT)"
+else
+  check "a mock listens on 127.0.0.1 only (no ::1 on this host)" "127.0.0.1:$PORT " "$(listeners $PORT)"
+fi
 check "the admin API refuses a browser origin" 403 \
   "$(status_of -H 'Origin: https://evil.example' "$ADMIN/imposters")"
 "$MS" stop demo/hello >/dev/null
@@ -74,6 +100,11 @@ id2=$(curl -s -X POST localhost:$PORT/api/v1/users -H 'Content-Type: application
         -d '{"profile":{"login":"smoke@example.com","email":"smoke@example.com"}}' | json_field '.id')
 check "a fresh twin mints the same id for the same request" "$id" "$id2"
 
+echo "# record"
+out="$("$MS" record demo/rec --target https://api.example.com/v1 2>&1)" && code=0 || code=$?
+check "a --target with a path fails up front" 1 "$code"
+check "and says why" 1 "$(echo "$out" | grep -c 'record --target "https://api.example.com/v1": proxy.to must not contain a path "/v1"')"
+
 echo "# imposter.json is never trusted"
 imp="$MOCKSYS_HOME/okta/okta/imposter.json"
 node -e '
@@ -85,6 +116,11 @@ node -e '
 "$MS" run okta/okta >/dev/null
 check "a planted injection is not served" "" "$(curl -s localhost:$PORT/pwned)"
 check "imposter.json was rebuilt from the contract" 0 "$(grep -c pwned "$imp" || true)"
+
+echo "# daemon stop"
+"$MS" daemon stop >/dev/null
+check "daemon stop frees the admin port" 000 "$(status_of "$ADMIN/")"
+check "and the mocks with it" 000 "$(status_of localhost:$PORT/api/v1/users)"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: $fails check(s) failed"; exit 1; fi
