@@ -674,10 +674,11 @@
     (let [decls    (into {} (for [[k spec] flags :let [k (keyword k)]] [k (flag-decl k spec)]))
           defaults (update-vals decls :default)
           doc      (str (get m "doc" ""))]
-      {:name   (str (get m "name" default-name))
-       :doc    doc
-       :source source
-       :flags  decls
+      {:name    (str (get m "name" default-name))
+       :doc     doc
+       :source  source
+       :flags   decls
+       :modules (get template "modules")
        :build  (fn [scenario opts]
                  (let [given (into {} (filter (comp some? val)) (select-keys opts (keys decls)))]
                    (-> (substitute template (merge defaults given))
@@ -691,9 +692,11 @@
   {"oauth2" (rc/inline "./kits/oauth2.yaml")})
 
 (def builtin-kits
-  "name -> kit. A kit is {:name :doc :source :flags :build}. `:flags` maps each
-   `kit` option it honors to {:default :type}, the type a key of `flag-types`;
-   `:build` takes [scenario parsed-flags] and returns the contract to write."
+  "name -> kit. A kit is {:name :doc :source :flags :build}, and a user kit read
+   from a directory also has :dir, which the template's :modules resolve against.
+   `:flags` maps each `kit` option it honors to {:default :type}, the type a key of
+   `flag-types`; `:build` takes [scenario parsed-flags] and returns the contract to
+   write."
   (merge
    {"okta" {:name   "okta"
             :doc    "Okta twin: users & groups CRUD + OIDC (signed JWTs, JWKS, discovery) + membership"
@@ -713,20 +716,26 @@
    (update-vals builtin-yaml #(parse-kit % "built-in" nil))))
 
 (defn with-user-kits
-  "The built-in kits plus the user kits in `files` ([[path text] ...], or [path nil
-   reason] for a file that could not be read), as {:kits name->kit :warnings [...]}.
-   A user kit named like a built-in replaces it; of two user kits with one name,
-   the later file wins. Both warn. A file that cannot be read or parsed is skipped,
-   with a warning."
+  "The built-in kits plus the user kits in `files`, the entries `store/kit-files`
+   returns, as {:kits name->kit :warnings [...]}. A directory kit carries :dir and
+   is named after its directory unless it names itself. A user kit named like a
+   built-in replaces it; of two user kits with one name, the later file wins. Both
+   warn. An entry that cannot be read or parsed is skipped, with a warning, and so
+   is a single-file kit that lists modules, which have nowhere to live beside it."
   [files]
-  (reduce (fn [acc [file text unreadable]]
+  (reduce (fn [acc {:keys [file text error dir]}]
             (let [skip #(update acc :warnings conj (str "skipped kit " file ": " %))]
-              (if unreadable
-                (skip unreadable)
+              (if error
+                (skip error)
                 (try
-                  (let [kit   (parse-kit text file (str/replace file #"^.*/|\.ya?ml$" ""))
+                  (let [kit   (cond-> (parse-kit text file (str/replace (or dir file) #"^.*/|\.ya?ml$" ""))
+                                dir (assoc :dir dir))
                         n     (:name kit)
                         prior (get-in acc [:kits n :source])]
+                    (when (and (:modules kit) (not dir))
+                      (throw (js/Error. (str "a kit that ships modules is a directory: move it to "
+                                             (str/replace file #"\.ya?ml$" "/kit.yaml")
+                                             " with its modules beside it"))))
                     (cond-> (assoc-in acc [:kits n] kit)
                       (contains? builtin-kits n)
                       (update :warnings conj (str "user kit '" n "' (" file ") shadows the built-in kit"))

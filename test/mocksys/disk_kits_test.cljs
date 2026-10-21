@@ -84,10 +84,14 @@ flags: {}
 contract: { operations: [] }
 ")
 
+(defn- entry [file text] {:file file :text text})
+
+(def ^:private empty-kit "contract: { operations: [] }\n")
+
 (deftest user-kits-join-and-shadow-the-built-ins
   (let [{reg :kits warnings :warnings}
-        (kits/with-user-kits [["/home/kits/oauth2.yaml" user-oauth2]
-                              ["/home/kits/directory.yaml" "doc: unnamed\ncontract: { operations: [] }\n"]])]
+        (kits/with-user-kits [(entry "/home/kits/oauth2.yaml" user-oauth2)
+                              (entry "/home/kits/directory.yaml" "doc: unnamed\ncontract: { operations: [] }\n")])]
     (testing "a user kit with a built-in's name replaces it, with a warning"
       (is (= "/home/kits/oauth2.yaml" (get-in reg ["oauth2" :source])))
       (is (some #(and (str/includes? % "oauth2") (str/includes? % "shadows")) warnings)))
@@ -98,8 +102,8 @@ contract: { operations: [] }
 
 (deftest a-broken-user-kit-is-skipped-with-a-warning
   (let [{reg :kits warnings :warnings}
-        (kits/with-user-kits [["/home/kits/bad.yaml" "contract: [unclosed"]
-                              ["/home/kits/good.yaml" "contract: { operations: [] }\n"]])]
+        (kits/with-user-kits [(entry "/home/kits/bad.yaml" "contract: [unclosed")
+                              (entry "/home/kits/good.yaml" empty-kit)])]
     (is (not (contains? reg "bad")))
     (is (contains? reg "good"))
     (is (some #(str/includes? % "/home/kits/bad.yaml") warnings))))
@@ -109,28 +113,68 @@ contract: { operations: [] }
     (fs/writeFileSync (path/join dir "b.yaml") "name: b\n")
     (fs/writeFileSync (path/join dir "a.yaml") "name: a\n")
     (fs/writeFileSync (path/join dir "notes.txt") "not a kit")
-    (is (= [[(path/join dir "a.yaml") "name: a\n"] [(path/join dir "b.yaml") "name: b\n"]]
+    (is (= [(entry (path/join dir "a.yaml") "name: a\n") (entry (path/join dir "b.yaml") "name: b\n")]
            (store/kit-files dir)))
     (testing "a missing directory has no kits"
       (is (= [] (store/kit-files (path/join dir "absent")))))))
 
+(deftest kit-files-reads-a-directory-kit
+  (let [dir (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-kits-"))
+        kit (path/join dir "hooks")]
+    (fs/mkdirSync kit)
+    (fs/writeFileSync (path/join kit "kit.yaml") "name: hooks\n")
+    (fs/writeFileSync (path/join kit "verbs.js") "module.exports = {}")
+    (fs/mkdirSync (path/join dir "scratch"))
+    (fs/writeFileSync (path/join dir "a.yaml") "name: a\n")
+    (let [files (store/kit-files dir)]
+      (testing "the directory's kit.yaml is the kit, and the directory is where its files live"
+        (is (= {:file (path/join kit "kit.yaml") :text "name: hooks\n" :dir kit} (second files))))
+      (testing "a directory without a kit.yaml says so"
+        (is (= (path/join dir "scratch") (:file (nth files 2))))
+        (is (str/includes? (:error (nth files 2)) "no kit.yaml")))
+      (testing "entries sort by name, files and directories together"
+        (is (= (entry (path/join dir "a.yaml") "name: a\n") (first files)))))))
+
+(deftest a-directory-kit-is-named-after-its-directory
+  (let [{reg :kits warnings :warnings}
+        (kits/with-user-kits [{:file "/home/kits/hooks/kit.yaml" :text empty-kit :dir "/home/kits/hooks"}])]
+    (is (= [] warnings))
+    (is (= "/home/kits/hooks" (get-in reg ["hooks" :dir])))
+    (is (= "/home/kits/hooks/kit.yaml" (get-in reg ["hooks" :source])))))
+
+(def ^:private module-kit "
+contract:
+  modules: [./verbs.js]
+  operations: []
+")
+
+(deftest a-kit-that-ships-modules-must-be-a-directory
+  (testing "a single file that lists modules is skipped, pointing at the directory form"
+    (let [{reg :kits warnings :warnings} (kits/with-user-kits [(entry "/home/kits/hooks.yaml" module-kit)])]
+      (is (not (contains? reg "hooks")))
+      (is (= ["skipped kit /home/kits/hooks.yaml: a kit that ships modules is a directory: move it to /home/kits/hooks/kit.yaml with its modules beside it"]
+             warnings))))
+  (testing "the directory form loads and records what it ships"
+    (let [{reg :kits} (kits/with-user-kits [{:file "/home/kits/hooks/kit.yaml" :text module-kit :dir "/home/kits/hooks"}])]
+      (is (= ["./verbs.js"] (get-in reg ["hooks" :modules]))))))
+
 (deftest two-user-kits-with-one-name-warn-which-wins
   (let [{reg :kits warnings :warnings}
-        (kits/with-user-kits [["/home/kits/a.yaml" "name: twin\ndoc: from a\ncontract: { operations: [] }\n"]
-                              ["/home/kits/b.yaml" "name: twin\ndoc: from b\ncontract: { operations: [] }\n"]])]
+        (kits/with-user-kits [(entry "/home/kits/a.yaml" "name: twin\ndoc: from a\ncontract: { operations: [] }\n")
+                              (entry "/home/kits/b.yaml" "name: twin\ndoc: from b\ncontract: { operations: [] }\n")])]
     (is (= "from b" (get-in reg ["twin" :doc])))
     (is (= ["user kit 'twin' is declared by /home/kits/a.yaml and /home/kits/b.yaml; using /home/kits/b.yaml"]
            warnings))))
 
 (deftest an-unreadable-kit-file-is-skipped-with-a-warning
   (let [{reg :kits warnings :warnings}
-        (kits/with-user-kits [["/home/kits/gone.yaml" nil "EACCES: permission denied"]
-                              ["/home/kits/good.yaml" "contract: { operations: [] }\n"]])]
+        (kits/with-user-kits [{:file "/home/kits/gone.yaml" :error "EACCES: permission denied"}
+                              (entry "/home/kits/good.yaml" empty-kit)])]
     (is (contains? reg "good"))
     (is (= ["skipped kit /home/kits/gone.yaml: EACCES: permission denied"] warnings))))
 
 (deftest a-yml-kit-is-named-after-its-file
-  (let [{reg :kits} (kits/with-user-kits [["/home/kits/short.yml" "contract: { operations: [] }\n"]])]
+  (let [{reg :kits} (kits/with-user-kits [(entry "/home/kits/short.yml" empty-kit)])]
     (is (contains? reg "short"))))
 
 (deftest kit-files-skips-what-it-cannot-read
@@ -141,12 +185,13 @@ contract: { operations: [] }
     (fs/chmodSync (path/join dir "c.yaml") 0)
     (let [files (store/kit-files dir)]
       (testing "a .yml file is a kit file"
-        (is (= [(path/join dir "a.yml") "name: a\n"] (first files))))
+        (is (= (entry (path/join dir "a.yml") "name: a\n") (first files))))
       (testing "a directory and an unreadable file come back with a reason instead of throwing"
-        (is (= [(path/join dir "b.yaml") nil "not a file"] (second files)))
-        (is (= [(path/join dir "c.yaml") nil] (take 2 (nth files 2))))
-        (is (string? (nth (nth files 2) 2)))))
+        (is (= {:file (path/join dir "b.yaml") :error "not a file"} (second files)))
+        (is (= (path/join dir "c.yaml") (:file (nth files 2))))
+        (is (string? (:error (nth files 2))))))
     (fs/chmodSync (path/join dir "c.yaml") 420)))
+
 
 ;; --- the built-in oauth2 kit is YAML ------------------------------------------
 
