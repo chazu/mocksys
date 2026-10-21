@@ -2,11 +2,40 @@
   "Test-only protos on disk and a grpc-js client for them. The client loads the
    proto with proto-loader on its own, so a test checks the daemon against an
    independent reading of the same file."
-  (:require ["node:fs" :as fs]
+  (:require [clojure.test :refer [is]]
+            [promesa.core :as p]
+            ["node:fs" :as fs]
+            ["node:net" :as net]
             ["node:os" :as os]
             ["node:path" :as path]
             ["@grpc/grpc-js" :as grpc]
-            ["@grpc/proto-loader" :as loader]))
+            ["@grpc/proto-loader" :as loader]
+            [mocksys.runtime :as runtime]))
+
+(defn free-port
+  "A port nothing listens on now."
+  []
+  (js/Promise.
+   (fn [resolve]
+     (let [srv (.createServer net)]
+       (.listen srv 0 (fn [] (let [port (.-port (.address srv))] (.close srv #(resolve port)))))))))
+
+(defn admin-call
+  "Call the daemon's admin API; resolves {:status :json}."
+  [url method body]
+  (p/let [res  (js/fetch url (clj->js (cond-> {:method method :headers {"Content-Type" "application/json"}}
+                                         body (assoc :body (js/JSON.stringify (clj->js body))))))
+          text (.text res)]
+    {:status (.-status res) :json (try (js->clj (js/JSON.parse text)) (catch :default _ nil))}))
+
+(defn with-daemon
+  "Run `f` against a fresh in-process daemon (its admin URL), report a rejection as
+   a failure, then stop the daemon and call `done`."
+  [done f]
+  (p/let [d (runtime/start! {:host "127.0.0.1" :port 0})]
+    (-> (p/do (f (str "http://127.0.0.1:" (:port d))))
+        (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
+        (p/finally (fn [] (p/do ((:stop! d)) (done)))))))
 
 (def kv-proto "
 syntax = \"proto3\";
@@ -32,6 +61,36 @@ message Item { string key = 1; string value = 2; int64 version = 3; Kind kind = 
 message Items { repeated Item items = 1; }
 ")
 
+(def rec-proto "
+syntax = \"proto3\";
+package rec;
+import \"google/protobuf/timestamp.proto\";
+
+service Recs {
+  rpc Put (Rec) returns (Rec);
+  rpc Update (Rec) returns (Rec);
+  rpc Get (RecKey) returns (Rec);
+  rpc List (RecKey) returns (RecList);
+}
+
+enum Tier { FREE = 0; PRO = 1; }
+message RecKey { string id = 1; }
+message Rec {
+  string id = 1;
+  int64 version = 2;
+  bool flag = 3;
+  repeated string tags = 4;
+  string display_name = 5;
+  Tier tier = 6;
+  int32 count = 7;
+  oneof choice { string a = 8; int32 b = 9; }
+  map<string, string> labels = 10;
+  google.protobuf.Timestamp at = 11;
+  Rec child = 12;
+}
+message RecList { repeated Rec recs = 1; map<string, string> meta = 2; }
+")
+
 (defn write-tree!
   "A fresh temp dir holding `files` ({relative-path text}); returns the dir."
   [files]
@@ -42,9 +101,10 @@ message Items { repeated Item items = 1; }
     dir))
 
 (defn kv-dir [] (write-tree! {"kv.proto" kv-proto "types.proto" types-proto}))
+(defn rec-dir [] (write-tree! {"rec.proto" rec-proto}))
 
-(defn- service-ctor [proto-file svc]
-  (let [def (.loadSync loader proto-file #js {:keepCase true :longs js/String :enums js/String
+(defn- service-ctor [proto-file svc keep-case]
+  (let [def (.loadSync loader proto-file #js {:keepCase keep-case :longs js/String :enums js/String
                                               :defaults true
                                               :includeDirs #js [(path/dirname proto-file)]})
         pkg (.loadPackageDefinition grpc def)]
@@ -52,23 +112,27 @@ message Items { repeated Item items = 1; }
 
 (defn connect
   "A grpc-js client for service `svc` (e.g. \"kv.Store\") of `proto-file`, on
-   127.0.0.1:`port`."
-  [proto-file svc port]
-  (let [Ctor (service-ctor proto-file svc)]
-    (Ctor. (str "127.0.0.1:" port) (.createInsecure (.-credentials grpc)))))
+   127.0.0.1:`port`. It names fields as the proto does, or with `:camel? true` in
+   lowerCamelCase, grpc-js's default (keepCase false)."
+  ([proto-file svc port] (connect proto-file svc port {}))
+  ([proto-file svc port {:keys [camel?]}]
+   (let [Ctor (service-ctor proto-file svc (not camel?))]
+     (Ctor. (str "127.0.0.1:" port) (.createInsecure (.-credentials grpc))))))
 
 (defn unary
-  "Call `method` on `client` with `msg` (a map) and optional metadata (a map).
-   Resolves {:ok reply-map :metadata {k v}} or {:code n :details s}."
-  ([client method msg] (unary client method msg {}))
-  ([^js client method msg md]
+  "Call `method` on `client` with `msg` (a map), optional metadata (a map) and
+   options ({:deadline-ms n}, 5000 by default). Resolves {:ok reply-map :metadata
+   {k v}} or {:code n :details s}."
+  ([client method msg] (unary client method msg {} {}))
+  ([client method msg md] (unary client method msg md {}))
+  ([^js client method msg md {:keys [deadline-ms] :or {deadline-ms 5000}}]
    (js/Promise.
     (fn [resolve]
       (let [meta (grpc/Metadata.)
             got  (atom {})]
         (doseq [[k v] md] (.add meta k v))
         (let [^js call (.call (aget client method) client (clj->js msg) meta
-                              #js {:deadline (+ (js/Date.now) 5000)}
+                              #js {:deadline (+ (js/Date.now) deadline-ms)}
                               (fn [err reply]
                                 (resolve (if err
                                            {:code (.-code err) :details (.-details err)}
@@ -98,5 +162,16 @@ message Items { repeated Item items = 1; }
        (.on call "end" (fn [] (resolve {:ok true})))))))
 
 (defn close [^js client] (.close client))
+
+(defn capturing-stderr
+  "Call `f`, which returns a promise, while collecting what is written to stderr,
+   the daemon's log. Resolves [result text]."
+  [f]
+  (let [^js err js/process.stderr
+        orig    (.-write err)
+        got     (atom [])]
+    (set! (.-write err) (fn [chunk & _] (swap! got conj (str chunk)) true))
+    (-> (p/let [r (f)] [r (apply str @got)])
+        (p/finally #(set! (.-write err) orig)))))
 
 (def status (js->clj (.-status grpc)))

@@ -6,31 +6,15 @@
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
-            ["node:net" :as net]
             ["node:path" :as path]
-            [mocksys.runtime :as runtime]
             [mocksys.contract :as contract]
             [mocksys.proto :as proto]
             [mocksys.runtime.grpc :as grpc]
             [mocksys.grpc-fixture :as fx]))
 
-(defn- free-port []
-  (js/Promise.
-   (fn [resolve]
-     (let [srv (.createServer net)]
-       (.listen srv 0 (fn [] (let [port (.-port (.address srv))] (.close srv #(resolve port)))))))))
-
-(defn- admin-call [url method body]
-  (p/let [res  (js/fetch url (clj->js (cond-> {:method method :headers {"Content-Type" "application/json"}}
-                                         body (assoc :body (js/JSON.stringify (clj->js body))))))
-          text (.text res)]
-    {:status (.-status res) :json (try (js->clj (js/JSON.parse text)) (catch :default _ nil))}))
-
-(defn- with-daemon [done f]
-  (p/let [d (runtime/start! {:host "127.0.0.1" :port 0})]
-    (-> (p/do (f (str "http://127.0.0.1:" (:port d))))
-        (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
-        (p/finally (fn [] (p/do ((:stop! d)) (done)))))))
+(def ^:private free-port fx/free-port)
+(def ^:private admin-call fx/admin-call)
+(def ^:private with-daemon fx/with-daemon)
 
 (defn- kv-imposter [dir port stubs]
   {"protocol" "grpc" "port" port "name" "t/kv" "recordRequests" true
