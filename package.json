@@ -1,7 +1,7 @@
 {
   "name": "mocksys",
   "version": "0.0.1",
-  "description": "Agent-native CLI wrapping Mountebank: record real APIs into reusable mock fixtures",
+  "description": "Agent-native CLI for local mocks and digital twins of external HTTP APIs",
   "license": "MIT",
   "bin": {
     "mocksys": "bin/mocksys"
@@ -22,7 +22,6 @@
     "linux"
   ],
   "scripts": {
-    "mb": "mb",
     "test": "shadow-cljs compile test && node out/test.js",
     "build": "shadow-cljs release cli",
     "watch": "shadow-cljs watch cli",
@@ -33,7 +32,6 @@
   "dependencies": {
     "@apidevtools/swagger-parser": "^12.1.0",
     "js-yaml": "^4.1.0",
-    "mountebank": "^2.9.1",
     "openapi-sampler": "^1.7.4"
   },
   "devDependencies": {

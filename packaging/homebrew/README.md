@@ -34,7 +34,7 @@ After running it, commit and push the updated `Formula/mocksys.rb` to the tap re
 ## How it works
 
 `mocksys` itself is a self-contained binary (ClojureScript compiled with
-shadow-cljs, packed with `bun build --compile`). It drives **Mountebank** as an
-external daemon so a mock survives across separate CLI invocations — the formula
-provisions Mountebank into `libexec` (it only needs `node`) and the `bin/mocksys`
-wrapper points at it via `MOCKSYS_MB`.
+shadow-cljs, packed with `bun build --compile`). The same binary runs as the
+mocksys daemon (`mocksys daemon`, started on demand) that serves the mocks, so a
+mock survives across separate CLI invocations. The formula installs only that
+binary; it needs no Node or other runtime.
