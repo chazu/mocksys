@@ -6,8 +6,8 @@
 #   npm run build && scripts/smoke.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MS="$ROOT/bin/mocksys"
-PORT=9471
+MS="${MOCKSYS_BIN:-$ROOT/bin/mocksys}"
+PORT="${SMOKE_PORT:-9471}"
 
 free_port() { node -e 'const s=require("net").createServer().listen(0,()=>{console.log(s.address().port);s.close()})'; }
 export MOCKSYS_ADMIN_PORT="$(free_port)"
