@@ -221,8 +221,8 @@
     (println (str "  · " gname "  " doc))
     (let [label #(str (name %) (when (required %) "*"))
           width (apply max (map (comp count label first) params))]
-      (doseq [[k pdoc] params]
-        (println (str "      " (.padEnd (label k) width) "  " pdoc)))))
+      (doseq [[k shape pdoc] params]
+        (println (str "      " (.padEnd (label k) width) "  " (.padEnd (name shape) 6) "  " pdoc)))))
   (println)
   (println "# built in, not genes")
   (let [width (apply max (map (comp count first) kits/capabilities))]

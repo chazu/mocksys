@@ -53,7 +53,8 @@
 ;; --- genes: the authored `genes:` list -> operations ------------------------
 
 (defn- gene-entry-errors
-  "Problems with the `i`th `genes:` entry, as messages."
+  "Problems with the `i`th `genes:` entry, as messages. A param set to null counts
+   as unset."
   [i entry]
   (if-not (and (map? entry) (= 1 (count entry)))
     [(str "genes[" i "]: expected a one-key map {gene-name: {params}}, got " (pr-str entry))]
@@ -66,23 +67,17 @@
         (not (or (nil? ps) (map? ps)))
         [(str at ": params must be a map, got " (pr-str ps))]
         :else
-        (let [declared (map first (:params gene))
-              given    (set (map keyword (keys ps)))]
+        (let [shapes (into {} (map (juxt first second)) (:params gene))
+              given  (update-keys (into {} (filter (comp some? val)) ps) keyword)]
           (concat
-           (for [k (sort given) :when (not (some #{k} declared))]
-             (str at ": unknown param '" (name k) "' (params: " (str/join ", " (map name declared)) ")"))
-           (for [k (sort (:required gene)) :when (not (given k))]
-             (str at ": missing required param '" (name k) "'"))))))))
-
-(defn gene-errors
-  "Every problem with a contract's `genes:` list (unknown gene, unknown or missing
-   param, malformed entry), as messages. Empty when there are none."
-  [contract]
-  (let [gs (get contract "genes")]
-    (cond
-      (nil? gs)             []
-      (not (sequential? gs)) ["genes: expected a list of {gene-name: {params}} entries"]
-      :else                  (vec (mapcat gene-entry-errors (range) gs)))))
+           (for [k (sort (map keyword (keys ps))) :when (not (contains? shapes k))]
+             (str at ": unknown param '" (name k) "' (params: " (str/join ", " (map (comp name first) (:params gene))) ")"))
+           (for [k (sort (:required gene)) :when (not (contains? given k))]
+             (str at ": missing required param '" (name k) "'"))
+           (for [[k v] (sort given)
+                 :let [shape (get shapes k)]
+                 :when (and shape (not ((get kits/param-shapes shape) v)))]
+             (str at ": param '" (name k) "' must be a " (name shape)))))))))
 
 (defn- gene-fragment
   "Build one valid `genes:` entry, tagging each operation with the gene's name."
@@ -90,6 +85,33 @@
   (let [[gname ps] (first entry)
         frag       ((:build (get kits/genes gname)) (update-keys (or ps {}) keyword))]
     (update frag :operations (fn [ops] (mapv #(assoc % "gene" gname) ops)))))
+
+(defn- collection-clashes
+  "A message for each collection a gene declares that an earlier gene already
+   declared. `compose` would keep only the first."
+  [gs]
+  (->> (map-indexed vector gs)
+       (reduce (fn [[owners errs] [i entry]]
+                 (let [at (str "genes[" i "] " (ffirst entry))]
+                   (reduce (fn [[owners errs] coll]
+                             (if-let [prior (get owners coll)]
+                               [owners (conj errs (str at ": collection '" coll "' is already declared by " prior))]
+                               [(assoc owners coll at) errs]))
+                           [owners errs]
+                           (keys (:collections (gene-fragment entry))))))
+               [{} []])
+       second))
+
+(defn gene-errors
+  "Every problem that stops a contract's `genes:` list from expanding (unknown
+   gene, unknown, missing or misshapen param, malformed entry), as messages.
+   Empty when there are none."
+  [contract]
+  (let [gs (get contract "genes")]
+    (cond
+      (nil? gs)              []
+      (not (sequential? gs)) ["genes: expected a list of {gene-name: {params}} entries"]
+      :else                  (vec (mapcat gene-entry-errors (range) gs)))))
 
 (defn expand
   "The effective contract: `genes:` expanded into operations appended after the
@@ -497,6 +519,11 @@
         errs (atom []) warns (atom [])
         err! #(swap! errs conj %) warn! #(swap! warns conj %)]
     (when (empty? ops) (err! "contract has no operations"))
+    (doseq [[id same] (group-by #(get % "id") ops)
+            :when (and id (> (count same) 1))]
+      (err! (str id ": duplicate operation id ("
+                 (str/join ", " (map #(if-let [g (get % "gene")] (str "gene " g) "authored") same))
+                 ")")))
     (doseq [op ops]
       (let [id  (or (get op "id") "<no id>")
             req (get op "request")
@@ -534,9 +561,10 @@
 (defn validate
   "Returns {:errors [...] :warnings [...]}. Errors block compile; warnings (e.g. an
    example diverging from its schema) are advisory. Checks `genes:` first, then the
-   expanded operations."
+   expanded operations and the collections the genes declare."
   [contract]
   (let [gerrs (gene-errors contract)]
     (if (seq gerrs)
       {:errors gerrs :warnings []}
-      (validate-expanded (expand contract)))))
+      (update (validate-expanded (expand contract)) :errors
+              into (collection-clashes (get contract "genes"))))))

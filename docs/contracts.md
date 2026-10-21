@@ -130,7 +130,9 @@ responses:
 A gene is a parameterized fragment of a contract: a proven pattern such as a REST
 resource or an OAuth handshake. List genes under `genes:`, each as a one-key map from the
 gene's name to its params. Param names are the gene's option names, in kebab-case. Values
-pass through as written, so a nested option such as `rate-limit` is a YAML map.
+pass through as written, so a nested option such as `rate-limit` is a YAML map. Each param
+has a shape (`string`, `number`, `map` or `list`), and a value of another shape is an
+error. A param set to `null` counts as unset, so a required param cannot be `null`.
 
 ```yaml
 seed:
@@ -155,7 +157,8 @@ When the contract compiles, each gene expands into operations, collections and s
   `inspect` and `validate` all show the expanded operations, and `examples` marks each
   gene operation with its gene.
 
-`mocksys genes` lists every gene with its params, and marks the required ones with `*`.
+`mocksys genes` lists every gene with its params and their shapes, and marks the required
+ones with `*`.
 Today's genes are `crud-collection`, `oidc-handshake`, `membership` and
 `oauth2-provider`, described in [twins.md](twins.md#genes). Rate limiting, the Okta error
 envelope, the virtual clock and JWT signing are not standalone genes. `mocksys genes` says
@@ -193,8 +196,10 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
 
 `mocksys validate <name>` (exit 1 on errors):
 
-- **Errors** (block compile): an unknown gene, an unknown or missing required gene
-  param, or a `genes:` entry that is not a one-key map; no operations; a request missing
+- **Errors** (block compile): an unknown gene, an unknown, missing or misshapen gene
+  param (a required param set to `null` is missing), or a `genes:` entry that is not a
+  one-key map; two operations with one `id`, whether authored or from genes; a collection
+  that two genes declare; no operations; a request missing
   `method` or an absolute `path`; an `effect` with no `respond` and no collection verb; a response `status` that
   isn't a number; an operation with nothing to serve (no selected example, no
   `bodySchema`, no effect); an operation that fails to compile (for example a JSONPath

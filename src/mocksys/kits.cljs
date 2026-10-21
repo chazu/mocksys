@@ -540,49 +540,57 @@
 
 ;; --- gene registry ------------------------------------------------------------
 
+(def param-shapes
+  "shape -> predicate: what a gene param's value must be when it is set."
+  {:string string?
+   :number number?
+   :map    map?
+   :list   sequential?})
+
 (def genes
   "name -> {:doc :params :required :build}: the genes a contract may list under
-   `genes:`. `:params` is [[option doc] ...] in display order. `:build` takes the
-   options keyword-keyed, values as written in YAML, and returns a fragment."
+   `genes:`. `:params` is [[option shape doc] ...] in display order, each shape a
+   key of `param-shapes`. `:build` takes the options keyword-keyed, values as
+   written in YAML, and returns a fragment."
   {"crud-collection"
    {:doc "REST resource: create/list/get/update/delete, SCIM filter + cursor pagination"
-    :params [[:coll "collection name; also names the ops (list-<coll>, ...)"]
-             [:base "resource path, e.g. /api/v1/users"]
-             [:seed-name "seed array the collection starts from"]
-             [:id-field "row id field (default id)"]
-             [:id-prefix "prefix for minted ids (default none)"]
-             [:create-defaults "fields a created row gets unless the body sets them"]
-             [:not-found "miss response {status, json} (default Okta E0000007)"]
-             [:invalid-filter "bad-filter response {status, json} (default Okta E0000031)"]
-             [:rate-limit "{max, window}: per-client budget per window seconds (default 60), then 429 + X-Rate-Limit-*"]]
+    :params [[:coll :string "collection name; also names the ops (list-<coll>, ...)"]
+             [:base :string "resource path, e.g. /api/v1/users"]
+             [:seed-name :string "seed array the collection starts from"]
+             [:id-field :string "row id field (default id)"]
+             [:id-prefix :string "prefix for minted ids (default none)"]
+             [:create-defaults :map "fields a created row gets unless the body sets them"]
+             [:not-found :map "miss response {status, json} (default Okta E0000007)"]
+             [:invalid-filter :map "bad-filter response {status, json} (default Okta E0000031)"]
+             [:rate-limit :map "{max, window}: per-client budget per window seconds (default 60), then 429 + X-Rate-Limit-*"]]
     :required #{:coll :base}
     :build crud-collection}
    "oidc-handshake"
    {:doc "OAuth2/OIDC: authorize (picker + single-use code), token exchange, bearer userinfo"
-    :params [[:authz "authorize path"]
-             [:token "token path"]
-             [:userinfo "userinfo path"]
-             [:seed-name "seed array userinfo resolves logins in (seed source)"]
-             [:users "accounts the static picker lists (seed source)"]
-             [:token-ttl "seconds until an issued token expires on the virtual clock"]
-             [:user-source "{collection, login-field, active-only, claims}: read users from a live collection instead"]]
+    :params [[:authz :string "authorize path"]
+             [:token :string "token path"]
+             [:userinfo :string "userinfo path"]
+             [:seed-name :string "seed array userinfo resolves logins in (seed source)"]
+             [:users :list "accounts the static picker lists (seed source)"]
+             [:token-ttl :number "seconds until an issued token expires on the virtual clock"]
+             [:user-source :map "{collection, login-field, active-only, claims}: read users from a live collection instead"]]
     :required #{:authz :token :userinfo}
     :build oidc-handshake}
    "membership"
    {:doc "Many-to-many membership: assign/unassign (idempotent, FK-guarded) + list either side, hydrated + paginated"
-    :params [[:coll "relation collection (default memberships)"]
-             [:users-coll "member collection (default users)"]
-             [:groups-coll "group collection (default groups)"]
-             [:users-base "member resource path (default /api/v1/users)"]
-             [:groups-base "group resource path (default /api/v1/groups)"]
-             [:not-found "miss response {status, json} (default Okta E0000007)"]]
+    :params [[:coll :string "relation collection (default memberships)"]
+             [:users-coll :string "member collection (default users)"]
+             [:groups-coll :string "group collection (default groups)"]
+             [:users-base :string "member resource path (default /api/v1/users)"]
+             [:groups-base :string "group resource path (default /api/v1/groups)"]
+             [:not-found :map "miss response {status, json} (default Okta E0000007)"]]
     :required #{}
     :build membership}
    "oauth2-provider"
    {:doc "GitHub/Codeberg-shaped OAuth2 provider: oidc-handshake over seed accounts + an account index at /"
-    :params [[:provider "github | codeberg; another name gets /<name>/... paths (default github)"]
-             [:users "accounts to seed and list (default: the provider's)"]
-             [:token-ttl "seconds until an issued token expires on the virtual clock"]]
+    :params [[:provider :string "github | codeberg; another name gets /<name>/... paths (default github)"]
+             [:users :list "accounts to seed and list (default: the provider's)"]
+             [:token-ttl :number "seconds until an issued token expires on the virtual clock"]]
     :required #{}
     :build oauth2-provider}})
 
