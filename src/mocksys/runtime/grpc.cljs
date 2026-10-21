@@ -68,9 +68,9 @@
 
 (defn- parse [text] (try (js/JSON.parse text) (catch :default _ ::none)))
 
-(defn outcome->reply
+(defn- outcome->reply
   "The gRPC answer for an imposter outcome ({:status :headers :body} or {:fault}):
-   {:value reply-object} or {:error {:code :details}}, each with :metadata (the
+   {:value reply-object} or {:error {:code :details}}, with :metadata (the
    response headers). `repeated` names the reply type's only repeated field, if it
    has exactly one."
   [{:keys [status body fault headers]} repeated]
