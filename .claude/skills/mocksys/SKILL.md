@@ -81,9 +81,11 @@ mocksys validate acme/widgets && mocksys run acme/widgets
 **gRPC.** Set `protocol: grpc` and `proto: ./x.proto` (a file in the scenario directory)
 and give each operation `request: { rpc: pkg.Service/Method }` in place of method and
 path. Unary RPCs only. A call is matched as `POST /pkg.Service/Method` with metadata as
-headers and the message as a JSON body, so effects and `assert` work unchanged. A 2xx
+headers and the message as a JSON body, so effects and `assert` work unchanged. The body
+holds only the fields the caller set, so a `mergeVar` update keeps the rest. A 2xx
 JSON body is the reply, a 404 reaches the client as `NOT_FOUND`, and a body
-`{ grpcCode, message }` picks the code. `run`/`env` print `localhost:PORT`; connect with
+`{ grpcCode, message }` picks the code. The reply is checked against its type: a value
+of the wrong type is `INTERNAL` naming the field, and `daemon.log` says the same. `run`/`env` print `localhost:PORT`; connect with
 insecure credentials. See `docs/contracts.md#grpc-unary` and `examples/grpc-todos/`.
 
 The full effect-language reference is `docs/effects.md`; `docs/walkthrough.md` is a
