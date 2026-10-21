@@ -195,7 +195,9 @@
   (let [creds      (if tls?
                      (.createSsl grpc/credentials nil nil nil #js {:rejectUnauthorized false})
                      (.createInsecure grpc/credentials))
-        ^js client (grpc/Client. (str "127.0.0.1:" port) creds)]
+        ;; TLS takes a name, not an IP address, as the server name (node's DEP0123)
+        ^js client (grpc/Client. (str "127.0.0.1:" port) creds
+                                 (if tls? #js {"grpc.ssl_target_name_override" "localhost"} #js {}))]
     (js/Promise.
      (fn [resolve reject]
        (.makeUnaryRequest client clock-path text-out text-in (js/JSON.stringify (clj->js body))

@@ -140,7 +140,7 @@
   (let [def  (.loadSync loader (path/join dir "kv.proto") #js {:keepCase true :longs js/String :enums js/String
                                                                :defaults true :includeDirs #js [dir]})
         Ctor (.. (.loadPackageDefinition grpc def) -kv -Store)]
-    (Ctor. (str "127.0.0.1:" port) creds)))
+    (Ctor. (str "localhost:" port) creds)))
 
 (defn- get-key [^js c k]
   (js/Promise.
@@ -166,7 +166,11 @@
                 plain    (kv-client dir port (.createInsecure (.-credentials grpc)))
                 ok    (get-key trusting "a")
                 nope  (get-key plain "a")
+                warned  (atom [])
+                on-warn (fn [^js w] (swap! warned conj (.-code w)))
+                _     (.on js/process "warning" on-warn)
                 clock (rgrpc/clock-call port {} true)]
+          (.off js/process "warning" on-warn)
           (.close trusting)
           (.close plain)
           (is (= 201 (:status made)) (pr-str (:json made)))
@@ -175,4 +179,5 @@
           (testing "an insecure client cannot connect"
             (is (= (fx/status "UNAVAILABLE") (:code nope))))
           (testing "mocksys clock reaches a twin's clock over TLS"
-            (is (= {"now" 42} clock))))))))
+            (is (= {"now" 42} clock))
+            (is (not-any? #{"DEP0123"} @warned) "naming localhost to TLS, not an IP address")))))))
