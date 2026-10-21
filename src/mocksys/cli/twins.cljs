@@ -156,7 +156,9 @@
    A directory kit's modules are copied into the scenario. A module there that
    differs from the kit's copy stops the kit before it writes, unless --force."
   [{:keys [pos opts]}]
-  (let [kind     (first pos)
+  (let [force?   (try (:force (kits/parse-flags {:flags {:force {:type :boolean}}} (select-keys opts [:force]) nil))
+                      (catch :default e (die (.-message e))))
+        kind     (first pos)
         registry (load-kits)
         known    (str/join "|" (sort (keys registry)))]
     (when-not kind
@@ -185,7 +187,7 @@
                      (die (str "kit " kind " generated an invalid contract; nothing was written\n  "
                                (str/join "\n  " errs))))
           changed  (for [[p state] plan :when (= state :changed)] p)
-          _        (when (and (seq changed) (not (:force opts)))
+          _        (when (and (seq changed) (not force?))
                      (die (str (str/join ", " changed) " in " sdir (if (next changed) " differ" " differs")
                                " from the kit's copy; nothing was written. "
                                "Rerun with --force to replace it, or pick another --scenario")))

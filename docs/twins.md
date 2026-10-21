@@ -50,8 +50,10 @@ the following:
   the new operation.
 
 `kit` rejects any option the kit does not declare, apart from `--scenario`, `--port` and
-`--force`. `mocksys kits` lists every kit with its flags and their defaults, and marks
-each kit that [ships modules](#kits-that-ship-modules).
+`--force`. A kit may not declare a `force` flag of its own. `--force` takes `true` or
+`false` like a boolean kit flag, so write it after the kit name: in `kit --force webhooks`
+it reads `webhooks` as its value. `mocksys kits` lists every kit with its flags and their
+defaults, and marks each kit that [ships modules](#kits-that-ship-modules).
 
 ### Writing a kit
 

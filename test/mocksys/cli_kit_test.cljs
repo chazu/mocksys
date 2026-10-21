@@ -243,3 +243,17 @@ contract:
         (is (not (fs/existsSync (scenario-file home "contract.yaml"))))
         (is (not (fs/existsSync (scenario-file home "imposter.json")))))
       (finally (fs/chmodSync lib 0755)))))
+
+(deftest force-takes-true-or-false
+  (let [home   (hooks-store)
+        module (scenario-file home "lib" "verbs.js")]
+    (is (nil? (:died (kit-in home ["hooks"] {}))))
+    (fs/writeFileSync module "// edited by hand")
+    (testing "--force false does not force"
+      (is (str/includes? (str (:died (kit-in home ["hooks"] {:force "false"}))) "--force to replace it"))
+      (is (= "// edited by hand" (slurp module))))
+    (testing "--force before the kit name takes the name as its value, and says so"
+      (is (= "--force needs true or false, got hooks" (:died (kit-in home [] {:force "hooks"})))))
+    (testing "--force true forces"
+      (is (nil? (:died (kit-in home ["hooks"] {:force "true"}))))
+      (is (= verbs (slurp module))))))

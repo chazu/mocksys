@@ -73,7 +73,10 @@ contract:
 
 (deftest a-malformed-kit-is-refused
   (is (thrown-with-msg? js/Error #"contract" (kits/parse-kit "name: x\nflags: {}\n" "x.yaml" "x")))
-  (is (thrown-with-msg? js/Error #"flags" (kits/parse-kit "name: x\nflags: [a]\ncontract: {}\n" "x.yaml" "x"))))
+  (is (thrown-with-msg? js/Error #"flags" (kits/parse-kit "name: x\nflags: [a]\ncontract: {}\n" "x.yaml" "x")))
+  (testing "a kit may not declare --force, which belongs to the kit command"
+    (is (thrown-with-msg? js/Error #"kit flag 'force'.*the `kit` command"
+                          (kits/parse-kit "name: x\nflags: { force: false }\ncontract: {}\n" "x.yaml" "x")))))
 
 ;; --- user kits on disk --------------------------------------------------------
 

@@ -640,9 +640,12 @@
 
 (defn- flag-decl
   "A kit's `flags` entry -> {:default :type}. `spec` is a bare default, or a map
-   with `default` and/or `type`. Throws when it is malformed."
+   with `default` and/or `type`. Throws when it is malformed, or when the flag is
+   `force`, which the `kit` command keeps for itself."
   [k spec]
   (let [bad #(throw (js/Error. (str "kit flag '" (name k) "': " %)))]
+    (when (= k :force)
+      (bad "--force belongs to the `kit` command, which uses it to replace edited modules; name the flag something else"))
     (if-not (map? spec)
       (do (when-not (or (nil? spec) (string? spec) (number? spec) (boolean? spec) (sequential? spec))
             (bad (str "unsupported default " (pr-str spec))))
