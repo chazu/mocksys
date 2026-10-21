@@ -281,9 +281,9 @@ remove: { collection: users, key: "{id}", miss: { status: 404 }, status: 204 }  
 
 ### `list` — filter + paginate
 
-Returns the (filtered, paged) array. `filter` is a SCIM-ish expression; `after`+`limit`
+Returns the (filtered, paged) array. `filter` is a SCIM filter expression; `after`+`limit`
 drive cursor pagination; `link` is an optional `Link`-header template emitted only when a
-next page exists.
+next page exists; `invalid` is the response for a malformed filter.
 
 ```yaml
 effect:
@@ -294,26 +294,47 @@ effect:
     after:  "{after}"
     limit:  "{lim}"                    # parsed to int; default 200
     link:   '</api/v1/users?after={next}>; rel="next"'
+    invalid: { status: 400, json: { errorCode: E0000031, errorSummary: "Invalid search criteria." } }
 ```
 
 #### The filter grammar
 
-Bounded and SCIM-ish — enough for the common provider shape `filter=field op "value"`:
+The filter language of SCIM ([RFC 7644 §3.4.2.2](https://www.rfc-editor.org/rfc/rfc7644#section-3.4.2.2)),
+without complex attribute filters (`emails[type eq "work"]`):
 
-- **Operators:** `eq` (equals), `sw` (starts-with), `co` (contains), `pr` (present /
-  non-empty — no value).
-- **Clauses** are joined by ` and ` / ` or ` (no parenthesized groups).
-- **Field paths** are dotted (`profile.email`).
-- **Values** are double-quoted (`"ACTIVE"`); an empty value `""` is allowed; a missing
-  value for `eq`/`sw`/`co` matches nothing (treated as malformed, never errors).
+- **Comparisons:** `eq` `ne` `co` (contains) `sw` (starts with) `ew` (ends with) `gt` `ge`
+  `lt` `le`, and `pr` (present and non-empty; takes no value). Operators and keywords are
+  case-insensitive.
+- **Ordering** (`gt`/`ge`/`lt`/`le`) compares numerically when both sides are numbers,
+  otherwise as strings. ISO-8601 timestamps therefore order correctly, which is what
+  incremental sync (`lastUpdated gt "…"`) relies on.
+- **Logic:** `and` binds tighter than `or`; `not ( … )` negates; parentheses group.
+- **Field paths** are dotted (`profile.email`). A missing field matches nothing, except
+  under `ne`.
+- **Values** are JSON literals: double-quoted strings (with `\"` escapes, so a value may
+  contain `and` or `or`), numbers, `true`, `false`, `null`.
 
 ```
 status eq "ACTIVE"
 profile.email sw "alice"
-status eq "ACTIVE" and profile.lastName eq "Lee"
-profile.firstName eq "Alice" or profile.firstName eq "Bob"
+profile.lastName eq "Smith and Sons"
+lastUpdated gt "2024-01-01T00:00:00.000Z"
+status eq "ACTIVE" and (profile.lastName eq "Lee" or profile.lastName eq "Ng")
+not (status eq "DEPROVISIONED")
 profile.login pr
 ```
+
+A malformed filter (unknown operator, unbalanced parentheses, an unterminated string, a
+missing value) never yields an empty page. `list`, `find` and `render` answer with their
+`invalid` response, which defaults to a SCIM `400`:
+
+```json
+{"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"],
+ "scimType": "invalidFilter", "detail": "Invalid filter: unknown operator zz", "status": "400"}
+```
+
+`{filterError}` interpolates the parser's message into a custom `invalid` body. The
+`crud-collection` gene uses Okta's `E0000031` envelope.
 
 #### Pagination
 

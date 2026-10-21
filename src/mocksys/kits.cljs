@@ -47,12 +47,14 @@
      GET    {base}/{id}       read one
      POST   {base}/{id}       merge-patch
      DELETE {base}/{id}       delete
-   `opts`: :coll :base :id-field :seed-name :id-prefix :create-defaults :not-found."
-  [{:keys [coll base id-field seed-name id-prefix create-defaults not-found rate-limit]}]
+   `opts`: :coll :base :id-field :seed-name :id-prefix :create-defaults :not-found
+   :invalid-filter."
+  [{:keys [coll base id-field seed-name id-prefix create-defaults not-found invalid-filter rate-limit]}]
   (let [id-field (or id-field "id")
         id-regex (str base "/([^/]+)$")
         item     (str base "/{id}")
         nf       (or not-found {"status" 404 "json" (okta-error "E0000007" "Not found: Resource not found")})
+        bad-flt  (or invalid-filter {"status" 400 "json" (okta-error "E0000031" "Invalid search criteria.")})
         ;; rate-limit gene: when enabled, every op binds a client key (the bearer
         ;; token, else "anon") and guards with a clock-windowed `limit`.
         rl-bind  (when rate-limit {"__cli" {"header" "authorization" "bearer" true}})
@@ -81,7 +83,8 @@
                                "filter"     "{q}"
                                "after"      "{after}"
                                "limit"      "{lim}"
-                               "link"       (str "<" base "?after={next}>; rel=\"next\"")}})}
+                               "link"       (str "<" base "?after={next}>; rel=\"next\"")
+                               "invalid"    bad-flt}})}
       {"id"      (str "get-" coll)
        "summary" (str "get a " coll " entry by id")
        "request" {"method" "GET" "path" item}

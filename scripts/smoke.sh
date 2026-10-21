@@ -51,6 +51,12 @@ check "SCIM eq filter" 200 "$(status_of -G localhost:$PORT/api/v1/users --data-u
 id=$(curl -s -X POST localhost:$PORT/api/v1/users -H 'Content-Type: application/json' \
        -d '{"profile":{"login":"smoke@example.com","email":"smoke@example.com"}}' | json_field '.id')
 check "created user is readable" 200 "$(status_of localhost:$PORT/api/v1/users/$id)"
+check "SCIM quoted value with 'and'" 200 \
+  "$(status_of -G localhost:$PORT/api/v1/users --data-urlencode 'filter=profile.lastName eq "Smith and Sons"')"
+check "SCIM gt over timestamps" 200 \
+  "$(status_of -G localhost:$PORT/api/v1/users --data-urlencode 'filter=lastUpdated gt "2020-01-01T00:00:00.000Z"')"
+check "malformed filter is Okta's E0000031" E0000031 \
+  "$(curl -s -G localhost:$PORT/api/v1/users --data-urlencode 'filter=status zz "x"' | json_field '.errorCode')"
 "$MS" conform okta/okta --corpus "$ROOT/examples/okta-corpus.json" >/dev/null
 check "conform golden corpus" 0 $?
 

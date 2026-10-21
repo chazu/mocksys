@@ -26,9 +26,11 @@
     list:   {collection filter after limit link}       filtered + cursor-paginated
 
   Collections are declared at the contract's `state.collections` (idField + a seed
-  array name) and seeded once into shared state. The filter grammar is SCIM-ish:
-  `field op \"value\"` clauses joined by ` and `/` or `, ops `eq sw co pr`, dotted
-  field paths (`profile.email`). Templates inside specs reference vars with `{name}`."
+  array name) and seeded once into shared state. Filters are SCIM (RFC 7644):
+  `field op value` comparisons with ops `eq ne co sw ew gt ge lt le pr`, combined
+  with `and`/`or`/`not` and parentheses, over dotted field paths (`profile.email`).
+  A malformed filter answers with the verb's `invalid` response (default: a SCIM
+  400 invalidFilter error). Templates inside specs reference vars with `{name}`."
   (:require [clojure.string :as str]))
 
 (defn stateful?
@@ -123,6 +125,21 @@
 
 ;; --- collection verb emission (each is terminal: forms + returns a response) ---
 
+(def ^:private default-invalid-filter
+  {"status" 400
+   "json"   {"schemas"  ["urn:ietf:params:scim:api:messages:2.0:Error"]
+             "scimType" "invalidFilter"
+             "detail"   "{filterError}"
+             "status"   "400"}})
+
+(defn- filter-guard
+  "Wrap JS statements that compile a SCIM filter so a malformed one answers with
+   `spec`'s `invalid` response rather than failing the injection. The parser's
+   message is bound as {filterError}."
+  [body spec]
+  (str "try{" body "}catch(_e){if(_e&&_e.scim){V.filterError=_e.message;return "
+       (resp-js (or (get spec "invalid") default-invalid-filter)) ";}throw _e;}"))
+
 (defn- create-js [c]
   (let [coll   (js (get c "collection"))
         merges (for [v (get c "merge" [])] (str "V[" (js v) "]||{}"))
@@ -177,10 +194,12 @@
         limit  (if (get l "limit")  (str "parseInt(interp(" (js (get l "limit")) ",V),10)") "0")
         link   (get l "link")
         status (num-lit "status" (or (get l "status") 200))]
-    (str "{var _p=coll(state," coll ").list({filter:" filt ",after:" after ",limit:" limit "});"
-         "var _h={};"
-         (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",{next:_p.next});}"))
-         "return collResp(" status ",_p.items,_h);}")))
+    (filter-guard
+     (str "var _p=coll(state," coll ").list({filter:" filt ",after:" after ",limit:" limit "});"
+          "var _h={};"
+          (when link (str "if(_p.next){_h[\"Link\"]=interp(" (js link) ",{next:_p.next});}"))
+          "return collResp(" status ",_p.items,_h);")
+     l)))
 
 ;; --- find: read-phase collection lookup (non-terminal) --------------------
 
@@ -201,16 +220,18 @@
         gate  (if-let [flt (get f "filter")]
                 (str "if(_r!==undefined&&!scimPred(interp(" (js flt) ",V))(_r)){_r=undefined;}")
                 "")
-        miss  (resp-js (or (get f "miss") {"status" 404}))]
-    (if (contains? f "field")
-      (let [field (js (get f "field"))
-            eq    (str "interp(" (js (get f "eq")) ",V)")]
-        (str "{var _c=coll(state," coll "),_r,_mm=_c.m,_k;"
-             "for(_k in _mm){if(String(dget(_mm[_k]," field "))===" eq "){_r=_mm[_k];break;}}"
-             gate "if(_r===undefined){return " miss ";}" bindv "}"))
-      (let [key* (str "interp(" (js (get f "key")) ",V)")]
-        (str "{var _r=coll(state," coll ").get(" key* ");"
-             gate "if(_r===undefined){return " miss ";}" bindv "}")))))
+        miss  (resp-js (or (get f "miss") {"status" 404}))
+        guard (if (get f "filter") #(filter-guard % f) identity)]
+    (guard
+     (if (contains? f "field")
+       (let [field (js (get f "field"))
+             eq    (str "interp(" (js (get f "eq")) ",V)")]
+         (str "{var _c=coll(state," coll "),_r,_mm=_c.m,_k;"
+              "for(_k in _mm){if(String(dget(_mm[_k]," field "))===" eq "){_r=_mm[_k];break;}}"
+              gate "if(_r===undefined){return " miss ";}" bindv "}"))
+       (let [key* (str "interp(" (js (get f "key")) ",V)")]
+         (str "{var _r=coll(state," coll ").get(" key* ");"
+              gate "if(_r===undefined){return " miss ";}" bindv "}"))))))
 
 (defn- finds-of
   "`find` is a single map or a list of maps (the FK-guard reads as one key); return
@@ -319,9 +340,11 @@
         row    (js (get r "row" ""))
         wrap   (js (get r "wrap" "{rows}"))
         status (num-lit "status" (or (get r "status") 200))]
-    (str "{var _p=coll(state," coll ").list({filter:" filt "});"
-         "var _html=renderPage(_p.items," row "," wrap ",V);"
-         "return {statusCode:" status ",headers:withRl({'Content-Type':'text/html; charset=utf-8'}),body:_html};}")))
+    (filter-guard
+     (str "var _p=coll(state," coll ").list({filter:" filt "});"
+          "var _html=renderPage(_p.items," row "," wrap ",V);"
+          "return {statusCode:" status ",headers:withRl({'Content-Type':'text/html; charset=utf-8'}),body:_html};")
+     r)))
 
 (defn- collection-terminal-js [verb effect]
   (case verb
@@ -505,13 +528,37 @@
    "var s={},j;for(j in a[k])s[j]=a[k][j];for(j in b[k])s[j]=b[k][j];o[k]=s;}else{o[k]=b[k];}}return o;}"
    ;; --- collections ---
    "function dget(o,p){var ps=String(p).split('.'),i;for(i=0;i<ps.length&&o!=null;i++){o=o[ps[i]];}return o;}"
-   "function clause(c){c=String(c).trim();var m=c.match(/^(\\S+)\\s+(eq|sw|co|pr)(?:\\s+\"([^\"]*)\")?$/i);"
-   "if(!m){return function(){return false;};}var f=m[1],op=m[2].toLowerCase(),val=m[3];"
-   "return function(o){var v=dget(o,f);if(op==='pr')return v!=null&&v!=='';if(val===undefined||v==null)return false;v=String(v);"
-   "if(op==='eq')return v===val;if(op==='sw')return v.indexOf(val)===0;if(op==='co')return v.indexOf(val)>=0;return false;};}"
-   "function scimPred(expr){var ors=String(expr).split(/\\s+or\\s+/i).map(function(o){"
-   "var ands=o.split(/\\s+and\\s+/i).map(clause);return function(x){return ands.every(function(f){return f(x);});};});"
-   "return function(x){return ors.some(function(f){return f(x);});};}"
+   ;; SCIM filter (RFC 7644 3.4.2.2): eq ne co sw ew gt ge lt le pr, and/or/not,
+   ;; parentheses, quoted strings with escapes, number/boolean/null literals. A
+   ;; malformed filter throws an error tagged `scim` (see filter-guard).
+   "function scimPred(expr){var s=String(expr),i=0,n=s.length,look=null;"
+   "function fail(m){var e=new Error('Invalid filter: '+m);e.scim=true;throw e;}"
+   "function sp(c){return c.charCodeAt(0)<=32;}"
+   "function tok(){while(i<n&&sp(s[i]))i++;if(i>=n)return {t:'end'};var c=s[i],k;"
+   "if(c==='('||c===')'){i++;return {t:c};}"
+   "if(c==='\"'){k=i+1;while(k<n&&s[k]!=='\"'){if(s.charCodeAt(k)===92)k++;k++;}if(k>=n)fail('unterminated string');var raw=s.slice(i,k+1);i=k+1;try{return {t:'v',v:JSON.parse(raw)};}catch(e){fail('bad string '+raw);}}"
+   "k=i;while(i<n&&!sp(s[i])&&s[i]!=='('&&s[i]!==')'&&s[i]!=='\"')i++;return {t:'w',v:s.slice(k,i)};}"
+   "function peek(){if(look===null)look=tok();return look;}"
+   "function next(){var x=peek();look=null;return x;}"
+   "function kw(w){var x=peek();return x.t==='w'&&x.v.toLowerCase()===w;}"
+   "function close(){if(next().t!==')')fail('expected )');}"
+   "function orE(){var a=andE();while(kw('or')){next();a=(function(l,r){return function(o){return l(o)||r(o);};})(a,andE());}return a;}"
+   "function andE(){var a=unary();while(kw('and')){next();a=(function(l,r){return function(o){return l(o)&&r(o);};})(a,unary());}return a;}"
+   "function unary(){var f;if(kw('not')){next();if(next().t!=='(')fail('expected ( after not');f=orE();close();return function(o){return !f(o);};}"
+   "if(peek().t==='('){next();f=orE();close();return f;}return comparison();}"
+   "function literal(x){if(x.t==='v')return x.v;if(x.t==='w'){var w=x.v.toLowerCase();if(w==='true')return true;if(w==='false')return false;if(w==='null')return null;if(!isNaN(Number(x.v)))return Number(x.v);}fail('expected a value');}"
+   "function eqv(v,x){if(x===null)return v==null;if(typeof x==='string')return v!=null&&String(v)===x;return v===x;}"
+   "function cmp(a,b){if(typeof a==='number'&&typeof b==='number')return a-b;a=String(a);b=String(b);return a<b?-1:a>b?1:0;}"
+   "function comparison(){var a=next();if(a.t!=='w')fail('expected an attribute');var o=next();if(o.t!=='w')fail('expected an operator after '+a.v);"
+   "var f=a.v,op=o.v.toLowerCase();"
+   "if(op==='pr')return function(r){var v=dget(r,f);return v!=null&&v!=='';};"
+   "if(['eq','ne','co','sw','ew','gt','ge','lt','le'].indexOf(op)<0)fail('unknown operator '+o.v);"
+   "var x=literal(next());"
+   "return function(r){var v=dget(r,f),c;if(op==='eq')return eqv(v,x);if(op==='ne')return !eqv(v,x);if(v==null||x==null)return false;"
+   "if(op==='co')return String(v).indexOf(String(x))>=0;if(op==='sw')return String(v).indexOf(String(x))===0;"
+   "if(op==='ew'){v=String(v);x=String(x);return v.length>=x.length&&v.slice(v.length-x.length)===x;}"
+   "c=cmp(v,x);return op==='gt'?c>0:op==='ge'?c>=0:op==='lt'?c<0:c<=0;};}"
+   "if(peek().t==='end')fail('empty filter');var root=orE();if(peek().t!=='end')fail('unexpected '+(peek().v||peek().t));return root;}"
    "function Coll(m,f){this.m=m;this.f=f;}"
    "Coll.prototype.get=function(id){return this.m[String(id)];};"
    "Coll.prototype.put=function(o){this.m[String(o[this.f])]=o;return o;};"
