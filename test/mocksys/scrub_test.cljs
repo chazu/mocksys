@@ -7,6 +7,10 @@
   (let [c {"genes" [{"crud-collection" {"coll" "users" "base" "/a"}}]}]
     (is (= c (:contract (scrub/scrub-contract c #{"authorization"} #{"date"}))))))
 
+(deftest an-effect-operation-gains-no-responses-key
+  (let [c {"operations" [{"id" "e" "effect" {"respond" {"status" 200}}}]}]
+    (is (= c (:contract (scrub/scrub-contract c #{"authorization"} #{"date"}))))))
+
 (deftest operation-headers-are-cleaned
   (let [c {"operations" [{"id" "x"
                           "responses" [{"status" 200

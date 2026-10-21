@@ -63,15 +63,12 @@
                     (swap! acc #(-> % (update :redacted into redacted) (update :stripped into stripped)))
                     (assoc owner "headers" headers))
                   owner))
-        c'    (update contract "operations"
-                      (fn [ops]
-                        (mapv (fn [op]
-                                (update op "responses"
-                                        (fn [rs]
-                                          (mapv (fn [r]
-                                                  (cond-> (clean r)
-                                                    (get r "examples")
-                                                    (update "examples" update-vals clean)))
-                                                rs))))
-                              ops)))]
+        ;; update only keys that are present: a genes-only contract has no
+        ;; `operations`, and an effect operation has no `responses`
+        update-present (fn [m k f] (if (contains? m k) (update m k f) m))
+        clean-response (fn [r] (cond-> (clean r)
+                                 (get r "examples") (update "examples" update-vals clean)))
+        c'    (update-present contract "operations"
+                              (fn [ops]
+                                (mapv #(update-present % "responses" (partial mapv clean-response)) ops)))]
     (assoc @acc :contract c')))
