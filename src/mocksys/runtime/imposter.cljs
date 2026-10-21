@@ -180,19 +180,25 @@
   (try (modules/load-verbs (map vector (get spec "modules") (get spec "modules")) (get spec "calls"))
        (catch :default e (bad "" (ex-message e)))))
 
+(def default-max-requests 10000)
+
 (defn create
-  "A live imposter (an atom) from a posted spec. Throws ex-info {:code \"bad data\"}
-   naming the offending field when the spec steps outside the inventory."
-  [spec]
-  (validate! spec)
-  (let [stubs (vec (get spec "stubs"))]
-    (atom {:spec       (dissoc spec "stubs")
-           :stubs      (vec (map-indexed (fn [i s] {:id i :spec s :cursor 0}) stubs))
-           :next-id    (count stubs)
-           :requests   []
-           :count      0
-           :state      #js {}
-           :injections (injections-of stubs (verbs-of spec))})))
+  "A live imposter (an atom) from a posted spec. With recordRequests it keeps the
+   newest `max-requests` requests. Throws ex-info {:code \"bad data\"} naming the
+   offending field when the spec steps outside the inventory."
+  ([spec] (create spec {}))
+  ([spec {:keys [max-requests] :or {max-requests default-max-requests}}]
+   (validate! spec)
+   (let [stubs (vec (get spec "stubs"))]
+     (atom {:spec         (dissoc spec "stubs")
+            :stubs        (vec (map-indexed (fn [i s] {:id i :spec s :cursor 0}) stubs))
+            :next-id      (count stubs)
+            :requests     #queue []
+            :max-requests max-requests
+            :dropped      0
+            :count        0
+            :state        #js {}
+            :injections   (injections-of stubs (verbs-of spec))}))))
 
 ;; --- injection ---------------------------------------------------------------
 
@@ -290,10 +296,14 @@
 ;; --- serving ---------------------------------------------------------------------
 
 (defn- record-request! [imp request]
-  (swap! imp (fn [s]
-               (cond-> (update s :count inc)
-                 (get-in s [:spec "recordRequests"])
-                 (update :requests conj (assoc request "timestamp" (.toJSON (js/Date.))))))))
+  (swap! imp (fn [{:keys [max-requests] :as s}]
+               (let [s (update s :count inc)]
+                 (if-not (get-in s [:spec "recordRequests"])
+                   s
+                   (let [rs (conj (:requests s) (assoc request "timestamp" (.toJSON (js/Date.))))]
+                     (if (> (count rs) max-requests)
+                       (assoc s :requests (pop rs) :dropped (inc (:dropped s)))
+                       (assoc s :requests rs))))))))
 
 (defn- next-response!
   "The first stub whose predicates hold and that stub's next response (cycling
@@ -358,18 +368,19 @@
         {:fault (get config "fault")}))))
 
 (defn clear-requests! [imp]
-  (swap! imp assoc :requests []))
+  (swap! imp assoc :requests #queue [] :dropped 0))
 
 (defn port [imp] (get-in @imp [:spec "port"]))
 (defn protocol [imp] (get-in @imp [:spec "protocol"]))
 
 (defn to-json
-  "The imposter as the admin API shows it. `:list?` is the summary row;
-   `:replayable?` drops requests and proxy timings; `:remove-proxies?` drops proxy
+  "The imposter as the admin API shows it. `:list?` is the summary row; the full
+   view adds the recorded requests and how many the cap dropped. `:replayable?`
+   drops requests and proxy timings; `:remove-proxies?` drops proxy
    responses and any stub left with none. Every form but the summary keeps `modules`
    and `calls`, so a replayable imposter posts back as it was."
   [imp {:keys [list? replayable? remove-proxies?]}]
-  (let [{:keys [spec stubs requests] n :count} @imp
+  (let [{:keys [spec stubs requests dropped] n :count} @imp
         header (cond-> (select-keys spec ["protocol" "port" "name" "modules" "calls"])
                  (not replayable?) (assoc "numberOfRequests" n))
         body   (merge header (select-keys spec ["descriptor"]))
@@ -383,4 +394,4 @@
       list?       (dissoc header "modules" "calls")
       replayable? (assoc body "recordRequests" (boolean (get spec "recordRequests")) "stubs" stubs)
       :else       (assoc body "recordRequests" (boolean (get spec "recordRequests"))
-                         "requests" requests "stubs" stubs))))
+                         "requests" (vec requests) "droppedRequests" dropped "stubs" stubs))))

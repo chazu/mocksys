@@ -18,6 +18,7 @@ export MOCKSYS_HOME="$WORK/store"
 cd "$WORK"
 cleanup() {
   "$MS" daemon stop >/dev/null 2>&1 || true
+  [ -n "${ADMIN2:-}" ] && env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME="$WORK/store2" "$MS" daemon stop >/dev/null 2>&1 || true
   [ -n "${OLD_PID:-}" ] && kill "$OLD_PID" 2>/dev/null || true
   rm -rf "$WORK"
 }
@@ -74,6 +75,18 @@ else
 fi
 check "the admin API refuses a browser origin" 403 \
   "$(status_of -H 'Origin: https://evil.example' "$ADMIN/imposters")"
+TOKEN_FILE="$MOCKSYS_HOME/daemon-$MOCKSYS_ADMIN_PORT.token"
+check "an admin call without the token is 401" 401 "$(status_of "$ADMIN/imposters")"
+check "with the store's token it is served" 200 \
+  "$(status_of -H "Authorization: Bearer $(cat "$TOKEN_FILE")" "$ADMIN/imposters")"
+check "only the daemon's user can read the token" 600 \
+  "$(node -p '(require("fs").statSync(process.argv[1]).mode & 0o777).toString(8)' "$TOKEN_FILE")"
+out="$(MOCKSYS_HOME="$WORK/other" "$MS" ls 2>&1)" && code=0 || code=$?
+check "a CLI on another store, set to this daemon's port, is refused" 1 "$code"
+check "and told whose daemon it reached" 1 \
+  "$(echo "$out" | grep -c "daemon on 127.0.0.1:$MOCKSYS_ADMIN_PORT belongs to another store or user")"
+check "and its pid, to stop it" 1 "$(echo "$out" | grep -c "stop it (pid $(curl -s "$ADMIN/" | json_field '.pid'))")"
+check "and how to run its own" 1 "$(echo "$out" | grep -c MOCKSYS_ADMIN_PORT)"
 "$MS" stop demo/hello >/dev/null
 
 echo "# okta twin"
@@ -159,9 +172,21 @@ mv "$WH/verbs.js" "$MOCKSYS_HOME/outside.js"
 out="$(MOCKSYS_HOME="$WORK/store2" "$MS" unpack "$WORK/webhooks.mock.tgz" 2>&1)"
 check "unpack names the module code it brought" 1 \
   "$(echo "$out" | grep -c 'demo/webhooks runs JavaScript from its modules (./verbs.js)')"
-MOCKSYS_HOME="$WORK/store2" "$MS" run demo/webhooks --port $P3 >/dev/null
+store2() { env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME="$WORK/store2" "$MS" "$@"; }
+ADMIN2="$(store2 home | sed -n 's/^daemon: *127\.0\.0\.1://p')"
+check "home shows a second store's admin port, derived from its path" yes \
+  "$([ "${ADMIN2:-0}" -ge 26000 ] && [ "$ADMIN2" -le 26999 ] && echo yes || echo no)"
+store2 run demo/webhooks --port $P3 >/dev/null
 check "a bundle carries the module" 202 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
-MOCKSYS_HOME="$WORK/store2" "$MS" stop demo/webhooks >/dev/null
+check "the second store's daemon runs beside the first" "mocksys mocksys" \
+  "$(curl -s "http://127.0.0.1:$ADMIN2/" | json_field '.name') $(curl -s "$ADMIN/" | json_field '.name')"
+"$MS" ls >/dev/null && code=0 || code=$?
+check "and the first store still reaches its own" 0 "$code"
+mkdir -p "$WORK/sub"
+out="$(cd "$WORK/sub" && env -u MOCKSYS_ADMIN_PORT MOCKSYS_HOME=../store2 "$MS" ls 2>&1)" && code=0 || code=$?
+check "a relative store from a subdirectory reaches the same daemon" "0 1" \
+  "$code $(echo "$out" | grep -c '▶ demo/webhooks.*LIVE')"
+store2 daemon stop >/dev/null
 sed -i.bak 's#\./verbs\.js#../../outside.js#' "$WH/contract.yaml"
 out="$("$MS" validate demo/webhooks 2>&1)" && code=0 || code=$?
 check "a module outside the scenario directory is refused" 1 "$code"
@@ -265,6 +290,17 @@ check "validate refuses a streaming rpc" 1 "$code"
 check "and says why" 1 "$(echo "$out" | grep -c 'get: rpc todo.v1.Todos/WatchTodos is server-streaming; only unary rpcs are served')"
 cp "$G/contract.yaml" "$MOCKSYS_HOME/demo/todos/contract.yaml"
 "$MS" stop demo/todos >/dev/null
+
+echo "# recorded-request cap"
+"$MS" daemon stop >/dev/null
+MOCKSYS_MAX_RECORDED_REQUESTS=2 "$MS" run demo/hello --port $PORT >/dev/null
+for p in /first /hello /hello; do curl -s -o /dev/null "localhost:$PORT$p"; done
+check "requests shows the newest 2 and counts the dropped one" 1 \
+  "$("$MS" requests demo/hello | grep -c '(2; 1 older dropped)')"
+out="$("$MS" assert demo/hello --saw 'GET /first' 2>&1)" && code=0 || code=$?
+check "assert misses a dropped call" 1 "$code"
+check "and says it may have been dropped" 1 "$(echo "$out" | grep -c '1 older request(s) were dropped')"
+"$MS" stop demo/hello >/dev/null
 
 echo "# daemon stop"
 "$MS" daemon stop >/dev/null

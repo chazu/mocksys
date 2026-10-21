@@ -3,7 +3,8 @@
 ## What mocksys is
 
 mocksys is a CLI with its own runtime: a daemon (`mocksys daemon`) that serves HTTP and gRPC
-mocks and takes commands over an admin API on `127.0.0.1:2626`. The CLI starts the
+mocks and takes commands over an admin API on `127.0.0.1` (port 2626 for the default
+store, see [the daemon](#the-runtime)). The CLI starts the
 daemon on first use and keeps it behind the commands. You work in agent vocabulary
 (*service, scenario, contract, example, effect, kit, twin*), never in the daemon's
 *imposters* and *stubs*.
@@ -76,7 +77,10 @@ stub order = contract order; first match wins).
 ## The on-disk store
 
 One shared, git-backed library — the same from every project. Location: `$MOCKSYS_HOME`,
-else `~/.mocksys`. (Set `MOCKSYS_HOME=./.mocks` to scope mocks to a single project.)
+else `~/.mocksys`; a relative `MOCKSYS_HOME` is resolved against the working directory,
+so a command run from a subdirectory finds the same store. (Set `MOCKSYS_HOME=./.mocks`
+to scope mocks to a single project. A daemon serves one store, and each store gets its
+own admin port, so the project store runs its own daemon.)
 
 ```
 ~/.mocksys/
@@ -99,7 +103,14 @@ a contract lifted from its static responses; any `inject` in it is dropped.
 ## The runtime
 
 `run` ensures the daemon is up and posts the imposter with `recordRequests=true`
-(so `requests`/`assert`/`conform` have data). Port resolution order: explicit `--port` >
+(so `requests`/`assert`/`conform` have data). Each imposter keeps its newest 10000
+requests, or `MOCKSYS_MAX_RECORDED_REQUESTS` from the daemon's environment, read once
+when the daemon starts. It must be a whole number above 0: a mock that records but keeps
+nothing would fail every `assert`, so 0 stops the daemon at start like any other bad
+value.
+`numberOfRequests` counts every request, and `GET /imposters/:port` reports the
+dropped ones as `droppedRequests`. An `assert` that misses says when the call may have
+been dropped. Port resolution order: explicit `--port` >
 the already-running port > a port **pinned** on the contract > a fresh free port. An
 explicit `--port` is persisted onto the contract as a pin. `run --watch` recompiles and
 reloads on every change to `contract.yaml` and, for a grpc contract, to its proto and the
@@ -115,8 +126,25 @@ truncated on each start. If the process cannot start, exits, or does not answer 
 version answers, `ensure-up!` stops it with `DELETE /`, starts a fresh one, and prints
 one stderr line naming the mocks that stopped. `mocksys daemon stop` sends the same
 `DELETE /`. If something other than mocksys answers, it stops with an error naming
-`MOCKSYS_ADMIN_PORT`, which overrides the default 2626. The daemon keeps imposters in
-memory, so they last until it exits.
+`MOCKSYS_ADMIN_PORT`. The admin port is `MOCKSYS_ADMIN_PORT` when set. Otherwise it is
+2626 for the default store, and for any other store a port in 26000–26999 picked by a
+SHA-256 of the store's path with its links resolved. That range is below the ephemeral
+range of Linux, macOS and Windows, where mocks get their ports, so a mock never holds
+it. Two stores whose paths hash to the same port share it: the second one gets a 401,
+and `MOCKSYS_ADMIN_PORT` separates them. `mocksys home` prints the port. The daemon
+keeps imposters in memory, so they last until it exits.
+
+**The admin token.** Once the daemon holds its port, it writes a random 32-byte token
+to `$MOCKSYS_HOME/daemon-<port>.token`, mode 0600. One file per port lets two daemons
+share a store on different ports, and a daemon that loses the port race leaves the
+running daemon's token in place. Every admin call except `GET /` must carry
+`Authorization: Bearer <token>`, compared in constant time; a missing or wrong token
+gets a 401. `mocksys.mb` reads the token file on every call. A 401 means the daemon on
+the port was started from another store or by another user, so the CLI stops with an
+error that names the token file it read, the pid that daemon reports on `GET /`, and
+`MOCKSYS_ADMIN_PORT`. Replacing a daemon of
+another version needs the token too, so the CLI never stops a daemon it cannot
+authenticate to.
 
 The daemon implements exactly what mocksys emits, and rejects anything else with a
 400 that names the field:
@@ -127,7 +155,7 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 | Predicates | `equals`, `deepEquals`, `matches`, `exists` over method, path, query, headers; `jsonpath` (plain paths) over the body. Case-insensitive, as in Mountebank. |
 | Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `inject` (source that evaluates to a function), `proxy` (`proxyOnce` with `predicateGenerators`; `to` is an origin with no path, query or fragment), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
 | Behaviors | `wait`, `copy` (regex or jsonpath) |
-| Admin routes | `GET /` (name, version, pid), `DELETE /` (stop), `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
+| Admin routes | `GET /` (name, version, pid; needs no token), `DELETE /` (stop), `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
 
 **gRPC.** A `grpc` imposter gets a grpc-js server in place of the HTTP one. It
 registers every unary method of the descriptor. A call becomes an ordinary request
@@ -165,6 +193,9 @@ only ever posts injections it generated itself, plus the modules a contract list
 - The admin API refuses a request that carries an `Origin` header or names a host
   other than `127.0.0.1` or `localhost`. A web page therefore cannot post an imposter,
   directly or through DNS rebinding.
+- Every admin call but `GET /` needs the daemon's token, which only the user who
+  started the daemon can read. Another local user therefore cannot post an imposter
+  and run code as the daemon's owner.
 - `imposter.json` is a build output, never an input. A pulled, unpacked or hand-edited
   one is overwritten from the contract before anything is posted.
 - Every contract value spliced into generated JS goes through `JSON.stringify` (strings,

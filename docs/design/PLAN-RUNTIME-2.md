@@ -18,17 +18,39 @@ those belong in the interpreter, not in code that E deletes.
 
 **Admin token.** Today any local user can post an imposter, and an imposter can carry
 module code, so any local user can run code as the daemon's owner.
-- At start, before it listens, the daemon writes a random 32-byte token to
-  `$MOCKSYS_HOME/daemon.token`, mode 0600.
+- At start, once it holds its port, the daemon writes a random 32-byte token to
+  `$MOCKSYS_HOME/daemon-<port>.token`, mode 0600, through a rename so a client never
+  reads half a token. The temp file is removed and then created with `wx`, since a
+  mode only applies to a new file and a link at that path would be followed. One file
+  per port lets two daemons share a store on different admin ports. Writing after the
+  listen means a daemon that loses the port race leaves the running daemon's token
+  alone. No client reads the token before the port answers, so nothing is lost by
+  waiting.
+- A daemon therefore serves one store, so each store gets its own admin port. Without
+  `MOCKSYS_ADMIN_PORT`, the default store `~/.mocksys` keeps 2626 and any other store
+  takes 26000 plus the first four bytes of `sha256(path)` mod 1000, its path absolute
+  and with links resolved as far as it exists. A project store (`MOCKSYS_HOME=./.mocks`) then works beside the
+  shared daemon with no setting, from any subdirectory. The range is below the
+  ephemeral ranges of Linux (32768+), macOS and Windows (49152+), where mock ports come
+  from. `mocksys home` prints the port. A hash collision, or an explicit port another
+  store holds, still gets the 401 below. In-process test daemons take the token from
+  `runtime/start!`'s result instead of a file.
+- A request whose URL does not parse (`GET //`) gets a 400 after the origin check and
+  before the token check, rather than a throw in the request listener.
 - Every admin call except `GET /` needs `Authorization: Bearer <token>`, compared in
   constant time. A missing or wrong token gets 401.
 - `mocksys.mb` reads the token file for every call. A 401 means the daemon on that port
-  belongs to another store or user. The error says so and names `MOCKSYS_ADMIN_PORT`.
+  belongs to another store or user. The error says so, names the pid that daemon
+  reports on `GET /` so the user can stop it, and names `MOCKSYS_ADMIN_PORT`.
 - Replacing a daemon after a version mismatch needs the token too. Without it the CLI
   fails with the same message.
 
 **Recorded-request cap.** An imposter with `recordRequests` keeps the newest N requests,
-default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment.
+default 10000, set by `MOCKSYS_MAX_RECORDED_REQUESTS` in the daemon's environment and
+read once at start (a whole number above 0; anything else stops the daemon at start, and
+the CLI shows the log). 0 is refused rather than read as "keep none": a mock that records
+and keeps nothing fails every `assert`, and an imposter that should keep nothing already
+says so with `recordRequests: false`.
 `numberOfRequests` still counts every request. The full imposter view reports how many
 were dropped. `assert` says when a dropped request could change its answer.
 

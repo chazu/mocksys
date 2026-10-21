@@ -9,6 +9,7 @@
   (:require [promesa.core :as p]
             [clojure.string :as str]
             ["node:child_process" :as cp]
+            ["node:crypto" :as crypto]
             ["node:fs" :as fs]
             ["node:net" :as net]
             ["node:path" :as path]
@@ -17,9 +18,26 @@
 
 (def default-admin-port 2626)
 
+(defn- real-path
+  "`p` with its links resolved as far as it exists, so a store named through a link,
+   before or after it is created, is the same store."
+  [p]
+  (try (fs/realpathSync p)
+       (catch :default _
+         (let [parent (path/dirname p)]
+           (if (= parent p) p (path/join (real-path parent) (path/basename p)))))))
+
+(defn- store-admin-port
+  "A port in 26000-26999 that a stable hash of the store's path picks. The range is
+   below the ephemeral ranges of Linux, macOS and Windows, where mocks get their
+   ports, so a mock never takes it."
+  [root]
+  (+ 26000 (mod (.readUInt32BE (.digest (.update (crypto/createHash "sha256") root)) 0) 1000)))
+
 (defn admin-port
-  "The daemon's admin port: $MOCKSYS_ADMIN_PORT, else 2626 (not Mountebank's 2525,
-   so a real Mountebank is never mistaken for the daemon)."
+  "The daemon's admin port: $MOCKSYS_ADMIN_PORT, else 2626 for the default store
+   (not Mountebank's 2525, so a real Mountebank is never mistaken for the daemon),
+   else a port derived from the store's path, since a daemon serves one store."
   []
   (let [v (.-MOCKSYS_ADMIN_PORT js/process.env)]
     (if (and v (not= v ""))
@@ -27,25 +45,56 @@
         (if (and (js/Number.isInteger n) (< 0 n 65536))
           n
           (throw (js/Error. (str "MOCKSYS_ADMIN_PORT must be a port number, got " (pr-str v))))))
-      default-admin-port)))
+      (let [root (real-path store/root)]
+        (if (= root (real-path store/default-root)) default-admin-port (store-admin-port root))))))
 
 (defn- base [] (str "http://127.0.0.1:" (admin-port)))
 
+(defn token-path
+  "Where the daemon on `port` writes its admin token. One file per port, so daemons
+   that share a store on different ports keep their own."
+  [port]
+  (path/join store/root (str "daemon-" port ".token")))
+
+(defn- read-token []
+  (try (str/trim (fs/readFileSync (token-path (admin-port)) "utf8"))
+       (catch :default _ nil)))
+
 ;; --- HTTP -----------------------------------------------------------------
+
+(defn- call
+  "One admin call with the store's token, as {:status int :body <clj|nil>}."
+  [method path body]
+  (let [token (read-token)
+        opts  #js {:method  method
+                   :headers (clj->js (cond-> {"Content-Type" "application/json"}
+                                       token (assoc "Authorization" (str "Bearer " token))))}]
+    (when (some? body)
+      (set! (.-body opts) (js/JSON.stringify (clj->js body))))
+    (p/let [res  (js/fetch (str (base) path) opts)
+            text (.text res)]
+      {:status (.-status res)
+       :body   (when (seq text) (js->clj (js/JSON.parse text)))})))
+
+(defn- another-store-error
+  "`pid` is the one the daemon reports on GET /, which needs no token."
+  [pid]
+  (js/Error. (str "the mocksys daemon on 127.0.0.1:" (admin-port) " belongs to another store or user "
+                  "(its token is not the one in " (token-path (admin-port)) "). Use the MOCKSYS_HOME it was "
+                  "started with, " (when pid (str "stop it (pid " pid "), "))
+                  "or set MOCKSYS_ADMIN_PORT to another port to run a daemon for this store")))
 
 (defn fetch-json
   "Call the admin API. Returns {:status int :body <clj|nil>}.
-   `body` (clj) is JSON-encoded when present."
+   `body` (clj) is JSON-encoded when present. A 401 throws: the daemon on the port
+   was started from another store, or by another user."
   ([method path] (fetch-json method path nil))
   ([method path body]
-   (let [opts #js {:method method
-                   :headers #js {"Content-Type" "application/json"}}]
-     (when (some? body)
-       (set! (.-body opts) (js/JSON.stringify (clj->js body))))
-     (p/let [res  (js/fetch (str (base) path) opts)
-             text (.text res)]
-       {:status (.-status res)
-        :body   (when (seq text) (js->clj (js/JSON.parse text)))}))))
+   (p/let [{:keys [status] :as res} (call method path body)]
+     (if (= 401 status)
+       (p/let [ident (-> (call "GET" "/" nil) (p/then :body) (p/catch (constantly nil)))]
+         (throw (another-store-error (when (map? ident) (let [pid (get ident "pid")] (when (integer? pid) pid))))))
+       res))))
 
 ;; --- Lifecycle ------------------------------------------------------------
 
@@ -57,7 +106,7 @@
   []
   ;; a bad MOCKSYS_ADMIN_PORT must surface, not be read as "down" by the catch below
   (admin-port)
-  (-> (fetch-json "GET" "/")
+  (-> (call "GET" "/" nil)
       (p/then (fn [{:keys [body]}]
                 (if (and (map? body) (= "mocksys" (get body "name")))
                   {:state :up :version (get body "version") :pid (get body "pid")}

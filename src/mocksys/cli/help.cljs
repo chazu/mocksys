@@ -95,7 +95,7 @@
      "## Store + sharing"
      "All scenarios live in one shared library at ~/.mocksys (a git repo; override"
      "with MOCKSYS_HOME). It's the same library from every project."
-     "  mocksys home                          # store path + git status"
+     "  mocksys home                          # store path, daemon port + git status"
      "  mocksys status / log                  # uncommitted changes / recent history"
      "  mocksys publish github/create-issue   # git-commit a scenario"
      "  mocksys rm github/create-issue        # delete a scenario (or a whole service)"
@@ -155,7 +155,7 @@
   (println "  mocksys unpack <file.mock.tgz>")
   (println)
   (println "  STORE (git-backed shared library)")
-  (println "  mocksys home                                    show the store path + git status")
+  (println "  mocksys home                                    show the store path, daemon port + git status")
   (println "  mocksys status                                  list uncommitted changes in the store")
   (println "  mocksys log [--n N]                             recent store history")
   (println "  mocksys restore <name> | --all                 discard uncommitted local changes")

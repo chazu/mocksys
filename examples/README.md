@@ -18,7 +18,7 @@ Runnable contracts and a conform corpus that back the
 ## Quick start
 
 These examples scope the store to this repo with `MOCKSYS_HOME=./.mocks` so they never
-touch your shared `~/.mocksys`.
+touch your shared `~/.mocksys`. That store gets its own daemon on its own admin port.
 
 ```sh
 export MOCKSYS_HOME=./.mocks

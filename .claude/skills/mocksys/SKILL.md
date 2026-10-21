@@ -127,14 +127,23 @@ mocksys clock <twin> advance 1h                                    # move the de
 ## Notes for agents
 
 - Scenarios live in one git-backed store at `~/.mocksys` (override `MOCKSYS_HOME`; set
-  `MOCKSYS_HOME=./.mocks` to scope to a project).
+  `MOCKSYS_HOME=./.mocks` to scope to a project). A daemon serves one store, and each
+  store gets its own admin port, so a project store runs beside `~/.mocksys` with no
+  other setting.
 - `mocksys` starts its daemon for you and leaves it running; never run `mocksys daemon`
-  yourself. Its admin API is `127.0.0.1:2626` (`MOCKSYS_ADMIN_PORT` overrides).
+  yourself. Its admin API is `127.0.0.1:2626` for `~/.mocksys`, else a port in
+  26000–26999 derived from the store's path; `mocksys home` prints it, and
+  `MOCKSYS_ADMIN_PORT` overrides it. The error "belongs to another store or user" means
+  that port is held by another store's daemon, and names its pid.
   `mocksys daemon stop` stops it and every running mock. If the daemon fails to start,
   read `$MOCKSYS_HOME/daemon.log`.
 - **Quote any contract path containing `{param}`**: `path: "/users/{id}"` (unquoted YAML
   flow-parsing mis-reads `{...}` as a map).
 - `assert` / `validate` / `conform` exit non-zero on failure — they drop into CI.
+  A mock keeps only its newest 10000 requests; run `mocksys requests <name> --clear`
+  before the calls you assert on. `MOCKSYS_MAX_RECORDED_REQUESTS` (a whole number above
+  0) changes the limit. The daemon reads it when it starts, so run `mocksys daemon stop`
+  first, then set it on the next command.
 - `run`/`env` print the port; `eval "$(mocksys env <name>)"` wires a shell to it.
 
 ## Deeper references (read on demand)

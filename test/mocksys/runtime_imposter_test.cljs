@@ -203,6 +203,41 @@
           (imp/clear-requests! on)
           (is (= [] (get (imp/to-json on {}) "requests"))))))))
 
+;; --- the request-log cap -----------------------------------------------------
+
+(defn- paths [i] (mapv #(get % "path") (get (imp/to-json i {}) "requests")))
+
+(deftest the-request-log-keeps-the-newest
+  (async done
+    (let [i (imp/create (spec [] "recordRequests" true) {:max-requests 2})]
+      (done-after done
+        (p/let [_ (run-all i (for [n (range 1 4)] (req "path" (str "/" n))) {})]
+          (is (= ["/2" "/3"] (paths i)) "the oldest request goes first")
+          (is (= [3 1] ((juxt #(get % "numberOfRequests") #(get % "droppedRequests")) (imp/to-json i {})))
+              "every request counts, and the view says how many were dropped")
+          (is (not (contains? (imp/to-json i {:list? true}) "droppedRequests")) "the summary row stays as it was")
+          (imp/clear-requests! i)
+          (p/let [_ (imp/respond i (req "path" "/4") {})]
+            (is (= ["/4"] (paths i)))
+            (is (= [4 0] ((juxt #(get % "numberOfRequests") #(get % "droppedRequests")) (imp/to-json i {})))
+                "clearing forgets the dropped ones too")))))))
+
+(deftest the-request-log-holds-10000-by-default
+  (async done
+    (let [i (imp/create (spec [] "recordRequests" true))]
+      (done-after done
+        (p/let [_ (run-all i (repeat 10001 (req)) {})]
+          (is (= 10000 (count (get (imp/to-json i {}) "requests"))))
+          (is (= 1 (get (imp/to-json i {}) "droppedRequests"))))))))
+
+(deftest a-zero-cap-records-nothing
+  (async done
+    (let [i (imp/create (spec [] "recordRequests" true) {:max-requests 0})]
+      (done-after done
+        (p/let [_ (run-all i [(req) (req)] {})]
+          (is (= [[] 2 2] ((juxt #(get % "requests") #(get % "numberOfRequests") #(get % "droppedRequests"))
+                           (imp/to-json i {})))))))))
+
 ;; --- proxyOnce recording -----------------------------------------------------
 
 (deftest proxy-once-records-then-replays

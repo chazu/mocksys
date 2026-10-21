@@ -6,8 +6,12 @@
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
+            ["node:fs" :as fs]
             ["node:http" :as http]
             ["node:net" :as net]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            [mocksys.daemon-fixture :as daemon]
             [mocksys.runtime :as runtime]))
 
 (defn- free-port []
@@ -43,7 +47,7 @@
   ([url] (call url {}))
   ([url {:keys [method body headers]}]
    (p/let [res  (js/fetch url (clj->js (cond-> {:method (or method "GET")
-                                                 :headers (merge {"Content-Type" "application/json"} headers)}
+                                                 :headers (merge {"Content-Type" "application/json"} (daemon/auth url) headers)}
                                           body (assoc :body (if (string? body) body (js/JSON.stringify (clj->js body)))))))
            text (.text res)]
      {:status  (.-status res)
@@ -51,14 +55,7 @@
       :text    text
       :json    (try (js->clj (js/JSON.parse text)) (catch :default _ nil))})))
 
-(defn- with-daemon
-  "Run `f` against a fresh daemon on an ephemeral admin port; stop it afterwards."
-  [done f]
-  (p/let [d (runtime/start! {:host "127.0.0.1" :port 0})
-          admin (str "http://127.0.0.1:" (:port d))]
-    (-> (p/do (f admin))
-        (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
-        (p/finally (fn [] (p/do ((:stop! d)) (done)))))))
+(def ^:private with-daemon daemon/with-daemon)
 
 (defn- imposter [port stubs & {:as extra}]
   (merge {"protocol" "http" "port" port "name" "t/one" "recordRequests" true "stubs" stubs} extra))
@@ -126,7 +123,7 @@
   (async done
     (p/let [registry (atom {})
             port     (free-port)
-            created  (let [pr (#'runtime/create! registry (js/JSON.stringify (clj->js (imposter port []))))]
+            created  (let [pr (#'runtime/create! registry {} (js/JSON.stringify (clj->js (imposter port []))))]
                        (#'runtime/delete! registry port)
                        (-> pr (p/then (fn [[st _]] st)) (p/catch (fn [e] (ex-message e)))))
             wire     (-> (js/fetch (str "http://127.0.0.1:" port "/"))
@@ -238,8 +235,8 @@
 (deftest delete-root-stops-the-daemon
   (async done
     (let [stopped (p/deferred)]
-      (p/let [d        (runtime/start! {:host "127.0.0.1" :port 0 :on-stop #(p/resolve! stopped :stopped)})
-              admin    (str "http://127.0.0.1:" (:port d))
+      (p/let [d        (daemon/start! {:on-stop #(p/resolve! stopped :stopped)})
+              admin    (:admin d)
               port     (free-port)
               _        (call (str admin "/imposters") {:method "POST" :body (imposter port [])})
               res      (call (str admin "/") {:method "DELETE"})
@@ -264,3 +261,154 @@
       (is (= 403 orig) "a browser request carries an Origin")
       (is (= 403 host) "a DNS-rebound request names a foreign host")
       (p/do ((:stop! d)) (done)))))
+
+;; --- the admin token -----------------------------------------------------------
+
+(defn- settle
+  "Report a rejection of `pr` as a failure; call `done` either way."
+  [done pr]
+  (-> pr
+      (p/catch (fn [e] (is (nil? e) (str "unexpected rejection: " (ex-message e)))))
+      (p/finally (fn [] (done)))))
+
+(defn- status-with
+  "The status of one admin call that sends exactly `headers`."
+  [url method headers]
+  (p/let [res (js/fetch url (clj->js {:method method :headers headers}))]
+    (.-status res)))
+
+(deftest the-admin-api-needs-the-token
+  (async done
+    (settle done
+     (p/let [d       (daemon/start!)
+             admin   (:admin d)
+             bearer  (fn [t] {"Authorization" (str "Bearer " t)})
+             ident   (status-with (str admin "/") "GET" {})
+             none    (status-with (str admin "/imposters") "GET" {})
+             wrong   (status-with (str admin "/imposters") "GET" (bearer (str/replace (:token d) #"^." #(if (= % "0") "1" "0"))))
+             short   (status-with (str admin "/imposters") "GET" (bearer "abc"))
+             bare    (status-with (str admin "/imposters") "GET" {"Authorization" (:token d)})
+             port    (free-port)
+             post    (p/let [res (js/fetch (str admin "/imposters")
+                                           (clj->js {:method "POST" :body (js/JSON.stringify (clj->js (imposter port [])))}))
+                             text (.text res)]
+                       [(.-status res) (js->clj (js/JSON.parse text))])
+             stop    (status-with (str admin "/") "DELETE" {})
+             head    (status-with (str admin "/imposters") "HEAD" {})
+             options (status-with (str admin "/imposters") "OPTIONS" {})
+             head-id (status-with (str admin "/") "HEAD" {})
+             origin  (p/let [res  (js/fetch (str admin "/imposters") (clj->js {:headers {"Origin" "https://evil.example"}}))
+                             text (.text res)]
+                       [(.-status res) (get-in (js->clj (js/JSON.parse text)) ["errors" 0 "code"])])
+             listed  (call (str admin "/imposters"))]
+       (is (= 200 ident) "GET / identifies the daemon to anyone")
+       (is (= [401 401 401 401] [none wrong short bare]) "a missing, wrong or malformed token is refused")
+       (is (= 401 (first post)))
+       (is (= "unauthorized" (get-in (second post) ["errors" 0 "code"])))
+       (is (= 401 stop) "the daemon cannot be stopped without it")
+       (is (= [401 401 401] [head options head-id]) "only GET / is open, not HEAD or OPTIONS")
+       (is (= [403 "forbidden"] origin) "a browser is refused before its token is checked")
+       (is (= 200 (:status listed)) "the token opens the API")
+       (is (= [] (get-in listed [:json "imposters"])) "the refused post created nothing")
+       (is (re-matches #"[0-9a-f]{64}" (:token d)) "the token is 32 random bytes")
+       ((:stop! d))))))
+
+(defn- status-line
+  "Send `method` `target` over a bare socket, so the target reaches the server
+   unparsed, and resolve the response's status line, or :no-response."
+  [port method target]
+  (p/race
+   [(js/Promise.
+     (fn [resolve]
+       (let [^js sock (.connect net #js {:host "127.0.0.1" :port port})
+             chunks   #js []]
+         (.on sock "data" #(.push chunks %))
+         (.on sock "error" (fn [_]))
+         (.on sock "close" #(resolve (or (first (str/split-lines (.toString (js/Buffer.concat chunks) "utf8")))
+                                         :no-response)))
+         (.write sock (str method " " target " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")))))
+    (p/delay 2000 :no-response)]))
+
+(deftest admin-answers-a-malformed-url
+  (async done
+    (settle done
+     (p/let [d     (runtime/start! {:host "127.0.0.1" :port 0})
+             lines (p/all (for [t ["//" "///" "//[" "//a:b"]] (status-line (:port d) "GET" t)))]
+       (is (= (repeat 4 "HTTP/1.1 400 Bad Request") lines) "a URL that does not parse is a 400, not a hung request")
+       ((:stop! d))))))
+
+(defn- tmp-dir [] (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-token-")))
+
+(defn- mode-of [file] (bit-and (.-mode (fs/statSync file)) 8r777))
+
+(deftest the-daemon-publishes-its-token-to-its-owner-only
+  (async done
+    (let [file (path/join (tmp-dir) "store" "daemon-1.token")]
+      (settle done
+       (p/let [d      (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})
+               text   (fs/readFileSync file "utf8")
+               mode   (mode-of file)
+               rival  (-> (runtime/start! {:host "127.0.0.1" :port (:port d) :token-file file})
+                          (p/then (constantly :listening))
+                          (p/catch (fn [^js e] (.-code e))))
+               after  (fs/readFileSync file "utf8")
+               again  (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})
+               mode2  (mode-of file)]
+         (is (= (:token d) text) "the file holds the token, and creates the store if needed")
+         (is (= 8r600 mode) "only the daemon's user can read it")
+         (is (= "EADDRINUSE" rival))
+         (is (= (:token d) after) "a daemon that cannot take the port leaves the running daemon's token alone")
+         (is (= (:token again) (fs/readFileSync file "utf8")) "a new daemon replaces a stale file")
+         (is (= 8r600 mode2))
+         (p/all [((:stop! d)) ((:stop! again))]))))))
+
+(deftest the-token-file-is-private-whatever-was-left-at-its-temp-path
+  ;; the token goes through `<file>.<pid>.tmp`; a pid is reused, so a stale file or
+  ;; a planted link may already sit there
+  (async done
+    (let [dir    (tmp-dir)
+          file   (path/join dir "daemon-1.token")
+          tmp    (str file "." (.-pid js/process) ".tmp")
+          target (path/join dir "elsewhere")]
+      (fs/writeFileSync target "untouched" #js {:mode 8r644})
+      (fs/symlinkSync target tmp)
+      (settle done
+       (p/let [d      (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})
+               linked (fs/lstatSync file)
+               _      (fs/writeFileSync tmp "stale" #js {:mode 8r644})
+               again  (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})]
+         (is (= "untouched" (fs/readFileSync target "utf8")) "a link at the temp path is not followed")
+         (is (not (.isSymbolicLink ^js linked)) "the token file is not the planted link")
+         (is (= (:token again) (fs/readFileSync file "utf8")))
+         (is (= 8r600 (mode-of file)) "a stale temp file does not lend the token its mode")
+         (is (not (fs/existsSync tmp)))
+         (p/all [((:stop! d)) ((:stop! again))]))))))
+
+;; --- the recorded-request cap ----------------------------------------------------
+
+(deftest the-daemon-caps-each-imposters-request-log
+  (async done
+    (settle done
+     (p/let [d    (daemon/start! {:max-requests 2})
+             port (free-port)
+             _    (call (str (:admin d) "/imposters") {:method "POST" :body (imposter port [])})
+             _    (p/all (for [i (range 3)] (call (str "http://127.0.0.1:" port "/r" i))))
+             full (call (str (:admin d) "/imposters/" port))]
+       (is (= 2 (count (get-in full [:json "requests"]))) "the log keeps the newest 2")
+       (is (= 3 (get-in full [:json "numberOfRequests"])) "every request still counts")
+       (is (= 1 (get-in full [:json "droppedRequests"])))
+       ((:stop! d))))))
+
+(deftest the-cap-comes-from-the-daemons-environment
+  (let [env  (.-env js/process)
+        prev (.-MOCKSYS_MAX_RECORDED_REQUESTS env)
+        with (fn [v] (if (nil? v) (js-delete env "MOCKSYS_MAX_RECORDED_REQUESTS") (set! (.-MOCKSYS_MAX_RECORDED_REQUESTS env) v))
+               (try (runtime/max-recorded-requests) (catch :default e (ex-message e))))]
+    (try
+      (is (= 10000 (with nil)) "10000 by default")
+      (is (= 10000 (with "")))
+      (is (= 5 (with "5")))
+      (doseq [bad ["0" "-1" "1.5" "lots"]]
+        (is (= (str "MOCKSYS_MAX_RECORDED_REQUESTS must be a whole number above 0, got " (pr-str bad)) (with bad))
+            "0 is refused too: a mock that records keeps at least one request"))
+      (finally (if (nil? prev) (js-delete env "MOCKSYS_MAX_RECORDED_REQUESTS") (set! (.-MOCKSYS_MAX_RECORDED_REQUESTS env) prev))))))
