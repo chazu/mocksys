@@ -669,10 +669,11 @@ error your API defines, such as the 401 above. Let a throw mean a bug in the ver
 - **Location.** A module must be a file inside the scenario directory, after following
   symlinks. `validate` and `compile` reject a path outside it. The scenario directory is
   what `pack`, `publish` and `push` carry, so a module outside it would not travel with
-  the scenario.
+  the scenario. A kit that ships modules is a directory, and `kit` copies them into the
+  scenario directory ([Kits that ship modules](twins.md#kits-that-ship-modules)).
 - **When module code runs.** Only the daemon runs a module, and only when `mocksys run`
-  posts the scenario to it. `validate`, `compile`, `pack`, `unpack` and the authoring
-  commands never load a module. The daemon reads and runs each module file again on
+  posts the scenario to it. `validate`, `compile`, `kit`, `pack`, `unpack` and the
+  authoring commands never load a module. The daemon reads and runs each module file again on
   every post. It never uses the require cache for that file, so an edited module applies
   on the next `mocksys run`. Files that a module itself `require`s use Node's normal
   cache; after editing one of those, restart the daemon with `mocksys daemon stop`.
@@ -692,8 +693,8 @@ error your API defines, such as the 401 above. Let a throw mean a bug in the ver
 - **Trust.** A verb runs inside the daemon with your user's access, like the generated
   injections. `MOCKSYS_NO_INJECTION=1` makes `run` refuse a scenario that lists modules,
   before it compiles or posts anything, so no module code runs. `unpack` names each
-  unpacked scenario that lists modules. Read a module from someone else before you run
-  its scenario.
+  unpacked scenario that lists modules, and `kit` names a generated one. Read a module
+  from someone else before you run its scenario.
 
 ## The generated injection (under the hood)
 

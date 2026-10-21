@@ -1,9 +1,9 @@
 (ns mocksys.modules
   "Custom verbs: the CommonJS files a contract lists under `modules:`. A module sets
   `module.exports = { verbs: { name(ctx) { ... } } }` and an effect runs a verb with
-  `call`. The CLI only resolves the paths and never runs a module. The daemon loads
-  the files on each post, checks the verbs the imposter calls, and hands them to the
-  generated injections."
+  `call`. The CLI resolves the paths, and `kit` copies a kit's modules into the
+  scenario, but it never runs a module. The daemon loads the files on each post,
+  checks the verbs the imposter calls, and hands them to the generated injections."
   (:require [clojure.string :as str]
             ["node:fs" :as fs]
             ["node:path" :as path]
@@ -19,25 +19,69 @@
    `dir`, which is how imposter.json records them. A module must be a file inside
    `dir`, symlinks followed: the scenario directory is what pack, publish and push
    carry, so a module outside it would not travel with the scenario. Two entries
-   naming one file (./v.js and v.js) are one module."
-  [dir modules]
-  (when-not (or (nil? modules) (and (sequential? modules) (every? string? modules)))
-    (fail "expected a list of file paths, relative to the scenario directory"))
-  (when (and (seq modules) (nil? dir))
-    (fail (str (first modules) " needs the scenario directory to resolve against")))
-  (->> modules
-       (map (fn [m]
-              (let [file (path/resolve dir m)]
-                (when-not (inside? (path/resolve dir) file)
-                  (fail (str m " is outside the scenario directory " dir)))
-                (when-not (fs/existsSync file)
-                  (fail (str m ": no such file")))
-                (let [real (fs/realpathSync file)]
-                  (when-not (inside? (fs/realpathSync dir) real)
-                    (fail (str m " is outside the scenario directory " dir " (it links to " real ")"))))
-                (path/relative (path/resolve dir) file))))
-       distinct
-       vec))
+   naming one file (./v.js and v.js) are one module. `what` names `dir` in errors;
+   a kit's modules resolve against the kit directory."
+  ([dir modules] (scenario-paths dir modules "scenario directory"))
+  ([dir modules what]
+   (when-not (or (nil? modules) (and (sequential? modules) (every? string? modules)))
+     (fail (str "expected a list of file paths, relative to the " what)))
+   (when (and (seq modules) (nil? dir))
+     (fail (str (first modules) " needs the " what " to resolve against")))
+   (->> modules
+        (map (fn [m]
+               (let [file (path/resolve dir m)]
+                 (when-not (inside? (path/resolve dir) file)
+                   (fail (str m " is outside the " what " " dir)))
+                 (when-not (fs/existsSync file)
+                   (fail (str m ": no such file")))
+                 (let [real (fs/realpathSync file)]
+                   (when-not (inside? (fs/realpathSync dir) real)
+                     (fail (str m " is outside the " what " " dir " (it links to " real ")"))))
+                 (path/relative (path/resolve dir) file))))
+        distinct
+        vec)))
+
+(defn- landing
+  "Where a write to `file` lands: the real path of its nearest existing ancestor,
+   joined with the rest. Throws when that ancestor is a link to nothing, which lstat
+   counts as existing, rather than let the write create the file it points to; and
+   when the write would need a directory where a file is."
+  [file]
+  (loop [p file more ()]
+    (if (try (fs/lstatSync p) (catch :default _ nil))
+      (let [real (try (fs/realpathSync p)
+                      (catch :default _ (throw (js/Error. (str p " is a link to nothing")))))]
+        (when (and (seq more) (not (.isDirectory (fs/statSync real))))
+          (throw (js/Error. (str p " is not a directory"))))
+        (apply path/join real more))
+      (recur (path/dirname p) (conj more (path/basename p))))))
+
+(defn copy-plan
+  "How copying `paths` (scenario-paths over `from`) into the directory `to` would
+   go, without writing: [[path state] ...], state :new, :same, or :changed when the
+   file already at `to` differs. Throws when a copy would land outside `to`, through
+   a link inside it, onto something that is not a file, or below one."
+  [from to paths]
+  (let [root (landing (path/resolve to))]
+    (mapv (fn [p]
+            (let [real (try (landing (path/resolve to p))
+                            (catch :default e (fail (str "cannot copy " p " into " to ": " (.-message e)))))]
+              (when-not (inside? root real)
+                (fail (str "copying " p " into " to " would write " real ", outside it")))
+              [p (cond
+                   (not (fs/existsSync real)) :new
+                   (not (.isFile (fs/statSync real))) (fail (str p " in " to " is not a file"))
+                   (.equals (fs/readFileSync real) (fs/readFileSync (path/resolve from p))) :same
+                   :else :changed)]))
+          paths)))
+
+(defn copy!
+  "Carry out a copy-plan: write each :new or :changed path from `from` into `to`."
+  [from to plan]
+  (doseq [[p state] plan :when (not= state :same)]
+    (let [dest (path/resolve to p)]
+      (fs/mkdirSync (path/dirname dest) #js {:recursive true})
+      (fs/copyFileSync (path/resolve from p) dest))))
 
 (defn absolute
   "`paths` from scenario-paths, resolved against the scenario directory `dir`: the
