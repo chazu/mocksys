@@ -37,7 +37,7 @@
                           "request" {"method" "GET" "path" "/x"}
                           "effect" {"respond" {"status" payload}}}]}
         {:keys [errors]} (contract/validate c)]
-    (is (some #(str/includes? % "evil: status must be a number") errors))))
+    (is (some #(str/includes? % "evil: respond.status must be an HTTP status") errors))))
 
 (def ^:private script-selector "$..[?(@.constructor.constructor('return process')().exit())]")
 

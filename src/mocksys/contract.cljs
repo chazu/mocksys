@@ -20,7 +20,7 @@
   multi-response stub), so authoring an unhappy path is just selecting an error
   example instead of the happy one."
   (:require [clojure.string :as str]
-            [mocksys.inject :as inject]
+            [mocksys.effect :as effect]
             [mocksys.kits :as kits]
             [mocksys.modules :as modules]
             ["openapi-sampler" :as sampler]))
@@ -309,66 +309,51 @@
     (cond-> (assoc resp "is" is')
       (seq copies) (update "behaviors" (fnil into []) copies))))
 
-(defn- reserved-var?
-  "A name that `V[name]=...` cannot safely bind: an Object.prototype key (assigning
-   __proto__ swaps the prototype; a lookup of an unbound `constructor` finds Object's)
-   or a __-prefixed name, which mocksys keeps for itself."
-  [n]
-  (or (str/starts-with? n "__")
-      (= "prototype" n)
-      (some #(= n %) (js/Object.getOwnPropertyNames (.-prototype js/Object)))))
-
-(defn- check-calls!
-  "Throw unless every `call` in `op` is well formed. Whether its verb exists is left
+(defn- check-effect!
+  "Throw the first problem with `op`'s effect. Whether a called verb exists is left
    to the daemon, the only process that runs module code."
   [op modules?]
-  (doseq [c (inject/calls-of (get op "effect"))
-          :let [verb (when (map? c) (get c "verb"))
-                bad! #(throw (js/Error. (str "call: verb '" verb "': " %)))]]
-    (when-not (and (string? verb) (seq verb))
-      (throw (js/Error. "call needs a `verb` name")))
-    (when-let [extra (seq (remove #{"verb" "args" "as"} (keys c)))]
-      (bad! (str "unknown key(s) " (str/join ", " (sort extra)) " (use verb, args, as)")))
-    (when-not ((some-fn nil? map?) (get c "args")) (bad! "`args` must be an object"))
-    (when-not ((some-fn nil? string?) (get c "as")) (bad! "`as` must be a variable name"))
-    (when (some-> (get c "as") reserved-var?)
-      (bad! (str "`as` cannot be '" (get c "as") "', a name JavaScript objects or mocksys reserve")))
-    (when-not modules?
-      (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`"))))))
+  (when-let [e (first (effect/errors (get op "effect")))]
+    (throw (js/Error. e)))
+  (when-let [verb (and (not modules?) (get (first (effect/calls-of (get op "effect"))) "verb"))]
+    (throw (js/Error. (str "call: verb '" verb "' needs a module that exports it; list one under `modules:`")))))
+
+(defn- effect-settings
+  "The imposter's `state`: what its effects run over. Each collection's `seed` names
+   an array in the contract's seed, resolved here."
+  [contract clock?]
+  (let [seed (get contract "seed")]
+    (cond-> {}
+      (seq seed) (assoc "seed" seed)
+      (seq (get-in contract ["state" "collections"]))
+      (assoc "collections" (into {} (for [[name spec] (get-in contract ["state" "collections"])]
+                                      [name (cond-> {"seed" (or (get seed (get spec "seed")) [])}
+                                              (get spec "idField") (assoc "idField" (get spec "idField")))])))
+      clock?                                  (assoc "clock" (effect/clock-start contract))
+      (get-in contract ["state" "randomSeed"]) (assoc "randomSeed" (get-in contract ["state" "randomSeed"]))
+      (get contract "issuer")                 (assoc "issuer" (get contract "issuer")))))
 
 (defn lower
   "Compile a contract into an imposter for the mocksys daemon. `port` is carried through if a
    prior artifact had one (ensure-running! reassigns at run time regardless). `dir` is the
    scenario directory that `modules` paths resolve against; the imposter records them
-   relative to it, with `calls`, the verbs its operations name. Lowering never runs a
-   module: the daemon loads them and checks `calls` when the imposter is posted."
+   relative to it. A stateful operation lowers to its effect map, and the imposter's
+   `state` carries the settings effects run over. Lowering never runs a module: the
+   daemon loads them, and checks the verbs the effects call, when the imposter is posted."
   ([contract] (lower contract nil nil))
   ([contract port] (lower contract port nil))
   ([contract port dir]
    (let [contract (expand contract)
          mods     (modules/scenario-paths dir (get contract "modules"))
-         calls    (into [] (comp (mapcat #(inject/calls-of (get % "effect"))) (keep #(get % "verb")) (distinct))
-                        (get contract "operations"))
-         fault (get contract "fault")
-         seed  (get contract "seed")
-         ;; collection declarations ({name {idField, seed}}) — resolve each `seed`
-         ;; name to its actual array so the injection can embed + seed it once.
-         colls (into {} (for [[name spec] (get-in contract ["state" "collections"])]
-                          [name {"idField" (get spec "idField")
-                                 "seed"    (get seed (get spec "seed"))}]))
-         clock?      (inject/contract-uses-clock? contract)
-         clock-start (when clock? (inject/clock-start contract))
-         issuer      (get contract "issuer")
+         fault    (get contract "fault")
+         clock?   (effect/contract-uses-clock? contract)
          stubs (mapv (fn [op]
                        (try
-                         (check-calls! op (seq mods))
                          {"predicates" (predicates-for (http-request (get op "request")))
                           "responses"
-                          (if (inject/stateful? op)
-                            ;; stateful op: a generated injection over the shared state
-                            [{"inject" (inject/gen op {:seed seed :collections colls
-                                                       :clock-start clock-start :issuer issuer
-                                                       :random-seed (get-in contract ["state" "randomSeed"])})}]
+                          (if (effect/stateful? op)
+                            (do (check-effect! op (seq mods))
+                                [{"effect" (get op "effect")}])
                             (mapv #(-> % templatize (apply-fault fault))
                                   (operation-responses op)))}
                          (catch :default e
@@ -376,11 +361,11 @@
                      (get contract "operations"))
          ;; a twin that uses a virtual clock gets a built-in /_mocksys/clock control op
          stubs (cond-> stubs
-                 clock? (conj (inject/clock-control-stub clock-start)))]
+                 clock? (conj (effect/clock-control-stub)))]
      (cond-> {"protocol" (get contract "protocol" "http") "stubs" stubs "name" (get contract "scenario")}
-       port        (assoc "port" port)
-       (seq mods)  (assoc "modules" mods)
-       (seq calls) (assoc "calls" calls)))))
+       port       (assoc "port" port)
+       (seq mods) (assoc "modules" mods)
+       (or clock? (effect/contract-stateful? contract)) (assoc "state" (effect-settings contract clock?))))))
 
 ;; --- lift: recorded imposter -> contract ----------------------------------
 
@@ -620,13 +605,6 @@
             responses (get op "responses")
             req-errs (request-errors (= "grpc" (get contract "protocol")) id (get op "request"))]
         (run! err! req-errs)
-        (when (and effect
-                   (not (get effect "respond"))
-                   (not (some #(get effect %)
-                              ["create" "get" "update" "remove" "list"
-                               "link" "unlink" "listJoin" "render"])))
-          (err! (str id ": effect has no `respond` or collection action "
-                     "(create/get/update/remove/list/link/unlink/listJoin/render)")))
         (when (empty? req-errs)
           (try (lower (assoc contract "operations" [op]) nil dir)
                (catch :default e (err! (.-message e)))))

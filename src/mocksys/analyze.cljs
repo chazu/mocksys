@@ -37,7 +37,7 @@
   ([stub] (stub-summary stub base-volatile-headers))
   ([stub vol-set]
    (let [resp0   (get-in stub ["responses" 0])
-         inject? (contains? resp0 "inject")
+         stateful? (or (contains? resp0 "effect") (contains? resp0 "clock"))
          resp-is (get resp0 "is")
          headers (get resp-is "headers")
          vol     (->> (keys headers)
@@ -45,8 +45,8 @@
                       vec)]
      {:method           (find-field stub "method")
       :path             (find-field stub "path")
-      :status           (if inject? "stateful" (get resp-is "statusCode"))
-      :stateful         inject?
+      :status           (if stateful? "stateful" (get resp-is "statusCode"))
+      :stateful         stateful?
       :headers          headers
       :match-fields     (pred-fields stub)
       :volatile-headers vol})))
