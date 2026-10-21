@@ -35,7 +35,7 @@ stateful scenarios and scenarios that list `modules`.
 | `use <name> --op ID --example NAME [--off] [--only]` | (De)select an example. `--only` clears the operation's others first (happy↔error swap). Refuses a gene operation and names the gene. |
 | `fault <name> [--status N] [--latency MS] [--timeout] [--drop-connection] [--malformed-json] [--clear]` | Overlay a transport fault (stored on the contract). |
 | `parameterize <name> --path '/a/{var}/b'` | Loosen matching exact paths to a `{param}` template. Refuses when the template would change a gene operation. |
-| `validate <name>` | Structural + example-vs-schema check over the expanded operations; an unknown gene or gene param is an error. For a grpc contract, it also loads the proto and checks that each `rpc` exists and is unary. Exit 1 on errors. |
+| `validate <name>` | Structural + example-vs-schema check over the expanded operations; an unknown gene or gene param is an error. For a grpc contract, it also loads the proto and checks that each `rpc` exists. Exit 1 on errors. |
 | `compile <name>` | Rebuild `imposter.json` from `contract.yaml` (normally automatic). |
 
 ## Run & verify

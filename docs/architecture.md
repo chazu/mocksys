@@ -130,13 +130,14 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 | Admin routes | `GET /` (name, version, pid), `DELETE /` (stop), `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
 
 **gRPC.** A `grpc` imposter gets a grpc-js server in place of the HTTP one. It
-registers every unary method of the descriptor. A call becomes an ordinary request
+registers every method of the descriptor. A call becomes an ordinary request
 (`POST /pkg.Service/Method`, metadata as headers, the message as a JSON body), so the
 stubs, predicates, injections and state are the same code as for HTTP. The outcome maps
-back to a reply message or a gRPC status; [contracts.md](contracts.md#grpc-unary) gives
+back to a reply message or a gRPC status; [contracts.md](contracts.md#grpc) gives
 the rules. `compile!` embeds the descriptor, so the daemon reads no scenario files and
-`imposter.json` stays self-contained. Streaming and undeclared methods answer
-`UNIMPLEMENTED`, and a grpc imposter rejects `proxy` responses. The bun binary serves
+`imposter.json` stays self-contained. A client stream's request body is the array of
+its messages, each message of a bidirectional stream is a request of its own, and a
+stream's reply array is its messages. Undeclared methods answer `UNIMPLEMENTED`, and a grpc imposter rejects `proxy` responses. The bun binary serves
 gRPC too.
 
 **Injection.** Injections run in the daemon's process, called as

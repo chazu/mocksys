@@ -8,10 +8,15 @@
 #   node examples/grpc-todos/client.js localhost:9150 CreateTodo '{"title":"ship it"}'
 #   node examples/grpc-todos/client.js localhost:9150 UpdateTodo '{"id":"t1","title":"Rewrite the proto"}'
 #   node examples/grpc-todos/client.js localhost:9150 ListTodos '{"filter":"done eq false"}'
+# A streaming rpc prints one JSON line per message; a client or bidirectional stream
+# takes a JSON array, one element per message it sends:
+#   node examples/grpc-todos/client.js localhost:9150 WatchTodos '{"filter":"done eq true"}'
+#   node examples/grpc-todos/client.js localhost:9150 PreviewImport '[{"title":"a"},{"title":"b"}]'
+#   node examples/grpc-todos/client.js localhost:9150 CreateTodos '[{"title":"a"},{"title":"b"}]'
 service: todo
 scenario: demo/todos
 origin: authored
-summary: create, get (NOT_FOUND on a miss), update and list todos over gRPC
+summary: create, get (NOT_FOUND on a miss), update, list and stream todos over gRPC
 protocol: grpc
 proto: ./todo.proto
 seed:
@@ -57,3 +62,25 @@ operations:
       - status: 403
         examples:
           denied: { select: true, body: { grpcCode: PERMISSION_DENIED, message: "todos are append-only in this mock" } }
+
+  - id: watch
+    summary: WatchTodos is server streaming; the list's array is the stream, one message per todo
+    request: { rpc: todo.v1.Todos/WatchTodos }
+    effect:
+      bind: { q: { body: filter } }
+      list: { collection: todos, filter: "{q}" }
+
+  - id: preview
+    summary: PreviewImport is client streaming; the body is the JSON array of the messages sent
+    request: { rpc: todo.v1.Todos/PreviewImport }
+    effect:
+      bind:    { batch: { bodyJson: true } }
+      respond: { json: { count: "{batch.length}", first_title: "{batch.0.title}" } }
+
+  - id: create-many
+    summary: CreateTodos is bidirectional; each message is a request of its own, so each creates a todo
+    request: { rpc: todo.v1.Todos/CreateTodos }
+    effect:
+      bind:   { incoming: { bodyJson: true } }
+      mint:   { tid: { prefix: "t_" } }
+      create: { collection: todos, merge: [incoming], body: { id: "{tid}", done: false } }

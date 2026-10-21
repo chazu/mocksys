@@ -177,9 +177,10 @@ target.
 [`examples/directory.yaml`](../examples/directory.yaml) builds a users, groups and
 memberships twin from genes alone.
 
-## gRPC (unary)
+## gRPC
 
-A contract with `protocol: grpc` serves the unary RPCs of a `.proto` file. Each
+A contract with `protocol: grpc` serves the RPCs of a `.proto` file, unary and
+streaming. Each
 operation names an `rpc` in place of a method and path. Everything else works as it
 does for HTTP: request matching, static responses and examples, templating, faults,
 effects and state.
@@ -330,14 +331,48 @@ A `bodySchema` with no selected example is sampled as for HTTP. A transport `fau
 applies too. `latency` and `timeout` delay the reply, `status` maps through the table,
 and `drop-connection` and `malformed-json` end the call with `UNAVAILABLE`.
 
+### Streaming
+
+A streaming rpc maps onto the same request and outcome, so its operations are written as
+for unary ones.
+
+| Kind | Request | Reply |
+|---|---|---|
+| Server streaming | the one message, as for unary | a 2xx JSON array is the stream's messages, in order; an object is one message; a blank body is none |
+| Client streaming | `body` is the JSON array of every message the client sent, once it half-closes | as for unary |
+| Bidirectional | each message the client sends is a request of its own, in order | each request's reply is zero or more messages, as for a server stream |
+
+Each message of a stream is checked against the reply type, as a unary reply is, and a
+problem names the message (`[1].version: expected an integer`). A stream that has a
+problem, or whose outcome is an error status, ends with that error before it sends a
+message. A bidirectional stream ends when the client half-closes and every reply is sent,
+or at the first error; the first reply's headers become the stream's metadata, and
+`requests` shows each inbound message as its own call.
+
+A collection's `list` returns an array, so it streams one message per record. A client
+stream reads its batch with `bodyJson: true`:
+
+```yaml
+  - id: watch                                       # rpc WatchTodos (ListTodosRequest) returns (stream Todo)
+    request: { rpc: todo.v1.Todos/WatchTodos }
+    effect:
+      bind: { q: { body: filter } }
+      list: { collection: todos, filter: "{q}" }
+  - id: preview                                     # rpc PreviewImport (stream CreateTodoRequest) returns (ImportPreview)
+    request: { rpc: todo.v1.Todos/PreviewImport }
+    effect:
+      bind:    { batch: { bodyJson: true } }
+      respond: { json: { count: "{batch.length}", first_title: "{batch.0.title}" } }
+```
+
 ### What is served
 
-The daemon registers every unary method in the proto. A unary call that matches no
-stub gets an empty reply, every field at its default, as an unmatched HTTP request gets
-an empty 200. A streaming method, or a method the proto does not declare, answers
-`UNIMPLEMENTED`.
+The daemon registers every method in the proto. A unary or client-streaming call that
+matches no stub gets an empty reply, every field at its default, as an unmatched HTTP
+request gets an empty 200; a server stream, or a bidirectional stream's turn, sends no
+messages. A method the proto does not declare answers `UNIMPLEMENTED`.
 
-Out of scope: streaming RPCs, server reflection, recording gRPC traffic (`record`,
+Out of scope: server reflection, recording gRPC traffic (`record`,
 `freeze`), TLS, `proxy` responses, and `conform`, which replays HTTP. A grpc mock
 listens on `127.0.0.1` and `::1` without TLS, so a client connects with insecure
 credentials.
@@ -398,7 +433,7 @@ Set via `mocksys fault <name> --latency 2000` (or `--status` / `--timeout` /
   operation that names `method` or `path`, or whose `rpc` is missing or not of the form
   `pkg.Service/Method`; an `rpc` on an http contract; a proto that does not load (a
   missing file or import, or a syntax error, with its line); an `rpc` the proto does not
-  declare; a streaming `rpc`.
+  declare.
 - **Warnings** (advisory): a selected example whose body diverges from its response
   `bodySchema` (lightweight, ajv-free: top-level type, required object props, one-level
   recurse).

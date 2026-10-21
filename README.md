@@ -38,7 +38,7 @@ share — not a one-off blob:
   query/header/body, so picker-vs-redirect, authed-vs-anonymous, and error paths are
   all expressible — not just method+path lookups.
 - **gRPC as well as HTTP.** A contract with `protocol: grpc` and a `.proto` serves its
-  unary RPCs, statefully, through the same effects, matching and `assert`.
+  RPCs, unary and streaming, statefully, through the same effects, matching and `assert`.
 - **Mocks are test oracles.** `assert` checks what the running mock actually received
   and exits non-zero on a miss, so it drops straight into a test script.
 - **Secrets never hit disk.** When you *do* record, raw traffic lives only inside the
