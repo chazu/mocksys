@@ -199,7 +199,8 @@
 (defn kit-files
   "One entry per kit in `dir`, sorted by name: {:file :text} for a *.yaml or *.yml
    file, the same with :dir for a subdirectory holding kit.yaml, and {:file :error}
-   for an entry that cannot be read. Empty when `dir` does not exist."
+   for an entry that cannot be read. A subdirectory whose name starts with a dot
+   (.git) is not a kit. Empty when `dir` does not exist."
   [dir]
   (if-not (fs/existsSync dir)
     []
@@ -209,6 +210,7 @@
          (keep (fn [entry]
                  (let [file (path/join dir entry)]
                    (cond
-                     (re-find #"\.ya?ml$" entry) (read-kit-file file)
-                     (directory? file)           (read-kit-dir file)))))
+                     (directory? file)           (when-not (str/starts-with? entry ".")
+                                                   (read-kit-dir file))
+                     (re-find #"\.ya?ml$" entry) (read-kit-file file)))))
          vec)))

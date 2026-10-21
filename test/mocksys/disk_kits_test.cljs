@@ -181,6 +181,21 @@ contract:
   (let [{reg :kits} (kits/with-user-kits [(entry "/home/kits/short.yml" empty-kit)])]
     (is (contains? reg "short"))))
 
+(deftest kit-files-ignores-hidden-directories
+  (let [dir (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-kits-"))]
+    (fs/mkdirSync (path/join dir ".git"))
+    (fs/mkdirSync (path/join dir "node_modules"))
+    (is (= [(path/join dir "node_modules")] (map :file (store/kit-files dir)))
+        "a hidden directory is not a kit; any other directory without kit.yaml is reported")))
+
+(deftest kit-files-follows-a-linked-kit-directory
+  (let [dir  (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-kits-"))
+        real (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-kit-real-"))]
+    (fs/writeFileSync (path/join real "kit.yaml") "name: linked\n")
+    (fs/symlinkSync real (path/join dir "linked"))
+    (is (= [{:file (path/join dir "linked" "kit.yaml") :text "name: linked\n" :dir (path/join dir "linked")}]
+           (store/kit-files dir)))))
+
 (deftest kit-files-skips-what-it-cannot-read
   (let [dir (fs/mkdtempSync (path/join (os/tmpdir) "mocksys-kits-"))]
     (fs/writeFileSync (path/join dir "a.yml") "name: a\n")
@@ -190,8 +205,9 @@ contract:
     (let [files (store/kit-files dir)]
       (testing "a .yml file is a kit file"
         (is (= (entry (path/join dir "a.yml") "name: a\n") (first files))))
-      (testing "a directory and an unreadable file come back with a reason instead of throwing"
-        (is (= {:file (path/join dir "b.yaml") :error "not a file"} (second files)))
+      (testing "a directory named like a kit file is a directory, and an unreadable file comes back with a reason instead of throwing"
+        (is (= (path/join dir "b.yaml") (:file (second files))))
+        (is (str/includes? (:error (second files)) "no kit.yaml"))
         (is (= (path/join dir "c.yaml") (:file (nth files 2))))
         (is (string? (:error (nth files 2))))))
     (fs/chmodSync (path/join dir "c.yaml") 420)))
