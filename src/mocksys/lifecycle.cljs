@@ -60,8 +60,9 @@
     (let [result (contract/validate c (store/scenario-dir scenario))]
       (if (seq (contract/gene-errors c))
         result
-        (update result :errors into
-                (proto/contract-errors c (get (contract/expand c) "operations") (store/scenario-dir scenario)))))))
+        (let [{:keys [errors warnings]} (proto/contract-problems c (get (contract/expand c) "operations")
+                                                                 (store/scenario-dir scenario))]
+          (-> result (update :errors into errors) (update :warnings into warnings)))))))
 
 (defn address
   "Where a consumer reaches `scenario` on `port`: a URL for HTTP, and host:port for

@@ -368,6 +368,12 @@ stream reads its batch with `bodyJson: true`:
       respond: { json: { count: "{batch.length}", first_title: "{batch.0.title}" } }
 ```
 
+A client stream's `bodyJson` is that array, not one message, so a collection verb sees
+the batch as one value. `create` with `merge: [batch]`, or `update` with
+`mergeVar: batch`, would store the array as one record, and `validate` warns of it.
+Effects run once per call, not once per message: a client stream answers from the whole
+batch, as `preview` does.
+
 ### What is served
 
 The daemon registers every method in the proto. A unary or client-streaming call that
