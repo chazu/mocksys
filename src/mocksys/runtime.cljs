@@ -315,11 +315,13 @@
 
 (defn- write-token!
   "Write `token` to `file`, readable by this user only. The rename swaps the whole
-   file in, so a client never reads half a token."
+   file in, so a client never reads half a token. The temp file is created afresh
+   (`wx`), since a mode only applies to a new file and a link there would be followed."
   [file token]
   (fs/mkdirSync (path/dirname file) #js {:recursive true})
   (let [tmp (str file "." (.-pid js/process) ".tmp")]
-    (fs/writeFileSync tmp token #js {:mode 0600})
+    (fs/rmSync tmp #js {:force true})
+    (fs/writeFileSync tmp token #js {:mode 0600 :flag "wx"})
     (fs/renameSync tmp file)))
 
 (defn start!

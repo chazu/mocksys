@@ -362,6 +362,28 @@
          (is (= 8r600 mode2))
          (p/all [((:stop! d)) ((:stop! again))]))))))
 
+(deftest the-token-file-is-private-whatever-was-left-at-its-temp-path
+  ;; the token goes through `<file>.<pid>.tmp`; a pid is reused, so a stale file or
+  ;; a planted link may already sit there
+  (async done
+    (let [dir    (tmp-dir)
+          file   (path/join dir "daemon-1.token")
+          tmp    (str file "." (.-pid js/process) ".tmp")
+          target (path/join dir "elsewhere")]
+      (fs/writeFileSync target "untouched" #js {:mode 8r644})
+      (fs/symlinkSync target tmp)
+      (settle done
+       (p/let [d      (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})
+               linked (fs/lstatSync file)
+               _      (fs/writeFileSync tmp "stale" #js {:mode 8r644})
+               again  (runtime/start! {:host "127.0.0.1" :port 0 :token-file file})]
+         (is (= "untouched" (fs/readFileSync target "utf8")) "a link at the temp path is not followed")
+         (is (not (.isSymbolicLink ^js linked)) "the token file is not the planted link")
+         (is (= (:token again) (fs/readFileSync file "utf8")))
+         (is (= 8r600 (mode-of file)) "a stale temp file does not lend the token its mode")
+         (is (not (fs/existsSync tmp)))
+         (p/all [((:stop! d)) ((:stop! again))]))))))
+
 ;; --- the recorded-request cap ----------------------------------------------------
 
 (deftest the-daemon-caps-each-imposters-request-log
