@@ -8,7 +8,6 @@
   node-forge builds the certificates from RSA keys that node's crypto generates, so
   issuing works in the bun binary and needs no openssl."
   (:require [clojure.string :as str]
-            [promesa.core :as p]
             ["node:crypto" :as crypto]
             ["node:fs" :as fs]
             ["node:https" :as https]
@@ -186,28 +185,29 @@
 ;; --- the CLI's own calls to a mock -------------------------------------------------
 
 (defn fetch-own
-  "Send a request to a mock the CLI found through its own daemon: {:status :headers
-   :body}, the body as text. Over https it skips the certificate check, since a
-   contract's own certificate may come from a CA mocksys does not know."
-  [url {:keys [method headers body]}]
+  "`fetch` for a mock the CLI found through its own daemon. Over https it skips the
+   certificate check, since a contract's own certificate may come from a CA mocksys
+   does not know. Node's fetch cannot skip it, so that request goes through
+   node:https and resolves a Response built from the reply. Never follows a
+   redirect, as `fetch` with redirect: manual."
+  [url ^js init]
   (if-not (str/starts-with? url "https:")
-    (p/let [res  (js/fetch url (clj->js (cond-> {:method method :headers (or headers {}) :redirect "manual"}
-                                          (some? body) (assoc :body body))))
-            text (.text res)]
-      {:status  (.-status res)
-       :headers (js->clj (js/Object.fromEntries (.entries (.-headers res))))
-       :body    text})
+    (js/fetch url (js/Object.assign #js {} init #js {:redirect "manual"}))
     (js/Promise.
      (fn [resolve reject]
-       (let [^js rq (https/request url (clj->js {:method method :headers (or headers {}) :rejectUnauthorized false})
+       (let [^js rq (https/request url #js {:method             (or (.-method init) "GET")
+                                            :headers            (or (.-headers init) #js {})
+                                            :rejectUnauthorized false}
                                    (fn [^js res]
                                      (let [chunks #js []]
                                        (.on res "data" #(.push chunks %))
                                        (.on res "end"
-                                            #(resolve {:status  (.-statusCode res)
-                                                       :headers (into {} (for [[k v] (js->clj (.-headers res))]
-                                                                           [k (if (vector? v) (str/join ", " v) v)]))
-                                                       :body    (.toString (js/Buffer.concat chunks) "utf8")})))))]
+                                            (fn []
+                                              (let [buf (js/Buffer.concat chunks)]
+                                                (resolve (js/Response.
+                                                          (when (pos? (.-length buf)) buf)
+                                                          #js {:status  (.-statusCode res)
+                                                               :headers (clj->js (partition 2 (array-seq (.-rawHeaders res))))}))))))))]
          (.on rq "error" reject)
-         (when (some? body) (.write rq body))
+         (when (some? (.-body init)) (.write rq (.-body init)))
          (.end rq))))))

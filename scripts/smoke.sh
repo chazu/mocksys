@@ -250,6 +250,47 @@ check "and says why" 1 "$(echo "$out" | grep -c 'get: rpc todo.v1.Todos/WatchTod
 cp "$G/contract.yaml" "$MOCKSYS_HOME/demo/todos/contract.yaml"
 "$MS" stop demo/todos >/dev/null
 
+echo "# tls"
+TP=$((PORT + 3))
+mode_of() { node -p '(require("fs").statSync(process.argv[1]).mode & 0o777).toString(8)' "$1"; }
+mkdir -p "$MOCKSYS_HOME/demo/https"
+cp "$ROOT/examples/https.yaml" "$MOCKSYS_HOME/demo/https/contract.yaml"
+out="$("$MS" run demo/https --port $TP)"
+check "run names an https URL" 1 "$(echo "$out" | grep -c "running 'demo/https' at https://localhost:$TP")"
+CA="$("$MS" tls ca 2>/dev/null)"
+check "tls ca prints the CA in the store" "$MOCKSYS_HOME/tls/ca.pem" "$CA"
+check "run says which CA to trust" 1 "$(echo "$out" | grep -c "TLS: trust the mocksys CA, $CA")"
+check "the CA directory is the owner's alone" 700 "$(mode_of "$MOCKSYS_HOME/tls")"
+check "so is the CA key" 600 "$(mode_of "$MOCKSYS_HOME/tls/ca.key")"
+check "curl trusting the CA gets the body" alice "$(curl -s --cacert "$CA" "https://localhost:$TP/whoami" | json_field '.user')"
+curl -s -o /dev/null "https://localhost:$TP/whoami" && code=0 || code=$?
+check "curl without it refuses the certificate" 60 "$code"
+check "node trusts it through NODE_EXTRA_CA_CERTS" alice \
+  "$(NODE_EXTRA_CA_CERTS="$CA" node -e 'fetch(process.argv[1]).then(r => r.json()).then(b => console.log(b.user))' "https://localhost:$TP/whoami")"
+check "env exports NODE_EXTRA_CA_CERTS" "export NODE_EXTRA_CA_CERTS=$CA" "$("$MS" env demo/https | grep NODE_EXTRA_CA_CERTS)"
+check "imposter.json holds no key" 0 "$(grep -c 'PRIVATE KEY' "$MOCKSYS_HOME/demo/https/imposter.json" || true)"
+echo '[{"method":"GET","path":"/whoami","expect":200}]' > "$WORK/https-corpus.json"
+"$MS" conform demo/https --corpus "$WORK/https-corpus.json" >/dev/null && code=0 || code=$?
+check "conform replays at an https twin" 0 "$code"
+mkdir -p "$MOCKSYS_HOME/demo/login-tls"
+{ echo "tls: true"; sed "s#^scenario: demo/login-throttle#scenario: demo/login-tls#" "$ROOT/examples/login-throttle.yaml"; } > "$MOCKSYS_HOME/demo/login-tls/contract.yaml"
+"$MS" run demo/login-tls --port $((TP + 1)) >/dev/null
+check "clock reaches an https twin" 1 "$("$MS" clock demo/login-tls advance 1h | grep -c 'virtual time 2024-01-01T01:00:00')"
+"$MS" stop demo/login-tls >/dev/null
+GTP=$((TP + 2))
+mkdir -p "$MOCKSYS_HOME/demo/todos-tls"
+cp "$G/todo.proto" "$MOCKSYS_HOME/demo/todos-tls/"
+{ echo "tls: true"; sed "s#^scenario: demo/todos#scenario: demo/todos-tls#" "$G/contract.yaml"; } > "$MOCKSYS_HOME/demo/todos-tls/contract.yaml"
+out="$("$MS" run demo/todos-tls --port $GTP)"
+check "run says gRPC over TLS" 1 "$(echo "$out" | grep -c "running 'demo/todos-tls' at localhost:$GTP (gRPC over TLS)")"
+check "a grpc-js client trusting the CA gets the reply" "Write the proto" \
+  "$(NODE_EXTRA_CA_CERTS="$CA" node "$G/client.js" --tls "localhost:$GTP" GetTodo '{"id":"t1"}' | json_field '.title')"
+check "an insecure client cannot connect" UNAVAILABLE "$(node "$G/client.js" "localhost:$GTP" GetTodo '{"id":"t1"}' | json_field '.code' || true)"
+"$MS" stop demo/todos-tls >/dev/null
+"$MS" publish >/dev/null
+check "publish commits no file of the CA" 0 "$(git -C "$MOCKSYS_HOME" ls-files | grep -c '^tls/' || true)"
+"$MS" stop demo/https >/dev/null
+
 echo "# daemon stop"
 "$MS" daemon stop >/dev/null
 check "daemon stop frees the admin port" 000 "$(status_of "$ADMIN/")"

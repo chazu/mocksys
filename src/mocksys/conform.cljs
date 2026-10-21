@@ -42,20 +42,22 @@
 ;; --- fire + normalize -----------------------------------------------------
 
 (defn fire
-  "Send one corpus request to `base` (e.g. http://localhost:PORT). Returns
-   {:status :headers :body} where body is the raw text."
-  [base {:strs [method path headers body]}]
-  (let [json? (and (some? body) (not (string? body)))
-        hdrs  (cond-> (or headers {})
-                json? (assoc "Content-Type" "application/json"))
-        opts  #js {:method (or method "GET") :headers (clj->js hdrs) :redirect "manual"}]
-    (when (some? body)
-      (set! (.-body opts) (if (string? body) body (js/JSON.stringify (clj->js body)))))
-    (p/let [res  (js/fetch (str base path) opts)
-            text (.text res)]
-      {:status (.-status res)
-       :headers (js->clj (js/Object.fromEntries (.entries (.-headers res))))
-       :body   text})))
+  "Send one corpus request to `base` (e.g. http://localhost:PORT) with `fetch`
+   (js/fetch unless given). Returns {:status :headers :body} where body is the raw
+   text."
+  ([base req] (fire base req js/fetch))
+  ([base {:strs [method path headers body]} fetch]
+   (let [json? (and (some? body) (not (string? body)))
+         hdrs  (cond-> (or headers {})
+                 json? (assoc "Content-Type" "application/json"))
+         opts  #js {:method (or method "GET") :headers (clj->js hdrs) :redirect "manual"}]
+     (when (some? body)
+       (set! (.-body opts) (if (string? body) body (js/JSON.stringify (clj->js body)))))
+     (p/let [res  (fetch (str base path) opts)
+             text (.text res)]
+       {:status (.-status res)
+        :headers (js->clj (js/Object.fromEntries (.entries (.-headers res))))
+        :body   text}))))
 
 (def ^:private jwt-re #"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 

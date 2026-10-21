@@ -56,7 +56,8 @@
    "rm"           share/cmd-rm
    "delete"       share/cmd-rm
    "prime"        help/cmd-prime
-   "daemon"       serve/cmd-daemon})
+   "daemon"       serve/cmd-daemon
+   "tls"          serve/cmd-tls})
 
 (defn -main [& args]
   (let [[cmd & more] args

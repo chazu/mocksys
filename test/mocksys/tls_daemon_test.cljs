@@ -17,6 +17,7 @@
             [mocksys.store :as store]
             [mocksys.tls :as tls]
             [mocksys.runtime.grpc :as rgrpc]
+            [mocksys.conform :as conform]
             [mocksys.grpc-fixture :as fx]))
 
 (defn- fresh-ca
@@ -80,6 +81,32 @@
             (is (true? (get-in shown [:json "tls"])))
             (is (true? (get-in again [:json "tls"])))
             (is (not (str/includes? (js/JSON.stringify (clj->js (:json again))) "PRIVATE KEY")))))))))
+
+(deftest the-cli-reaches-its-own-tls-mock
+  (async done
+    (fx/with-daemon done
+      (fn [admin]
+        (p/let [{:keys [creds]} (fresh-ca)
+                port  (fx/free-port)
+                _     (fx/admin-call (str admin "/imposters") "POST"
+                                     {"protocol" "http" "port" port "tls" creds
+                                      "stubs" [{"predicates" [{"equals" {"method" "POST" "path" "/echo"}}]
+                                                "responses" [{"is" {"statusCode" 201 "headers" {"X-Seen" "${b}"}
+                                                                    "body" "got ${b}"}
+                                                              "behaviors" [{"copy" {"from" "body" "into" "${b}"
+                                                                                    "using" {"method" "regex" "selector" ".+"}}}]}]}
+                                               {"predicates" [{"equals" {"path" "/away"}}]
+                                                "responses" [{"is" {"statusCode" 302 "headers" {"Location" "/elsewhere"}}}]}]})
+                base  (str "https://localhost:" port)
+                echo  (conform/fire base {"method" "POST" "path" "/echo" "body" "ping"} tls/fetch-own)
+                away  (conform/fire base {"path" "/away"} tls/fetch-own)]
+          (testing "conform's twin requests go over https"
+            (is (= 201 (:status echo)))
+            (is (= "got ping" (:body echo)))
+            (is (= "ping" (get-in echo [:headers "x-seen"]))))
+          (testing "without following a redirect"
+            (is (= 302 (:status away)))
+            (is (= "/elsewhere" (get-in away [:headers "location"])))))))))
 
 (deftest a-bad-tls-field-is-refused
   (async done
