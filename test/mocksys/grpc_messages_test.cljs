@@ -134,3 +134,24 @@
             (is (= 1 (count (re-seq #"colour" log))) log)
             (is (str/includes? log "child.size"))
             (is (str/includes? log (str port)) "the warning names the mock")))))))
+
+(deftest a-snake-case-field-reads-the-same-from-either-client
+  (async done
+    (fx/with-daemon done
+      (fn [admin]
+        (p/let [imp {"protocol" "grpc" "name" "t/rec"
+                     "stubs" [{"predicates" [{"deepEquals" {"path" "/rec.Recs/Put"}}
+                                             {"equals" {"body" "Rex"} "jsonpath" {"selector" "$.display_name"}}]
+                               "responses" [{"is" {"statusCode" 200 "body" {"id" "matched" "displayName" "Rex Jr"}}}]}]}
+                [port snake _] (serve-rec! admin imp {})
+                camel  (fx/connect (path/join (fx/rec-dir) "rec.proto") "rec.Recs" port {:camel? true})
+                s      (fx/unary snake "Put" {:display_name "Rex"})
+                c      (fx/unary camel "Put" {:displayName "Rex"})]
+          (fx/close snake)
+          (fx/close camel)
+          (testing "the request body names the field as the proto does, whatever the client calls it"
+            (is (= "matched" (get-in s [:ok "id"])) (pr-str s))
+            (is (= "matched" (get-in c [:ok "id"])) (pr-str c)))
+          (testing "a reply's lowerCamelCase key fills the field for either client"
+            (is (= "Rex Jr" (get-in s [:ok "display_name"])))
+            (is (= "Rex Jr" (get-in c [:ok "displayName"])))))))))
