@@ -36,6 +36,19 @@ mocksys run okta/okta --port 9200
 eval "$(mocksys env okta/okta)"           # exports BASE_URL=http://localhost:9200
 ```
 
+A kit whose template lists `genes:`, such as `oauth2` or the `directory` example, writes
+those genes into `contract.yaml` and not their operations. `examples` marks each of those
+operations `[gene NAME]`, and `use` refuses to toggle their examples, because the operation
+exists only in the expansion. `okta` is a builder function that writes its operations out
+in full, so `use` works on all of them. To change what a gene operation serves, do one of
+the following:
+
+- Change the gene's params under `genes:` in `contract.yaml`, then `compile`.
+- Shadow the operation. `mocksys add <name> --request 'GET /github/user' --status 500`
+  adds an authored operation with the same request, and authored operations are served
+  before gene operations. `add` picks an id that no gene operation uses, and `use` works on
+  the new operation.
+
 `kit` rejects any option the kit does not declare, apart from `--scenario` and `--port`.
 `mocksys kits` lists every kit with its flags and their defaults.
 
