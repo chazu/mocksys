@@ -1,8 +1,8 @@
 (ns mocksys.grpc-daemon-test
   "gRPC imposters on the real daemon, called with a real grpc-js client: a call is
    matched as POST /pkg.Service/Method with metadata as headers and the message as
-   a JSON body; replies, status codes, response metadata, UNIMPLEMENTED for what
-   is not served, and a stateful contract over a collection."
+   a JSON body; replies, status codes, response metadata, UNIMPLEMENTED for a
+   method the proto does not declare, and a stateful contract over a collection."
   (:require [clojure.test :refer [deftest testing is async]]
             [clojure.string :as str]
             [promesa.core :as p]
@@ -169,12 +169,8 @@
         (p/let [dir    (fx/kv-dir)
                 port   (free-port)
                 _      (admin-call (str admin "/imposters") "POST" (kv-imposter dir port []))
-                c      (fx/connect (path/join dir "kv.proto") "kv.Store" port)
-                nope   (fx/raw-unary port "/kv.Store/Nope")
-                stream (fx/streaming c "Watch" {:key "a"})]
-          (fx/close c)
-          (is (= (codes "UNIMPLEMENTED") (:code nope)) "a method the proto does not declare")
-          (is (= (codes "UNIMPLEMENTED") (:code stream)) "a streaming method"))))))
+                nope   (fx/raw-unary port "/kv.Store/Nope")]
+          (is (= (codes "UNIMPLEMENTED") (:code nope)) "a method the proto does not declare"))))))
 
 (defn- hold!
   "Listen on `host`:`port` with a plain TCP server; resolves a fn that closes it."

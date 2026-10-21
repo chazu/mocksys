@@ -149,8 +149,10 @@
 (defn encode
   "Check `doc` (parsed JSON) against the message type `t`. Returns {:value the
    object to encode, :problems [\"path: expected X, got Y\"], :unknown [paths of keys
-   no field declares]}; :value is only good when :problems is empty."
-  [^js t doc]
-  (let [ctx {:problems (atom []) :unknown (atom [])}
-        v   (message ctx "" t doc)]
-    {:value v :problems @(:problems ctx) :unknown @(:unknown ctx)}))
+   no field declares]}; :value is only good when :problems is empty. Paths start
+   with `at`, when given (\"[2]\" for a stream's third message)."
+  ([t doc] (encode t doc ""))
+  ([^js t doc at]
+   (let [ctx {:problems (atom []) :unknown (atom [])}
+         v   (message ctx at t doc)]
+     {:value v :problems @(:problems ctx) :unknown @(:unknown ctx)})))

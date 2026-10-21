@@ -28,9 +28,8 @@
 
 (defn- rpcs [^js root]
   (into {} (for [^js svc (services root)
-                 ^js m   (.-methodsArray svc)
-                 :let [k (kind m)]]
-             [(str (subs (.-fullName svc) 1) "/" (.-name m)) {:unary? (= "unary" k) :kind k}])))
+                 ^js m   (.-methodsArray svc)]
+             [(str (subs (.-fullName svc) 1) "/" (.-name m)) {:kind (kind m)}])))
 
 (defn- read-error [^js e]
   (if (= "ENOENT" (.-code e))
@@ -40,7 +39,8 @@
 (defn read-proto
   "Load the proto at `file` and the files it imports. Returns {:descriptor (the
    protobufjs JSON form) :files (the local files read, absolute) :methods
-   {\"pkg.Service/Method\" {:unary? :kind}}}. Throws naming the file on a missing
+   {\"pkg.Service/Method\" {:kind}}}, the kind being unary, server-streaming,
+   client-streaming or bidi-streaming. Throws naming the file on a missing
    file or import, or a syntax error (with its line)."
   [file]
   (let [file    (path/resolve file)
@@ -72,15 +72,14 @@
             in-svc  (sort (for [k (keys methods) :when (str/starts-with? k (str svc "/"))]
                             (second (str/split k #"/" 2))))]
         (cond
-          (and m (:unary? m)) nil
-          m (str id ": rpc " rpc " is " (:kind m) "; only unary rpcs are served")
+          m nil
           (seq in-svc) (str id ": rpc " rpc " is not in " proto-name " (" svc " has " (str/join ", " in-svc) ")")
           :else (str id ": rpc " rpc " is not in " proto-name " (services: "
                      (str/join ", " (sort (distinct (map #(first (str/split % #"/" 2)) (keys methods))))) ")"))))))
 
 (defn contract-errors
   "What `validate` finds wrong with a grpc contract's proto, as messages: the proto
-   does not load, or an operation's rpc is not in it or is not unary. `operations`
+   does not load, or an operation's rpc is not in it. `operations`
    should be the expanded ones. Empty for an http contract, or a grpc one with no
    proto named (contract/validate reports that)."
   ([contract dir] (contract-errors contract (get contract "operations") dir))

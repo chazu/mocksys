@@ -64,11 +64,15 @@ operations:
                (thrown #(lifecycle/compile! "t/kv"))))))))
 
 (deftest validate-checks-rpcs-against-the-proto
+  (let [home (home-with (update kv-files "t/kv/contract.yaml" str/replace "kv.Store/Get" "kv.Store/Gone"))]
+    (in-store home
+      (fn []
+        (is (= ["get: rpc kv.Store/Gone is not in ./kv.proto (kv.Store has Get, List, Put, PutMany, Sync, Watch)"]
+               (:errors (lifecycle/validate "t/kv")))))))
   (let [home (home-with (update kv-files "t/kv/contract.yaml" str/replace "kv.Store/Get" "kv.Store/Watch"))]
     (in-store home
       (fn []
-        (is (= ["get: rpc kv.Store/Watch is server-streaming; only unary rpcs are served"]
-               (:errors (lifecycle/validate "t/kv"))))))))
+        (is (= [] (:errors (lifecycle/validate "t/kv"))) "a streaming rpc is served")))))
 
 (deftest a-bundle-carries-the-proto
   (let [home (home-with kv-files)

@@ -1,14 +1,16 @@
 (ns mocksys.runtime.grpc
   "gRPC imposters: a grpc-js server per imposter, built from the descriptor the
-  imposter carries. Every unary method of the proto is registered; a call becomes
-  the request the stubs already match on (POST /pkg.Service/Method, metadata as
+  imposter carries. Every method of the proto is registered; a call becomes the
+  request the stubs already match on (POST /pkg.Service/Method, metadata as
   headers, the decoded message as a JSON body), so matching, injection and state
-  are the HTTP imposter's. Streaming methods, and methods the proto does not
-  declare, answer UNIMPLEMENTED.
+  are the HTTP imposter's. A client stream's request body is the array of its
+  messages; each message of a bidirectional stream is a request of its own.
+  Methods the proto does not declare answer UNIMPLEMENTED.
 
   The outcome maps back as follows. A 2xx JSON object body is the reply message,
   checked against the reply type by mocksys.runtime.proto-json; a JSON array fills
-  the reply type's one repeated field. A reply that does not fit its type is
+  the reply type's one repeated field, or for a server or bidirectional stream is
+  the messages to send. A reply that does not fit its type is
   INTERNAL, and the daemon log (stderr) says why. Any other status is a
   gRPC error: a body {grpcCode, message} picks the code (a name or a number),
   otherwise `http->grpc` does. Response headers become initial metadata. A fault
@@ -49,12 +51,14 @@
                  :let [vs (mapv #(if (js/Buffer.isBuffer %) (.toString % "base64") %) vs)]]
              [k (if (= 1 (count vs)) (first vs) vs)])))
 
-(defn- request-of [^js call path]
+(defn- request-of
+  "The request for a call to `path` whose message (or array of messages) is `msg`."
+  [^js call path msg]
   {"method"  "POST"
    "path"    path
    "query"   {}
    "headers" (metadata->headers (.-metadata call))
-   "body"    (js/JSON.stringify (.-request call))})
+   "body"    (js/JSON.stringify msg)})
 
 ;; --- outcomes -> replies -------------------------------------------------------
 
@@ -97,43 +101,53 @@
   [details]
   {:error {:code (codes "INTERNAL") :details details} :log [details]})
 
-(defn- reply-of
-  "The reply for a 2xx body `doc`, checked against `reply-type` (see
-   mocksys.runtime.proto-json): {:value :unknown}, where :unknown are the keys no
-   field declares, or an `internal` answer."
-  [doc body ^js reply-type]
+(defn- one-message? [doc] (and (object? doc) (not (array? doc))))
+
+(defn- replies-of
+  "The messages for a 2xx body `doc`, checked against `reply-type` (see
+   mocksys.runtime.proto-json): {:values [message] :unknown [paths of keys no field
+   declares]}, or an `internal` answer. A unary reply is one message; a JSON array
+   fills the reply type's one repeated field. A stream's array is its messages, in
+   order, and an object is one message."
+  [doc body ^js reply-type stream?]
   (let [repeated (repeated-field reply-type)
-        doc      (if (and (array? doc) repeated) (js-obj repeated doc) doc)
-        type     (subs (.-fullName reply-type) 1)]
-    (if (and (object? doc) (not (array? doc)))
-      (let [{:keys [value problems unknown]} (pj/encode reply-type doc)]
+        type     (subs (.-fullName reply-type) 1)
+        docs     (cond (one-message? doc)            [doc]
+                       (and stream? (array? doc))    (vec doc)
+                       (and (array? doc) repeated)   [(js-obj repeated doc)])]
+    (if docs
+      (let [rs       (map-indexed #(pj/encode reply-type %2 (if stream? (str "[" %1 "]") "")) docs)
+            problems (mapcat :problems rs)]
         (if (seq problems)
           (internal (str "the mock's reply does not encode as " type ": " (str/join "; " problems)))
-          {:value value :unknown unknown}))
+          {:values (mapv :value rs) :unknown (vec (mapcat :unknown rs))}))
       (let [shown (if (= ::none doc) body (js/JSON.stringify doc))]
-        (internal (str "the mock's reply is not a JSON object"
+        (internal (str "the mock's reply is not a JSON object" (when stream? " or array")
                        (when (array? doc) (str " (a JSON array needs a reply type with one repeated field; " type " has "
                                                (if (seq (filter #(.-repeated ^js %) (.-fieldsArray reply-type))) "several" "none") ")"))
                        ": " (subs shown 0 (min 80 (count shown)))))))))
 
 (defn- outcome->reply
   "The gRPC answer for an imposter outcome ({:status :headers :body} or {:fault}):
-   {:value reply-object :unknown [paths]} or {:error {:code :details}}, with
-   :metadata (the response headers) and :log, lines for the daemon log."
-  [{:keys [status body fault headers]} reply-type]
+   {:values [reply-object] :unknown [paths]} or {:error {:code :details}}, with
+   :metadata (the response headers) and :log, lines for the daemon log. A blank
+   body is an empty reply, or for a stream no messages."
+  [{:keys [status body fault headers]} reply-type stream?]
   (let [[meta refused] (when-not fault (headers->metadata headers))
-        doc            (if (str/blank? body) #js {} (parse body))]
+        doc            (cond (not (str/blank? body)) (parse body)
+                             stream?                 #js []
+                             :else                   #js {})]
     (cond
       fault
       {:error {:code (codes "UNAVAILABLE") :details (str "fault " fault)}}
 
       (<= 200 status 299)
-      (-> (reply-of doc body reply-type)
+      (-> (replies-of doc body reply-type stream?)
           (assoc :metadata meta)
           (update :log #(into (vec refused) %)))
 
       :else
-      (let [obj (when (and (object? doc) (not (array? doc))) (js->clj doc))]
+      (let [obj (when (one-message? doc) (js->clj doc))]
         {:metadata meta
          :log      refused
          :error {:code    (or (code-of (get obj "grpcCode")) (codes (get http->grpc status "UNKNOWN")))
@@ -146,28 +160,93 @@
 (defn- no-proxy [_ _]
   (p/rejected (js/Error. "proxy responses are not served over grpc")))
 
-(defn- handler
-  "Answer calls to `md` from `imp`. A reply's unknown keys are logged once for each
-   set of them, since every call to a twin answers from the same records."
+(defn- asker
+  "A fn from one request to a promise of the answer `imp` gives it (see
+   `outcome->reply`), once the response's wait is over. A reply's unknown keys are
+   logged once for each set of them, since every call to a twin answers from the
+   same records."
   [imp ^js md ^js reply-type]
-  (let [path   (.-path md)
-        say    #(log! (str "grpc mock on port " (imposter/port imp) ", " path ": " %))
-        warned (atom #{})]
-    (fn [^js call callback]
-      (-> (p/let [out (imposter/respond imp (request-of call path) {:proxy! no-proxy})
-                  _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
-            (let [{:keys [metadata value error unknown log]} (outcome->reply out reply-type)
-                  dropped (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
-              (when (and (seq dropped) (not (@warned dropped)))
-                (swap! warned conj dropped)
-                (say (str "dropped reply field(s) " (subs (.-fullName reply-type) 1) " does not declare: "
-                          (str/join ", " dropped))))
-              (run! say log)
-              (when metadata (.sendMetadata call metadata))
-              (if error
-                (callback (clj->js error))
-                (callback nil value))))
-          (p/catch (fn [e] (callback #js {:code (codes "INTERNAL") :details (ex-message e)})))))))
+  (let [path    (.-path md)
+        stream? (boolean (.-responseStream md))
+        say     #(log! (str "grpc mock on port " (imposter/port imp) ", " path ": " %))
+        warned  (atom #{})]
+    (fn [request]
+      (p/let [out (imposter/respond imp request {:proxy! no-proxy})
+              _   (when (pos? (:wait out 0)) (p/delay (:wait out)))]
+        (let [{:keys [unknown log] :as answer} (outcome->reply out reply-type stream?)
+              dropped (into (sorted-set) (map #(str/replace % #"\[\d+\]" "[]")) unknown)]
+          (when (and (seq dropped) (not (@warned dropped)))
+            (swap! warned conj dropped)
+            (say (str "dropped reply field(s) " (subs (.-fullName reply-type) 1) " does not declare: "
+                      (str/join ", " dropped))))
+          (run! say log)
+          answer)))))
+
+(defn- internal-error [e] #js {:code (codes "INTERNAL") :details (ex-message e)})
+
+(defn- reply!
+  "Answer a call that takes one reply (unary, client streaming) with `callback`."
+  [ask ^js call request callback]
+  (-> (p/let [{:keys [metadata values error]} (ask request)]
+        (when metadata (.sendMetadata call metadata))
+        (if error (callback (clj->js error)) (callback nil (first values))))
+      (p/catch #(callback (internal-error %)))))
+
+(defn- unary-handler [ask path]
+  (fn [^js call callback]
+    (reply! ask call (request-of call path (.-request call)) callback)))
+
+(defn- client-stream-handler
+  "Collect the call's messages; the request is the array of them."
+  [ask path]
+  (fn [^js call callback]
+    (let [msgs #js []]
+      (.on call "data" #(.push msgs %))
+      (.on call "end" #(reply! ask call (request-of call path msgs) callback)))))
+
+(defn- server-stream-handler
+  "Answer the one request with every message of the reply, or the error before any."
+  [ask path]
+  (fn [^js call]
+    (-> (p/let [{:keys [metadata values error]} (ask (request-of call path (.-request call)))]
+          (when metadata (.sendMetadata call metadata))
+          (if error
+            (.emit call "error" (clj->js error))
+            (do (run! #(.write call %) values) (.end call))))
+        (p/catch #(.emit call "error" (internal-error %))))))
+
+(defn- bidi-handler
+  "Each inbound message is one request, answered in order with its reply's
+   messages. The stream ends when the client half-closes and every reply is sent,
+   or at the first error. The first reply's headers are the stream's metadata."
+  [ask path]
+  (fn [^js call]
+    (let [turns (atom (p/resolved nil))
+          over? (atom false)
+          md?   (atom false)
+          stop! (fn [err] (when-not @over? (reset! over? true) (if err (.emit call "error" err) (.end call))))
+          turn  (fn [msg]
+                  (fn [_]
+                    (when-not @over?
+                      (-> (p/let [{:keys [metadata values error]} (ask (request-of call path msg))]
+                            (when-not @over?
+                              (when (and metadata (not @md?)) (reset! md? true) (.sendMetadata call metadata))
+                              (if error (stop! (clj->js error)) (run! #(.write call %) values))))
+                          (p/catch #(stop! (internal-error %)))))))]
+      (.on call "data" (fn [msg] (swap! turns p/then (turn msg))))
+      (.on call "end" (fn [] (swap! turns p/then (fn [_] (stop! nil)))))
+      (.on call "cancelled" #(reset! over? true)))))
+
+(defn- handler
+  "The grpc-js handler for `md`, by its kind, answering from `imp`."
+  [imp ^js md ^js reply-type]
+  (let [ask  (asker imp md reply-type)
+        path (.-path md)]
+    (case [(boolean (.-requestStream md)) (boolean (.-responseStream md))]
+      [false false] (unary-handler ask path)
+      [true false]  (client-stream-handler ask path)
+      [false true]  (server-stream-handler ask path)
+      [true true]   (bidi-handler ask path))))
 
 ;; --- the virtual clock ------------------------------------------------------------
 ;; A twin with a virtual clock has a stub at POST /_mocksys/clock (see
@@ -211,17 +290,15 @@
        (catch :default e (bad (str "descriptor: " (ex-message e))))))
 
 (defn- services
-  "[[service-definition {method handler}]] for each service; only unary methods get
-   a handler, so grpc-js answers the rest UNIMPLEMENTED. `root` is the protobufjs
-   reading of the same descriptor, which knows each reply's type."
+  "[[service-definition {method handler}]] for each service. `root` is the
+   protobufjs reading of the same descriptor, which knows each reply's type."
   [imp pkg-def ^js root]
   (for [k (js-keys pkg-def)
         :let [^js svc (aget pkg-def k)]
         :when (nil? (.-format svc))]
     [svc (into {} (for [m (js-keys svc)
                         :let [^js md  (aget svc m)
-                              ^js rpc (aget (.-methods (.lookupService root k)) m)]
-                        :when (not (or (.-requestStream md) (.-responseStream md)))]
+                              ^js rpc (aget (.-methods (.lookupService root k)) m)]]
                     [m (handler imp md (.-resolvedResponseType rpc))]))]))
 
 (defn- bind! [^js server addr]
