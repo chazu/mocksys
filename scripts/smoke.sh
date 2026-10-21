@@ -151,7 +151,9 @@ check "an edited module applies on the next run" edited \
 "$MS" stop demo/webhooks >/dev/null
 "$MS" pack demo/webhooks --out "$WORK/webhooks.mock.tgz" >/dev/null
 mv "$WH/verbs.js" "$MOCKSYS_HOME/outside.js"
-MOCKSYS_HOME="$WORK/store2" "$MS" unpack "$WORK/webhooks.mock.tgz" >/dev/null
+out="$(MOCKSYS_HOME="$WORK/store2" "$MS" unpack "$WORK/webhooks.mock.tgz" 2>&1)"
+check "unpack names the module code it brought" 1 \
+  "$(echo "$out" | grep -c 'demo/webhooks runs JavaScript from its modules (./verbs.js)')"
 MOCKSYS_HOME="$WORK/store2" "$MS" run demo/webhooks --port $P3 >/dev/null
 check "a bundle carries the module" 202 "$(deliver $P3 "$(hmac whsec_test "$body")" "$body")"
 MOCKSYS_HOME="$WORK/store2" "$MS" stop demo/webhooks >/dev/null
