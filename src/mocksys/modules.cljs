@@ -76,8 +76,7 @@
                         (js-keys vs))))
             {}
             modules)
-    (doseq [verb calls
-            :when (not (fn? (aget verbs verb)))]
+    (when-let [verb (first (remove #(fn? (aget verbs %)) calls))]
       (throw (js/Error. (str "call: verb '" verb "' "
                              (if (seq modules)
                                (str "is not exported by the modules (they export "
