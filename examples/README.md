@@ -84,7 +84,7 @@ export NODE_EXTRA_CA_CERTS="$(mocksys tls ca)"                      # node clien
 mkdir -p .mocks/demo/todos-tls && cp examples/grpc-todos/todo.proto .mocks/demo/todos-tls/
 { echo 'tls: true'; cat examples/grpc-todos/contract.yaml; } > .mocks/demo/todos-tls/contract.yaml
 mocksys run demo/todos-tls --port 9170                              # at localhost:9170 (gRPC over TLS)
-node examples/grpc-todos/client.js --tls localhost:9170 GetTodo '{"id":"t1"}'
+NODE_EXTRA_CA_CERTS="$(mocksys tls ca)" node examples/grpc-todos/client.js --tls localhost:9170 GetTodo '{"id":"t1"}'
 ```
 
 See [docs/walkthrough.md](../docs/walkthrough.md) for the narrated tour and
