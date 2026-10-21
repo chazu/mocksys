@@ -44,8 +44,8 @@ message ErrorResponse { int32 error_code = 1; string error_message = 2; }
 ")
 
 (def ^:private service-definitions
-  "The ServerReflection service of each version. The loader options are the ones
-   @grpc/reflection reads its requests and writes its responses in."
+  "The ServerReflection service of each version, loaded with the options the
+   reflection package reads its requests and writes its responses in."
   (delay
     (for [version ["v1" "v1alpha"]
           :let [root (.-root (protobuf/parse (str/replace reflection-proto "VERSION" version)))
