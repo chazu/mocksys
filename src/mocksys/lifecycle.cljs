@@ -2,7 +2,7 @@
   "A scenario's lifecycle: the contract is canonical and the imposter is a build
   artifact. `compile!` lowers one to the other; `ensure-contract!` lifts a
   legacy/recorded imposter into a contract on demand; `ensure-running!` posts it
-  to the Mountebank daemon."
+  to the mocksys daemon."
   (:require [promesa.core :as p]
             [mocksys.mb :as mb]
             [mocksys.store :as store]
@@ -63,9 +63,9 @@
         pinned    (get contract "port")
         stateful? (inject/imposter-stateful? imposter)]
     (when (and stateful? (let [v (.-MOCKSYS_NO_INJECTION js/process.env)] (and v (not= v ""))))
-      (throw (js/Error. (str "'" scenario "' is a stateful mock (needs Mountebank injection), but "
+      (throw (js/Error. (str "'" scenario "' is a stateful mock (it runs generated injections), but "
                                 "MOCKSYS_NO_INJECTION is set. Unset it to run stateful scenarios."))))
-    (p/let [_        (mb/ensure-up! stateful?)
+    (p/let [_        (mb/ensure-up!)
             live     (mb/list-imposters)
             existing (first (filter #(= (:name %) scenario) live))
             port     (cond
@@ -75,9 +75,7 @@
                        :else    (mb/free-port))]
       (mb/delete-imposter! port)
       (let [imp (assoc imposter "port" port "name" scenario "recordRequests" true)]
-        (p/let [_ (if stateful?
-                    (mb/post-imposter-injecting! imp)
-                    (mb/post-imposter! imp))]
+        (p/let [_ (mb/post-imposter! imp)]
           (when (and port-opt contract (not= port pinned))
             (store/write-contract! scenario (assoc contract "port" port)))
           port)))))

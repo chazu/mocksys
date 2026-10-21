@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end smoke test: drives the built CLI (out/mocksys.js) against a real
-# Mountebank daemon in a throwaway store. Needs :2525 free; stops the daemon on exit.
+# End-to-end smoke test: drives the built CLI (out/mocksys.js) against its own
+# daemon in a throwaway store. The daemon gets a private admin port, so a daemon
+# you already run is left alone; it is stopped on exit.
 #
 #   npm run build && scripts/smoke.sh
 set -euo pipefail
@@ -8,17 +9,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MS="$ROOT/bin/mocksys"
 PORT=9471
 
-if lsof -nP -iTCP:2525 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "smoke: something already listens on :2525; stop it first (mocksys uses that port)" >&2
-  exit 2
-fi
+free_port() { node -e 'const s=require("net").createServer().listen(0,()=>{console.log(s.address().port);s.close()})'; }
+export MOCKSYS_ADMIN_PORT="$(free_port)"
+ADMIN="http://127.0.0.1:$MOCKSYS_ADMIN_PORT"
 
 WORK="$(mktemp -d)"
 export MOCKSYS_HOME="$WORK/store"
 cd "$WORK"
 cleanup() {
   "$MS" stop --all >/dev/null 2>&1 || true
-  lsof -ti tcp:2525 | xargs kill 2>/dev/null || true
+  pid=$(curl -s "$ADMIN/" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).pid)}catch{}})')
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -40,8 +41,14 @@ check "assert sees the call" 0 $?
 "$MS" stop demo/hello >/dev/null
 
 echo "# daemon"
-check "admin API launched with --localOnly" yes \
-  "$(ps -o args= -p "$(lsof -ti tcp:2525 -sTCP:LISTEN | head -1)" | grep -q -- --localOnly && echo yes || echo no)"
+check "GET / identifies the mocksys daemon" mocksys "$(curl -s "$ADMIN/" | json_field '.name')"
+listeners() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fn | sed -n 's/^n//p' | LC_ALL=C sort | tr '\n' ' '; }
+check "admin API listens on 127.0.0.1 only" "127.0.0.1:$MOCKSYS_ADMIN_PORT " "$(listeners "$MOCKSYS_ADMIN_PORT")"
+"$MS" run demo/hello --port $PORT >/dev/null
+check "a mock listens on the loopback addresses only" "127.0.0.1:$PORT [::1]:$PORT " "$(listeners $PORT)"
+check "the admin API refuses a browser origin" 403 \
+  "$(status_of -H 'Origin: https://evil.example' "$ADMIN/imposters")"
+"$MS" stop demo/hello >/dev/null
 
 echo "# okta twin"
 "$MS" kit okta --port $PORT >/dev/null

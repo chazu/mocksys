@@ -54,7 +54,8 @@
    "pull"         share/cmd-pull
    "rm"           share/cmd-rm
    "delete"       share/cmd-rm
-   "prime"        help/cmd-prime})
+   "prime"        help/cmd-prime
+   "daemon"       serve/cmd-daemon})
 
 (defn -main [& args]
   (let [[cmd & more] args

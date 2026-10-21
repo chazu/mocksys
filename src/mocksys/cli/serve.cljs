@@ -9,7 +9,14 @@
             [mocksys.analyze :as analyze]
             [mocksys.service :as service]
             [mocksys.lifecycle :as lifecycle]
+            [mocksys.runtime :as runtime]
             [mocksys.cli.util :refer [die env-vars-for running-imposter]]))
+
+(defn cmd-daemon
+  "Run the runtime in the foreground (hidden; `mb/ensure-up!` spawns it detached)."
+  [_]
+  (p/let [{:keys [port]} (runtime/start! {:host "127.0.0.1" :port (mb/admin-port)})]
+    (println (str "mocksys daemon on http://127.0.0.1:" port))))
 
 (defn cmd-run [{:keys [pos opts]}]
   (let [scenario (first pos)]
