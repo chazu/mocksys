@@ -61,40 +61,48 @@
     :else       (str x)))
 
 (defn- select-body
-  "The request body replaced by what `selector` picks: nil for nothing, the value
-   for one match, a vector for several. A body that isn't JSON selects nothing."
+  "What `selector` picks from the request body: ::none for nothing, the value for one
+   match (nil for a JSON null), a vector for several. A body that isn't JSON selects
+   nothing."
   [body selector normalize]
   (let [doc (try (js->clj (js/JSON.parse body)) (catch :default _ ::none))]
-    (when-not (= ::none doc)
+    (if (= ::none doc)
+      ::none
       (let [hits (select (str/lower-case selector) (normalize doc))]
-        (case (count hits) 0 nil 1 (first hits) hits)))))
+        (case (count hits) 0 ::none 1 (first hits) hits)))))
 
 (defn- actual
   "The request as a predicate sees it: normalized, and with the body selected when
-   the predicate carries a jsonpath."
+   the predicate carries a jsonpath. A selector that picks nothing removes the body,
+   so a selected null (kept as nil) stays distinct from no hit."
   [request selector normalize]
-  (cond-> (normalize request)
-    selector (assoc "body" (select-body (get request "body") selector normalize))))
+  (let [r (normalize request)]
+    (if-not selector
+      r
+      (let [hit (select-body (get request "body") selector normalize)]
+        (if (= ::none hit) (dissoc r "body") (assoc r "body" hit))))))
 
 ;; --- evaluation ------------------------------------------------------------
 
 (defn- satisfied?
   "Every field of `expected` holds against `actual` under `test`, recursing into
-   nested maps. A scalar expectation against an array holds if any element does."
+   nested maps. A scalar expectation against an array holds if any element does. A
+   missing field reads as \"\"; a present nil is a JSON null, as Mountebank tells
+   undefined from null."
   [expected actual test exists?]
   (and (map? actual)
        (every? (fn [[field e]]
-                 (let [a (get actual field)]
+                 (let [a (get actual field "")]
                    (cond
                      (map? e)    (satisfied? e a test exists?)
                      (vector? a) (or (and exists? (true? e))
                                      (boolean (some #(test e %) a)))
-                     :else       (test e (if (nil? a) "" a)))))
+                     :else       (test e a))))
                expected)))
 
-(defn- equals-test [e a] (= (str e) (str a)))
-(defn- matches-test [e a] (.test (js/RegExp. e "i") (str a)))
-(defn- exists-test [e a] (if e (and (some? a) (not= "" a)) (or (nil? a) (= "" a))))
+(defn- equals-test [e a] (if (or (nil? e) (nil? a)) (= e a) (= (str e) (str a))))
+(defn- matches-test [e a] (.test (js/RegExp. e "i") (if (nil? a) "null" (str a))))
+(defn- exists-test [e a] (if e (not= "" a) (= "" a)))
 
 (defn matches?
   "Whether one predicate holds for `request`."
