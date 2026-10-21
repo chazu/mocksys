@@ -81,6 +81,8 @@ mocksys clock <twin> advance 1h                                    # move the de
   `MOCKSYS_HOME=./.mocks` to scope to a project).
 - `mocksys` starts its daemon for you and leaves it running; never run `mocksys daemon`
   yourself. Its admin API is `127.0.0.1:2626` (`MOCKSYS_ADMIN_PORT` overrides).
+  `mocksys daemon stop` stops it and every running mock. If the daemon fails to start,
+  read `$MOCKSYS_HOME/daemon.log`.
 - **Quote any contract path containing `{param}`**: `path: "/users/{id}"` (unquoted YAML
   flow-parsing mis-reads `{...}` as a map).
 - `assert` / `validate` / `conform` exit non-zero on failure — they drop into CI.

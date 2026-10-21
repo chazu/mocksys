@@ -97,11 +97,18 @@ the already-running port > a port **pinned** on the contract > a fresh free port
 explicit `--port` is persisted onto the contract as a pin. `run --watch` recompiles and
 reloads on every `contract.yaml` change (the Tilt-style save-and-reload loop).
 
-**The daemon.** `mb/ensure-up!` checks `GET /` on the admin port. If nothing answers,
-it spawns a detached `mocksys daemon` (under node, `node <script> daemon`; in the bun
-binary, `<execPath> daemon`) and waits for it. If something other than mocksys answers,
-it stops with an error naming `MOCKSYS_ADMIN_PORT`, which overrides the default 2626.
-The daemon keeps imposters in memory, so they last until it exits.
+**The daemon.** `mb/ensure-up!` checks `GET /` on the admin port, which answers with
+the daemon's name, mocksys version and pid. If nothing answers, it spawns a detached
+`mocksys daemon` and waits for it: under node or bun running a script, `<runtime>
+<script> daemon`; in the bun binary, whose script path is a virtual `/$bunfs/` one,
+`<execPath> daemon`. The daemon's stdout and stderr go to `$MOCKSYS_HOME/daemon.log`,
+truncated on each start. If the process cannot start, exits, or does not answer within
+10s, the error ends with the last lines of that log. If a daemon of another mocksys
+version answers, `ensure-up!` stops it with `DELETE /`, starts a fresh one, and prints
+one stderr line naming the mocks that stopped. `mocksys daemon stop` sends the same
+`DELETE /`. If something other than mocksys answers, it stops with an error naming
+`MOCKSYS_ADMIN_PORT`, which overrides the default 2626. The daemon keeps imposters in
+memory, so they last until it exits.
 
 The daemon implements exactly what mocksys emits, and rejects anything else with a
 400 that names the field:
@@ -110,9 +117,9 @@ The daemon implements exactly what mocksys emits, and rejects anything else with
 |---|---|
 | Imposter | `protocol: http`, `port`, `name`, `recordRequests`, `stubs` |
 | Predicates | `equals`, `deepEquals`, `matches`, `exists` over method, path, query, headers; `jsonpath` (plain paths) over the body. Case-insensitive, as in Mountebank. |
-| Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `inject`, `proxy` (`proxyOnce` with `predicateGenerators`), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
+| Responses | `is` (with Mountebank's defaults: status 200, an object body as JSON, `Connection: close`), `inject` (source that evaluates to a function), `proxy` (`proxyOnce` with `predicateGenerators`; `to` is an origin with no path, query or fragment), `fault` (`CONNECTION_RESET_BY_PEER`, `RANDOM_DATA_THEN_CLOSE`) |
 | Behaviors | `wait`, `copy` (regex or jsonpath) |
-| Admin routes | `GET /`, `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
+| Admin routes | `GET /` (name, version, pid), `DELETE /` (stop), `GET/POST /imposters`, `GET/DELETE /imposters/:port` (with `?replayable=true&removeProxies=true`), `DELETE /imposters/:port/savedRequests` |
 
 **Injection.** Injections run in the daemon's process, called as
 `f(request, state, logger)` with `require` in scope. `state` is one object per
