@@ -21,6 +21,11 @@ description = "Release-compile the CLI to out/mocksys.js"
 depends = ["install"]
 run = "npm run build"
 
+[tasks.smoke]
+description = "End-to-end CLI checks against a real Mountebank (needs :2525 free)"
+depends = ["build"]
+run = "scripts/smoke.sh"
+
 [tasks.watch]
 description = "Recompile out/mocksys.js on save"
 depends = ["install"]

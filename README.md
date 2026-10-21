@@ -78,6 +78,7 @@ git clone https://github.com/chazu/mocksys.git
 cd mocksys
 mise install                # node, java, bun
 mise run test               # unit tests (compiles with shadow-cljs, runs on node)
+mise run smoke              # release build + end-to-end CLI checks against a real Mountebank
 mise run watch              # recompiles out/mocksys.js on save (keep running)
 ./bin/mocksys help          # node shim over the compiled output
 ```
