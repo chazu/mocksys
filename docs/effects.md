@@ -215,6 +215,22 @@ decrements as the budget is spent); when the budget is exceeded the `miss` respo
 returned with `Remaining: 0`. A `limit` is *not* terminal — on pass-through the operation
 continues to its real response, which inherits the budget headers.
 
+A service that names these headers differently gets its own names with `headers`. Each of
+`limit`, `remaining` and `reset` is optional and falls back to the `X-Rate-Limit-*` name:
+
+```yaml
+  limit:
+    bucket: rl
+    key:    "{apiKey}"
+    max:    60
+    headers: { limit: x-ratelimit-limit-requests,
+               remaining: x-ratelimit-remaining-requests,
+               reset: x-ratelimit-reset-requests }
+```
+
+[`examples/llm-rate-limits.yaml`](../examples/llm-rate-limits.yaml) uses this on an
+authored operation and on a `crud-collection` gene.
+
 ## The virtual clock
 
 A twin can carry a **virtual clock**: a "now" that is *frozen* until you advance it, so any

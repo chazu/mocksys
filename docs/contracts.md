@@ -150,6 +150,10 @@ genes:
 operations: []                   # optional; hand-written operations go here
 ```
 
+`rate-limit` also takes `key-source` (what to count requests by, default the bearer token),
+`miss` (the `429` response) and `headers` (the rate-limit header names); see
+[`examples/llm-rate-limits.yaml`](../examples/llm-rate-limits.yaml).
+
 When the contract compiles, each gene expands into operations, collections and seed:
 
 - Gene operations come **after** the hand-written `operations`. The first matching

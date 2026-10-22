@@ -1,0 +1,29 @@
+[
+  { "method": "POST", "path": "/v1/chat/completions",
+    "headers": { "Content-Type": "application/json", "x-bf-vk": "sk-bf-live-0000000000" },
+    "body": { "model": "gpt-4o-mini", "messages": [{ "role": "user", "content": "hi" }] },
+    "expect": 200 },
+  { "method": "POST", "path": "/v1/chat/completions",
+    "headers": { "Content-Type": "application/json" },
+    "body": { "model": "gpt-4o-mini", "messages": [] },
+    "expect": 401 },
+  { "method": "POST", "path": "/v1/chat/completions",
+    "headers": { "Content-Type": "application/json", "x-bf-vk": "sk-bf-off-00000000000" },
+    "body": { "model": "gpt-4o-mini", "messages": [] },
+    "expect": 401 },
+
+  { "method": "GET",  "path": "/api/governance/virtual-keys",          "expect": 200 },
+  { "method": "GET",  "path": "/api/governance/virtual-keys/vk_live",  "expect": 200 },
+  { "method": "GET",  "path": "/api/governance/virtual-keys/vk_nope",  "expect": 404 },
+  { "method": "GET",  "path": "/api/governance/virtual-keys?filter=status%20eq%20%22active%22", "expect": 200 },
+  { "method": "POST", "path": "/api/governance/virtual-keys",
+    "headers": { "Content-Type": "application/json" },
+    "body": { "value": "sk-bf-corpus-000000000", "name": "corpus key" },
+    "expect": 201 },
+
+  { "method": "GET",  "path": "/api/providers", "expect": 200 },
+  { "method": "POST", "path": "/api/providers",
+    "headers": { "Content-Type": "application/json" },
+    "body": { "provider": "openai", "keys": [{ "value": "sk-upstream", "models": ["gpt-4o"], "weight": 1.0 }] },
+    "expect": 201 }
+]

@@ -9,7 +9,8 @@ description: >-
   token/session expiry, or a server-sent event stream or WebSocket; to assert what your
   code called; or to validate a mock against the real service. Triggers: "mock the X
   API", "stub this service", "fake an OAuth/Okta provider", "spin up a mock server",
-  "test against a fake <service>", "fake an SSE/WebSocket endpoint", "record and replay
+  "test against a fake <service>", "fake an SSE/WebSocket endpoint", "fake an LLM
+  gateway / OpenAI-compatible chat endpoint", "record and replay
   an API", "digital twin of <service>".
 ---
 
@@ -51,7 +52,10 @@ mocksys run okta/okta --port 9200
 eval "$(mocksys env okta/okta)"         # exports BASE_URL=http://localhost:9200 — point code at it
 ```
 
-`mocksys kit oauth2 --provider github` is the other built-in twin. `mocksys kits` lists
+`mocksys kit oauth2 --provider github` and `mocksys kit bifrost` are the other built-in
+twins; `bifrost` fakes the Bifrost LLM gateway (OpenAI-compatible `POST /v1/chat/completions`
+behind an `x-bf-vk` virtual key, virtual-key and provider CRUD, `--rate-limit N` for 429s).
+`mocksys kits` lists
 every kit with its flags; `mocksys genes` lists the reusable genes a kit composes, with
 their params. A kit is a YAML file (a contract template plus flags with defaults); drop
 your own in `$MOCKSYS_HOME/kits/` and `mocksys kit <name>` uses it (see `docs/twins.md`).

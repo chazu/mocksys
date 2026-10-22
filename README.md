@@ -13,7 +13,8 @@ A contract can be a single endpoint or a **digital twin**: a stateful behavioral
 of a whole service — seeded resource **collections** with CRUD, SCIM-style filtering and
 cursor pagination, plus auth handshakes — generated in one command from a **kit**, and
 validated against the real service with `conform`. `mocksys kit okta` stands up an Okta
-twin (users & groups CRUD + OIDC) you can drive at high volume, deterministically.
+twin (users & groups CRUD + OIDC) you can drive at high volume, deterministically, and
+`mocksys kit bifrost` a Bifrost LLM gateway (OpenAI-compatible chat behind virtual keys).
 
 mocksys serves the mocks from its own daemon, which it starts for you and keeps
 behind the CLI. You work in agent vocabulary (*service, scenario, contract,
@@ -210,6 +211,7 @@ handshake, a CRUD resource, an error envelope); `mocksys genes` lists them.
 ```sh
 mocksys kit okta                              # users & groups CRUD + OIDC, on one stateful mock
 mocksys run okta/okta                         # host it (prints a port)
+mocksys kit bifrost --rate-limit 100          # an LLM gateway: chat completions + virtual keys
 mocksys genes                                 # the behavioral genes a kit composes
 ```
 
@@ -289,7 +291,7 @@ mocksys unpack github-create-issue.mock.tgz  # restores it into another store
 | `doctor <name> [--fix]` | lint matchers/volatility; `--fix` cleans in place |
 | `requests <name> [--clear]` | what the running mock received (the newest 10000; `MOCKSYS_MAX_RECORDED_REQUESTS`, a whole number above 0, changes that, read when the daemon starts) |
 | `assert <name> --saw 'METHOD /path'` | verify a call happened (exit 1 on miss) |
-| `kit <okta\|oauth2> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
+| `kit <okta\|oauth2\|bifrost> [--scenario NAME] [--port N]` | generate a full stateful twin in one command |
 | `kits` | list the kits, built in and in `$MOCKSYS_HOME/kits` (a file, or a directory that ships modules), with their flags |
 | `genes` | list the genes a contract can list under `genes:`, with their params |
 | `conform <name> --corpus FILE [--against URL] [--ignore k1,k2]` | replay+diff vs reality (exit 1 on drift) |
@@ -342,7 +344,7 @@ imposter servers, predicate matching, effects), `store` (disk layout), `scrub`
 (redaction/volatility), `analyze` (matcher hygiene), `service` (templates), `contract`
 (the canonical source format — compile/lift/validate/example selection), `effect` (the
 declarative stateful layer — handshakes + resource collections, checked and evaluated
-by the daemon), `kits` (kits + composable genes — `okta`, `oauth2`), `conform`
+by the daemon), `kits` (kits + composable genes — `okta`, `oauth2`, `bifrost`), `conform`
 (differential fidelity vs reality), `openapi` (spec import, via
 `@apidevtools/swagger-parser` + `openapi-sampler`), `bundle` (pack/unpack), `git` (the
 shared store). Design notes and plans live in [`docs/design/`](docs/design/).

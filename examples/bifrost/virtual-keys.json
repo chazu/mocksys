@@ -1,0 +1,23 @@
+[
+  {
+    "id": "vk_ci",
+    "value": "sk-bf-ci-000000000000",
+    "name": "ci pipeline",
+    "status": "active",
+    "allowed_models": ["gpt-4o-mini"]
+  },
+  {
+    "id": "vk_dev",
+    "value": "sk-bf-dev-00000000000",
+    "name": "local dev",
+    "status": "active",
+    "allowed_models": ["gpt-4o", "gpt-4o-mini", "claude-sonnet-5"]
+  },
+  {
+    "id": "vk_revoked",
+    "value": "sk-bf-revoked-0000000",
+    "name": "revoked laptop key",
+    "status": "inactive",
+    "allowed_models": []
+  }
+]

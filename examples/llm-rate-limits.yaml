@@ -1,0 +1,70 @@
+# Hand-authored: rate limits that look like an OpenAI-style API instead of Okta's.
+# Both places a budget can live let you rename the headers and pick what to count by:
+#   - the `limit` verb on an authored op: `headers` renames X-Rate-Limit-* to the
+#     service's own names, and `miss` is the 429 body
+#   - `crud-collection`'s `rate-limit` param: `key-source` is the bind spec to count
+#     by (default: the bearer token), plus the same `miss` and `headers`
+#
+# Stand it up:
+#   export MOCKSYS_HOME=./.mocks
+#   mkdir -p .mocks/demo/llm-limits && cp examples/llm-rate-limits.yaml .mocks/demo/llm-limits/contract.yaml
+#   mocksys validate demo/llm-limits && mocksys run demo/llm-limits --port 9190
+# Drive it:
+#   for i in 1 2 3; do curl -si -X POST localhost:9190/v1/embeddings -H 'x-api-key: team-a' \
+#     -d '{"model":"text-embedding-3-small","input":"hi"}' | grep -iE '^HTTP|x-ratelimit'; done
+#                                                     # 200, 200, then 429; remaining 1, 0, 0
+#   curl -si -X POST localhost:9190/v1/embeddings -H 'x-api-key: team-b' -d '{}' | head -1
+#                                                     # 200: each key has its own budget
+#   for i in 1 2 3 4; do curl -s -o /dev/null -w '%{http_code}\n' localhost:9190/v1/files -H 'x-api-key: team-a'; done
+#                                                     # 200 x3, then 429 with an OpenAI-style error
+#   mocksys clock demo/llm-limits advance 1m          # a new window: the budgets reset
+service: demo
+scenario: demo/llm-limits
+origin: authored
+summary: OpenAI-style rate limits per API key, on an authored op and on a gene
+seed:
+  files:
+    - { id: file-1, object: file, filename: train.jsonl, purpose: fine-tune, bytes: 1024 }
+state:
+  clock: { start: "2024-01-01T00:00:00Z" }
+genes:
+  # five CRUD ops for /v1/files, each counted against the caller's x-api-key
+  - crud-collection:
+      coll: files
+      base: /v1/files
+      seed-name: files
+      id-prefix: file-
+      rate-limit:
+        max: 3
+        window: 60
+        key-source: { header: x-api-key }
+        headers: { limit: x-ratelimit-limit-requests,
+                   remaining: x-ratelimit-remaining-requests,
+                   reset: x-ratelimit-reset-requests }
+        miss: { status: 429, json: { error: { message: "Rate limit reached for requests",
+                                              type: requests, code: rate_limit_exceeded } } }
+operations:
+  - id: embeddings
+    summary: POST /v1/embeddings — 2 requests per minute per x-api-key
+    request: { method: POST, path: "/v1/embeddings" }
+    effect:
+      bind:
+        key:   { header: x-api-key }
+        model: { body: model }
+      limit:
+        bucket: rl_embed
+        key: "{key}"
+        max: 2
+        window: 60
+        headers: { limit: x-ratelimit-limit-requests,
+                   remaining: x-ratelimit-remaining-requests,
+                   reset: x-ratelimit-reset-requests }
+        miss: { status: 429, json: { error: { message: "Rate limit reached for requests",
+                                              type: requests, code: rate_limit_exceeded } } }
+      respond:
+        status: 200
+        json:
+          object: list
+          model: "{model}"
+          data: [{ object: embedding, index: 0, embedding: [0.0023, -0.0094, 0.0153] }]
+          usage: { prompt_tokens: 1, total_tokens: 1 }

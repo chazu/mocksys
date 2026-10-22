@@ -16,6 +16,8 @@ Runnable contracts and a conform corpus that back the
 | [`https.yaml`](https.yaml)                   | An **HTTPS** mock: `tls: true` serves it with a certificate from the mocksys CA, which `mocksys tls ca` prints for the client to trust. Add the same line to `grpc-todos/contract.yaml` for gRPC over TLS. |
 | [`chat.yaml`](chat.yaml)                     | **Server-sent events and WebSockets**: a chat room served as an SSE stream and as a WebSocket. A POST, or a `say` message on the socket (a `MESSAGE` operation), stores the message and `publish`es it to the room's channel, which both receive. |
 | [`okta-corpus.json`](okta-corpus.json)       | A request corpus for `mocksys conform` — golden expectations for the Okta twin.                                                                                          |
+| [`bifrost/`](bifrost/)                       | The **Bifrost LLM-gateway twin** from `mocksys kit bifrost`. `client.js` walks it as an app and an admin would: a chat completion with a virtual key, 401s for a missing or inactive key, a key created on the control plane and used at once, then revoked, and a per-key rate limit running out. `virtual-keys.json` seeds your own keys with `--virtual-keys`; `corpus.json` is its `conform` corpus. |
+| [`llm-rate-limits.yaml`](llm-rate-limits.yaml) | **Rate limits shaped like an OpenAI-style API**, by hand: a `limit` that counts per `x-api-key` and renames its headers to `x-ratelimit-*-requests`, and a `crud-collection` gene whose `rate-limit` sets `key-source`, `miss` and `headers`. |
 
 ## Quick start
 
@@ -93,6 +95,25 @@ node -e 'const w=new WebSocket("ws://localhost:9180/rooms/lobby/socket");
   w.onmessage=e=>console.log(e.data); w.onopen=()=>w.send(JSON.stringify({type:"ping"}));
   setTimeout(()=>w.close(),500)'                                     # welcome, pong
 mocksys assert demo/chat --saw 'MESSAGE /rooms/lobby/socket'
+```
+
+```sh
+# the Bifrost LLM-gateway twin, with a 3-request budget per virtual key
+mocksys kit bifrost --rate-limit 3 --port 9300
+mocksys run bifrost/bifrost
+node examples/bifrost/client.js http://localhost:9300       # 200, 401s, create/use/revoke a key, then 429
+mocksys conform bifrost/bifrost --corpus examples/bifrost/corpus.json
+mocksys clock bifrost/bifrost advance 1m                     # a new window: the budget resets
+
+# the same twin seeded with your own virtual keys
+mocksys kit bifrost --scenario bifrost/custom --virtual-keys examples/bifrost/virtual-keys.json --port 9310
+mocksys run bifrost/custom
+curl -X POST localhost:9310/v1/chat/completions -H 'x-bf-vk: sk-bf-ci-000000000000' -d '{"model":"gpt-4o-mini"}'
+
+# OpenAI-style rate limits, hand-authored
+mkdir -p .mocks/demo/llm-limits && cp examples/llm-rate-limits.yaml .mocks/demo/llm-limits/contract.yaml
+mocksys run demo/llm-limits --port 9190
+curl -si -X POST localhost:9190/v1/embeddings -H 'x-api-key: team-a' -d '{"model":"m"}' | grep -i x-ratelimit
 ```
 
 ```sh

@@ -18,12 +18,14 @@ A **kit** generates a complete, runnable contract — often stateful — in one 
 ```sh
 mocksys kit okta                          # Okta twin: users & groups CRUD + OIDC
 mocksys kit oauth2 --provider github      # OAuth2 provider: picker, single-use codes, userinfo
+mocksys kit bifrost                       # Bifrost LLM gateway: chat completions + virtual keys
 ```
 
 | Kit | Options | Produces |
 |---|---|---|
 | `okta` | `--users FILE.json` `--rate-limit N` `--rate-window S` `--token-ttl S` `--issuer URL` `--signing-key FILE.pem` `--scenario NAME` `--port N` | users + groups CRUD (SCIM filter, pagination), group membership (assign/unassign + list either side, hydrated & paginated), Okta error envelope, OIDC authorize/token/userinfo minting **signed RS256 JWTs** with published JWKS + discovery — all on one stateful imposter. `--rate-limit` adds 429s, `--token-ttl` sets the OIDC token lifetime on the virtual clock (default 3600 s), `--signing-key` pins the JWT key, `--issuer` sets the JWT `iss`/`aud` for requests that carry no `Host` header. |
 | `oauth2` | `--provider github\|codeberg` `--users FILE.json` `--token-ttl S` `--scenario NAME` `--port N` | an OAuth2 provider: account picker, single-use authorization codes, a token table, a bound userinfo endpoint. A YAML kit over the `oauth2-provider` gene. |
+| `bifrost` | `--virtual-keys FILE.json` `--rate-limit N` `--rate-window S` `--scenario NAME` `--port N` | the [Bifrost](https://github.com/maximhq/bifrost) LLM gateway: an OpenAI-compatible `POST /v1/chat/completions` that returns a canned completion to callers with a valid `x-bf-vk` virtual key, plus control-plane CRUD for virtual keys and providers. A key created on the control plane works for chat at once. `--rate-limit` gives each virtual key a request budget (`429` + `x-ratelimit-*-requests`). See [the anatomy](#anatomy-of-the-bifrost-twin). |
 | yours | the flags your kit declares, plus `--scenario NAME` `--port N` | whatever its contract template describes. See [Writing a kit](#writing-a-kit). |
 
 The default scenario id is `oauth/<provider>` for `oauth2` and `<kit>/<kit>` for any
@@ -164,7 +166,8 @@ CLI at build time. Its provider-shaped paths (`/github/login/oauth/...`), defaul
 and account index come from the `oauth2-provider` gene, because whole-value substitution
 cannot build `"/{provider}/login/..."`. The `okta` kit stays a builder function in
 `src/mocksys/kits.cljs`. It generates an RSA signing key on each `kit` run and publishes the
-derived JWK, which a fixed template cannot do.
+derived JWK, which a fixed template cannot do. The `bifrost` kit is a builder function in
+the same file.
 
 ## Genes
 
@@ -186,7 +189,7 @@ mocksys genes        # every gene with its params, and what is built in rather t
 
 | Gene | Behavior | Required params |
 |---|---|---|
-| `crud-collection` | A REST resource: create / list / get / update / delete, SCIM filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). `rate-limit: {max, window}` adds a per-client budget. | `coll`, `base` |
+| `crud-collection` | A REST resource: create / list / get / update / delete, SCIM filter + cursor pagination, over a seeded [collection](effects.md#collections-crud-resources). `rate-limit: {max, window}` adds a per-client budget; `key-source` (a [bind](effects.md) spec, default the bearer token) picks what to count by, `miss` replaces the Okta-shaped `429`, and `headers: {limit, remaining, reset}` renames the `X-Rate-Limit-*` headers. | `coll`, `base` |
 | `oidc-handshake` | OAuth2/OIDC: authorize (account picker + single-use code), token exchange, bearer userinfo. Users come from a **seed array** (`seed-name`, `users`) or, with `user-source: {collection, login-field, active-only, claims}`, from a **live collection** with a dynamic picker and `status`-gated issuance. Optional `token-ttl`. | `authz`, `token`, `userinfo` |
 | `membership` | A many-to-many relation between two collections: assign/unassign (idempotent, foreign-key-guarded) + list either side, [hydrated and cursor-paginated](effects.md#joins-lookups-signing-rendering-extended-verbs). | none |
 | `oauth2-provider` | A GitHub- or Codeberg-shaped OAuth2 provider: `oidc-handshake` over seed accounts at `/<provider>/login/oauth/...`, the provider's userinfo path, its default accounts (or `users`), and an account index at `/`. The `oauth2` kit is this gene plus flags. | none |
@@ -195,7 +198,7 @@ Some behavior is not a standalone gene. `mocksys genes` lists where each piece l
 
 | Capability | Where it lives |
 |---|---|
-| `rate-limit` | `crud-collection`'s `rate-limit` param, or a hand-written [`limit`](effects.md#limit--rate-limiting). A budget over a virtual-clock window, then `429` + `X-Rate-Limit-*`. |
+| `rate-limit` | `crud-collection`'s `rate-limit` param, or a hand-written [`limit`](effects.md#limit--rate-limiting). A budget over a virtual-clock window, then `429` + `X-Rate-Limit-*`, or the names given in `headers`. |
 | `error-envelope` | The default `not-found` and `invalid-filter` responses of `crud-collection` and `membership` (Okta `errorCode`/`errorSummary`). Override them with those params. |
 | `virtual-clock` | The contract's `state.clock`, or implied by `store.ttl`, `limit`, `sign` or a `now` bind ([effects.md](effects.md#the-virtual-clock)). `mocksys clock` moves it. |
 | `jwt-signing` | The [`sign`](effects.md#sign--issue-a-signed-jwt-non-terminal) verb. `kit okta` wires it with an RSA key generated at kit time, so it is an option only code can pass to `oidc-handshake`, not a YAML param. |
@@ -317,6 +320,68 @@ The full surface, on one stateful imposter. `4xx` misses return the Okta error e
 ```sh
 mocksys kit okta --users my-users.json     # a JSON array of user objects, replacing the defaults
 ```
+
+### Anatomy of the `bifrost` twin
+
+`kit bifrost` is a twin of the [Bifrost](https://github.com/maximhq/bifrost) LLM gateway,
+for testing code that calls an LLM through Bifrost without a gateway or any model
+provider. Completions are canned: there is no inference, and every reply is the same
+short assistant message. It composes:
+
+- `crud-collection` for **virtual keys** at `/api/governance/virtual-keys` (id prefix
+  `vk_`, default `status: active`), seeded with an active key `sk-bf-live-0000000000` and
+  an inactive key `sk-bf-off-00000000000`, or with your own via `--virtual-keys FILE.json`.
+- `crud-collection` for **providers** at `/api/providers` (id prefix `prov_`), seeded
+  empty. Nested fields such as `keys[]` round-trip as written.
+- a **chat-completions** operation at `POST /v1/chat/completions`. It looks the `x-bf-vk`
+  header up by the `value` field of the **live** virtual-keys collection, limited to
+  `status eq "active"`, and answers `401` when no key matches. Otherwise it returns an
+  OpenAI-shaped `chat.completion`: a minted `chatcmpl-` id, the request's `model` echoed
+  back, fixed `usage` token counts, and Bifrost's `extra_fields` envelope.
+- with `--rate-limit N`, a [`limit`](effects.md#limit--rate-limiting) on the chat operation
+  keyed on the virtual key: `N` requests per `--rate-window` seconds (default 60), then
+  `429` with `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests` and
+  `x-ratelimit-reset-requests`.
+- an OpenAI-shaped error body, `{"error": {"message", "type", "code", "param"}}`, on every
+  `401`, `404` and `429`.
+
+The chat operation reads the same collection the control plane writes, so an admin flow and
+an app flow can share one twin:
+
+```sh
+mocksys kit bifrost --rate-limit 3 --port 9300
+mocksys run bifrost/bifrost
+B=http://localhost:9300
+curl -X POST "$B/v1/chat/completions" -H 'x-bf-vk: sk-bf-live-0000000000' \
+     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'       # 200, model echoed
+curl -X POST "$B/api/governance/virtual-keys" -d '{"value":"sk-bf-new","name":"ci"}'  # 201, active
+curl -X POST "$B/v1/chat/completions" -H 'x-bf-vk: sk-bf-new' -d '{"model":"gpt-4o"}'  # 200 at once
+curl -X POST "$B/api/governance/virtual-keys/<id>" -d '{"status":"inactive"}'         # revoke it
+curl -X POST "$B/v1/chat/completions" -H 'x-bf-vk: sk-bf-new' -d '{"model":"gpt-4o"}'  # 401
+```
+
+To point an OpenAI-compatible client at it, set the client's base URL to `$B/v1` and send
+the virtual key as an `x-bf-vk` header on every request. [`examples/bifrost/`](../examples/bifrost/) has a client
+that walks all of this, a `--virtual-keys` file and a `conform` corpus.
+
+**Endpoint reference.** `4xx` misses return the OpenAI-shaped error body.
+
+| Method | Path | Behavior | Status |
+|---|---|---|---|
+| `POST` | `/v1/chat/completions` | A canned completion for a caller with an active `x-bf-vk` key. | `200` · `401` · `429` |
+| `POST` | `/api/governance/virtual-keys` | Create a virtual key (id minted `vk_…`; defaults to `active`; the client supplies `value`). | `201` |
+| `GET` | `/api/governance/virtual-keys` | List / filter / paginate keys (`?filter=status eq "active"`). | `200` |
+| `GET` | `/api/governance/virtual-keys/{id}` | Get one key. | `200` · `404` |
+| `POST` | `/api/governance/virtual-keys/{id}` | Merge-patch a key, e.g. `{"status":"inactive"}` to revoke it. | `200` · `404` |
+| `DELETE` | `/api/governance/virtual-keys/{id}` | Delete a key. | `204` · `404` |
+| `POST` `GET` `DELETE` | `/api/providers[/{id}]` | The same CRUD shape for provider configs (id minted `prov_…`). | as above |
+| `POST` | `/_mocksys/clock` | The virtual clock, present with `--rate-limit`. Drive it with `mocksys clock bifrost/bifrost`. | `200` |
+
+> **Fidelity:** not yet checked against a real Bifrost. The error body, the
+> `extra_fields` keys and the rate-limit header names copy OpenAI's conventions and may
+> differ from Bifrost's. A created key keeps the `value` the client sends; Bifrost mints
+> its own `sk-bf-*` secret. Teams, customers, budgets, the provider-prefixed routes
+> (`/openai/...`, `/anthropic/...`) and streaming are not modelled yet.
 
 ## conform — the fidelity loop
 

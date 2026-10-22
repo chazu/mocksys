@@ -228,3 +228,32 @@
              (mapv #(get % "id")
                    (:json (h/run-op c "list-users" {:path "/api/v1/users"
                                                     :query {:filter "status eq \"ACTIVE\""}} state))))))))
+
+;; --- the OpenAI-style rate-limit example -----------------------------------------
+
+(def ^:private llm-limits
+  (js->clj (yaml/load (fs/readFileSync "examples/llm-rate-limits.yaml" "utf8"))))
+
+(deftest the-llm-rate-limits-example-renames-headers-and-keys-on-the-api-key
+  (testing "it validates"
+    (is (= {:errors [] :warnings []} (contract/validate llm-limits))))
+  (let [c     (contract/expand llm-limits)
+        state (h/fresh-state)
+        embed #(h/run-op c "embeddings" {:method "POST" :path "/v1/embeddings"
+                                         :headers {:x-api-key %} :body {"model" "m"}} state)
+        files #(h/run-op c "list-files" {:path "/v1/files" :headers {:x-api-key %}} state)]
+    (testing "the authored limit counts per x-api-key under OpenAI-style header names"
+      (is (= "1" (get-in (embed "team-a") [:headers "x-ratelimit-remaining-requests"])))
+      (is (= 200 (:status (embed "team-a"))))
+      (let [r (embed "team-a")]
+        (is (= 429 (:status r)))
+        (is (= "rate_limit_exceeded" (get-in r [:json "error" "code"])))
+        (is (nil? (get-in r [:headers "X-Rate-Limit-Limit"]))))
+      (is (= 200 (:status (embed "team-b")))))
+    (testing "the gene's rate-limit takes key-source, miss and headers"
+      (dotimes [_ 3] (files "team-a"))
+      (let [r (files "team-a")]
+        (is (= 429 (:status r)))
+        (is (= "rate_limit_exceeded" (get-in r [:json "error" "code"])))
+        (is (= "3" (get-in r [:headers "x-ratelimit-limit-requests"]))))
+      (is (= 200 (:status (files "team-b")))))))
