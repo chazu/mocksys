@@ -16,6 +16,7 @@ that builds a digital twin of Okta and explains every part as it goes.
 | Doc | What it covers |
 |---|---|
 | [walkthrough.md](walkthrough.md) | **Start here.** A narrated tour: stand up an Okta twin (CRUD, filtering, OIDC, rate limits, expiring tokens) and understand each piece. |
+| [GUIDE.md](../GUIDE.md) | **Build your own.** Assemble a twin layer by layer from the primitives, package it as a kit, then as a Docker image. |
 | [architecture.md](architecture.md) | The system: modules, the contract→imposter→daemon pipeline, the on-disk store, the runtime, stateless vs stateful. |
 | [contracts.md](contracts.md) | The `contract.yaml` format: operations, request matching, responses, named examples, response templating, SSE and WebSocket streams, transport faults, validation. |
 | [effects.md](effects.md) | The declarative **stateful** layer — the `effect` language. State buckets and resource **collections**, every verb, the SCIM filter grammar, pagination, the **virtual clock** + TTL, **rate limiting**, streams and `publish`, and how the daemon runs an effect. |

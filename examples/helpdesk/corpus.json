@@ -1,0 +1,17 @@
+[
+  { "method": "GET",  "path": "/v2/status", "expect": 200 },
+  { "method": "POST", "path": "/oauth/token",
+    "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+    "body": "client_id=ci_acme&client_secret=s3cret", "expect": 200 },
+  { "method": "POST", "path": "/oauth/token",
+    "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+    "body": "client_id=ci_acme&client_secret=wrong", "expect": 401 },
+  { "method": "POST", "path": "/v2/tickets",
+    "headers": { "Content-Type": "application/json" },
+    "body": { "subject": "no token" }, "expect": 401 },
+  { "method": "GET",  "path": "/v2/tickets", "expect": 200 },
+  { "method": "GET",  "path": "/v2/tickets?filter=priority%20eq%20%22urgent%22", "expect": 200 },
+  { "method": "GET",  "path": "/v2/tickets/tkt_001", "expect": 200 },
+  { "method": "GET",  "path": "/v2/tickets/tkt_missing", "expect": 404 },
+  { "method": "GET",  "path": "/v2/tickets?filter=status%20zz%201", "expect": 400 }
+]

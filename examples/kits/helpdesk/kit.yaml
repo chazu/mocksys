@@ -1,0 +1,100 @@
+# The helpdesk twin from GUIDE.md as a directory kit: kit.yaml plus the verb module it
+# ships. It is a made-up ticketing API, assembled from every layer of primitives:
+#
+#   static     GET /v2/status, with named examples and request templating
+#   effects    a client-credentials token exchange (find + mint + store with a TTL)
+#   gene       crud-collection for /v2/tickets (list/filter/paginate/get/update/delete)
+#   shadowing  a hand-written POST /v2/tickets that authenticates, rate-limits, stamps
+#              an SLA with a custom verb, creates the row and publishes it
+#   stream     GET /v2/events, a server-sent event stream of created tickets
+#
+#   export MOCKSYS_HOME=./.mocks
+#   mkdir -p .mocks/kits && cp -R examples/kits/helpdesk .mocks/kits/
+#   mocksys kit helpdesk --rate-limit 3 --port 9400
+#   mocksys run helpdesk/helpdesk
+#   mocksys conform helpdesk/helpdesk --corpus examples/helpdesk/corpus.json
+name: helpdesk
+doc: a ticketing API with client-credentials auth, SLAs and live ticket events
+flags:
+  token-ttl: 3600                       # access-token lifetime, virtual seconds
+  rate-limit: 5                         # ticket creations per token per window
+  rate-window: 60                       # rate-limit window, virtual seconds
+  clock-start: "2026-01-05T09:00:00Z"   # where the virtual clock starts
+contract:
+  modules: [./verbs.js]
+  state:
+    clock: { start: "{clock-start}" }
+    collections:
+      clients: { idField: id, seed: clients }
+  seed:
+    clients:
+      - { id: ci_acme, secret: s3cret, name: Acme Corp }
+      - { id: ci_globex, secret: hunter2, name: Globex }
+    tickets:
+      - { id: tkt_001, subject: "Printer on fire", priority: urgent, status: open, requester: ci_acme }
+      - { id: tkt_002, subject: "Password reset", priority: low, status: closed, requester: ci_globex }
+  genes:
+    - crud-collection:
+        coll: tickets
+        base: /v2/tickets
+        seed-name: tickets
+        id-prefix: tkt_
+        create-defaults: { status: open }
+        not-found: { status: 404, json: { error: { code: not_found, message: "no such ticket" } } }
+        invalid-filter: { status: 400, json: { error: { code: bad_filter, message: "{filterError}" } } }
+  operations:
+    - id: status
+      summary: service health
+      request: { method: GET, path: /v2/status }
+      responses:
+        - status: 200
+          headers: { Content-Type: application/json, X-Request-Id: "{{request.headers.x-request-id}}" }
+          examples:
+            ok:       { select: true,  body: { status: ok } }
+            degraded: { select: false, body: { status: degraded, detail: "ticket search is slow" } }
+
+    - id: token
+      summary: client-credentials token exchange
+      request: { method: POST, path: /oauth/token }
+      effect:
+        bind:    { cid: { body: client_id }, secret: { body: client_secret } }
+        find:
+          collection: clients
+          key: "{cid}"
+          filter: 'secret eq "{secret}"'
+          as: client
+          miss: { status: 401, json: { error: invalid_client } }
+        mint:    { token: { prefix: "hd_" } }
+        store:   { bucket: tokens, key: "{token}", value: "{cid}", ttl: "{token-ttl}" }
+        respond: { json: { access_token: "{token}", token_type: Bearer, expires_in: "{token-ttl}" } }
+
+    - id: create-ticket
+      summary: open a ticket (authenticated, rate-limited, SLA-stamped, broadcast)
+      request: { method: POST, path: /v2/tickets }
+      effect:
+        bind:   { auth: { header: authorization, bearer: true }, incoming: { bodyJson: true } }
+        limit:
+          bucket: rl
+          key: "{auth}"
+          max: "{rate-limit}"
+          window: "{rate-window}"
+          miss: { status: 429, json: { error: { code: rate_limited, message: "slow down" } } }
+        lookup:
+          bucket: tokens
+          key: "{auth}"
+          as: cid
+          miss: { status: 401, json: { error: { code: unauthorized, message: "bad or expired token" } } }
+        call:   { verb: slaDue, args: { priority: "{incoming.priority}" }, as: sla }
+        mint:   { id: { prefix: "tkt_" } }
+        create:
+          collection: tickets
+          merge: [incoming, sla]
+          body: { id: "{id}", status: open, requester: "{cid}" }
+          as: ticket
+        publish: { channel: tickets, event: ticket.created, id: "{id}", dataVar: ticket }
+
+    - id: events
+      summary: live ticket events (server-sent events)
+      request: { method: GET, path: /v2/events }
+      effect:
+        sse: { channel: tickets, keepAlive: 15000 }

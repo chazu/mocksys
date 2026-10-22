@@ -1,0 +1,12 @@
+# Keep the Docker build context to the sources the images copy.
+.git
+node_modules
+out
+dist
+.shadow-cljs
+.cpcache
+.mocks
+.claude
+*.log
+*.pid
+*.mock.tgz

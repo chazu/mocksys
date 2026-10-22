@@ -325,6 +325,7 @@ and `docs/` for depth).
 This README is the quick start. The full reference manual lives in [`docs/`](docs/index.md):
 
 - [docs/walkthrough.md](docs/walkthrough.md) — **start here:** a friendly end-to-end tour that builds an Okta twin and explains every part.
+- [GUIDE.md](GUIDE.md) — build your own twin from the primitives (static operations, effects, genes, custom verbs), make it a kit, and ship it as a Docker image.
 - [docs/architecture.md](docs/architecture.md) — modules, the contract→imposter→daemon pipeline, the store, the runtime.
 - [docs/contracts.md](docs/contracts.md) — the `contract.yaml` format: matching, responses, examples, templating, streams, faults, validation.
 - [docs/effects.md](docs/effects.md) — the stateful `effect` language: state buckets and resource collections, every verb, the SCIM filter grammar, pagination, streams and `publish`.

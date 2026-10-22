@@ -1,0 +1,35 @@
+# The helpdesk twin beside a consumer. The consumer reaches the twin by service name,
+# and starts only once the twin's healthcheck passes. Build both images first (see
+# Dockerfile), then:
+#
+#   docker compose -f examples/helpdesk/compose.yaml up --abort-on-container-exit
+services:
+  helpdesk:
+    image: helpdesk-twin
+    ports: ["8080:8080"]
+
+  # Stands in for your app: it takes a token and opens a ticket.
+  app:
+    image: node:22-bookworm-slim
+    depends_on:
+      helpdesk: { condition: service_healthy }
+    environment:
+      HELPDESK_URL: http://helpdesk:8080
+    command:
+      - node
+      - -e
+      - |
+        const base = process.env.HELPDESK_URL;
+        (async () => {
+          const tok = await (await fetch(base + "/oauth/token", {
+            method: "POST",
+            body: new URLSearchParams({ client_id: "ci_acme", client_secret: "s3cret" }),
+          })).json();
+          const res = await fetch(base + "/v2/tickets", {
+            method: "POST",
+            headers: { authorization: "Bearer " + tok.access_token, "content-type": "application/json" },
+            body: JSON.stringify({ subject: "from compose", priority: "urgent" }),
+          });
+          console.log(res.status, await res.text());
+          process.exit(res.status === 201 ? 0 : 1);
+        })();
